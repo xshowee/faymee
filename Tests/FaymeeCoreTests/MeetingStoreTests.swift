@@ -125,4 +125,25 @@ private func date(_ iso: String) -> Date {
         #expect(items[1]["reason"] as? String == "lidClosed")
         #expect(items[2]["original"] as? String == "灰来了")
     }
+
+    /// 修改后退出 App 再打开（换一个 MeetingStore 实例读同一目录），修改仍在；恢复原文同样持久
+    @Test func 编辑后重启仍在() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        var transcript = Transcript(
+            engine: "fake/1", createdAt: date("2026-11-10T03:00:00Z"), hotwords: [],
+            items: [.sentence(.init(id: "s1", start: 0.48, end: 3.2, text: "灰来了"))])
+        try store.saveTranscript(transcript, for: m.id)
+
+        transcript.edit(sentence: "s1", to: "回来了")
+        try store.saveTranscript(transcript, for: m.id)
+        var reopened = try #require(try MeetingStore(root: store.root).loadTranscript(m.id))
+        #expect(reopened.sentences == [.init(id: "s1", start: 0.48, end: 3.2, text: "回来了", original: "灰来了")])
+
+        reopened.restore(sentence: "s1")
+        try store.saveTranscript(reopened, for: m.id)
+        let restored = try #require(try MeetingStore(root: store.root).loadTranscript(m.id))
+        #expect(restored.sentences == [.init(id: "s1", start: 0.48, end: 3.2, text: "灰来了")])
+    }
 }
