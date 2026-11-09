@@ -17,3 +17,17 @@
 - **footer**（可选）：
   - 破坏性变更：`BREAKING CHANGE: <简短说明>`，空一行后写详细描述和迁移方法
   - 废弃：`DEPRECATED: <简短说明>`，空一行后写详细描述和推荐的替代用法
+
+## Agent skills
+
+### Issue tracker
+
+Issue 以本地 markdown 文件形式存放在 `.scratch/<feature>/` 下。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用默认的五个角色标签（`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`），记录在每个 issue 文件的 `Status:` 行中。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+Single-context：仓库根目录下一个 `GLOSSARY.md` 和 `docs/adr/`。详见 `docs/agents/domain.md`。
