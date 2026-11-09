@@ -9,7 +9,9 @@ let package = Package(
         // build.sh 只需拷贝一个可执行文件
         .target(name: "FaymeeCore", path: "Sources/FaymeeCore"),
         .executableTarget(name: "Faymee", dependencies: ["FaymeeCore"], path: "Sources/Faymee"),
-        .testTarget(name: "FaymeeCoreTests", dependencies: ["FaymeeCore"], path: "Tests/FaymeeCoreTests"),
+        // Resources/ 放契约测试用的真实录音
+        .testTarget(name: "FaymeeCoreTests", dependencies: ["FaymeeCore"], path: "Tests/FaymeeCoreTests",
+                    resources: [.copy("Resources")]),
     ],
     swiftLanguageModes: [.v5]
 )
