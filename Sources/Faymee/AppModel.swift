@@ -243,7 +243,7 @@ final class AppModel {
         update(m)
 
         let output = store.directory(id).appendingPathComponent("recording.m4a")
-        let result: Result<TimeInterval, Error>
+        let result: Result<FinalizeResult, Error>
         do {
             result = .success(try await Finalizer.export(segments: store.segmentFiles(id), to: output))
         } catch {
@@ -253,9 +253,10 @@ final class AppModel {
         // 导出期间用户可能改了标题，重新取最新状态
         guard var latest = meeting(id) else { return }
         switch result {
-        case let .success(duration):
+        case let .success(finalized):
             latest.recording = output.lastPathComponent
-            latest.duration = duration
+            latest.duration = finalized.duration
+            latest.recordPlacements(finalized.placements)
             latest.status = .done
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
