@@ -187,6 +187,23 @@ private final class Fixture {
         #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
     }
 
+    @Test func 修改热词只影响之后开始的转写() async throws {
+        let f = Fixture(FakeTranscriber([.init(start: 0, end: 5, text: "嗯")]))
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        f.pipeline.hotwords = ["旧词"]
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueue("m2")
+        // m1 已开始、m2 还在排队时改热词
+        f.pipeline.hotwords = ["新词"]
+        try await f.drain()
+
+        #expect(f.engine.calls.map(\.hotwords) == [["旧词"], ["新词"]])
+        #expect(try f.store.loadTranscript("m1")?.hotwords == ["旧词"])
+        #expect(try f.store.loadTranscript("m2")?.hotwords == ["新词"])
+    }
+
     @Test func 准备引擎失败时会议标为失败() async throws {
         let engine = FakeTranscriber([.init(start: 0, end: 5, text: "不该出现")])
         engine.prepareError = EngineError()
