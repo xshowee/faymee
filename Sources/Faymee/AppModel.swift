@@ -58,6 +58,18 @@ final class AppModel {
     @ObservationIgnored private var silentSince: Date?
     @ObservationIgnored private var silenceNotified = false
     @ObservationIgnored private var lastStallRestart = Date.distantPast
+    /// 启动时的中断恢复和转写恢复是否已完成，之前不开始转写
+    @ObservationIgnored private var launchRecovered = false
+
+    /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
+    /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
+    @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
+        let engine = TranscriptionEngine.make()
+        let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
+                                             engine: engine.name, host: self)
+        pipeline.isSuspended = true
+        return pipeline
+    }()
 
     init() {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
@@ -75,7 +87,12 @@ final class AppModel {
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
         Notifier.setUp()
-        Task { await recoverInterrupted() }
+        Task {
+            await recoverInterrupted()
+            transcription.restore(meetings)
+            launchRecovered = true
+            syncTranscriptionSuspension()
+        }
     }
 
     // MARK: - 录音
@@ -92,10 +109,13 @@ final class AppModel {
             let m = try store.create(startedAt: Date())
             meetings.insert(m, at: 0)
             current = m
+            // 录音可靠性优先：正在进行的转写立即取消，放回队首，录完整理好再继续
+            syncTranscriptionSuspension()
             do {
                 try recorder.start(directory: store.segmentsDirectory(m.id))
             } catch {
                 current = nil
+                syncTranscriptionSuspension()
                 var failed = m
                 failed.status = .failed
                 failed.error = error.localizedDescription
@@ -241,6 +261,8 @@ final class AppModel {
         m.status = .finalizing
         m.error = nil
         update(m)
+        syncTranscriptionSuspension()
+        defer { syncTranscriptionSuspension() }
 
         let output = store.directory(id).appendingPathComponent("recording.m4a")
         let result: Result<FinalizeResult, Error>
@@ -260,6 +282,7 @@ final class AppModel {
             latest.status = .done
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
+            transcription.enqueue(id)
         case let .failure(error):
             latest.status = .failed
             latest.error = error.localizedDescription
@@ -298,12 +321,25 @@ final class AppModel {
 
     func trash(_ id: String) {
         guard id != current?.id else { return }
+        // 先取消转写，免得转写完成时往已删除的目录里写文件
+        transcription.remove(id)
         do {
             try store.trash(id)
             meetings.removeAll { $0.id == id }
         } catch {
             lastError = "删除失败：\(error.localizedDescription)"
+            // 会议还在，把被取消的转写放回队列
+            if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
+                transcription.enqueue(id)
+            }
         }
+    }
+
+    // MARK: - 转写
+
+    /// 录音和整理期间暂停转写，启动恢复完成前也不开始
+    private func syncTranscriptionSuspension() {
+        transcription.isSuspended = !launchRecovered || isRecording || meetings.contains { $0.status == .finalizing }
     }
 
     private func update(_ m: Meeting) {
@@ -318,5 +354,14 @@ final class AppModel {
         } catch {
             lastError = "保存会议信息失败：\(error.localizedDescription)"
         }
+    }
+}
+
+/// meeting.json 只由 AppModel 写入，转写管线经这里更新转写状态
+extension AppModel: TranscriptionHost {
+    func setTranscription(_ state: TranscriptionState, for id: String) {
+        guard var m = meeting(id) else { return }
+        m.transcription = state
+        update(m)
     }
 }
