@@ -79,6 +79,17 @@ public enum Finalizer {
 }
 
 extension Meeting {
+    /// 整理成功：记下录音文件、时长和分片位置，同时标记为排队转写。
+    /// 两者要在同一次保存里：分两次写的话，中间崩溃这场会议就再也不会自动转写
+    /// （启动时只恢复排队中和转写中的会议）
+    public mutating func markFinalized(recording: String, _ result: FinalizeResult) {
+        self.recording = recording
+        duration = result.duration
+        recordPlacements(result.placements)
+        status = .done
+        transcription = TranscriptionState(status: .queued)
+    }
+
     /// 把整理得到的分片位置写进 segments，供之后把墙钟时间映射到录音偏移（见 RecordingTimeline）。
     /// 按文件名对应而不是按下标：Finalizer 拿到的是磁盘上的分片列表，可能与 meeting.json 不完全一致。
     /// meeting.json 里有、磁盘上没有的分片没有并入录音，记为时长 0、紧接前一个分片，

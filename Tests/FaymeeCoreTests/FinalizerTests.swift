@@ -60,4 +60,25 @@ private func writeCAF(_ url: URL, seconds: Double, sampleRate: Double = 48000) t
         #expect(m.segments.map(\.offset) == [0, 600, 600])
         #expect(m.segments.map(\.duration) == [600, 0, 300])
     }
+
+    /// 整理完成和排队转写要在同一次保存里：分两次写的话，中间崩溃这场会议就再也不会自动转写
+    /// （启动时只恢复排队中和转写中的会议）
+    @Test func 整理成功的会议同时标记为排队转写() throws {
+        let t0 = try Date("2026-11-10T02:00:00Z", strategy: .iso8601)
+        var m = Meeting(id: "m", title: "会议", startedAt: t0, status: .finalizing, segments: [
+            Segment(file: "0001.caf", startedAt: t0, sampleRate: 48000, channels: 1,
+                    device: "MacBook Pro 麦克风", deviceUID: "BuiltIn"),
+        ])
+        let dir = URL(fileURLWithPath: "/tmp/m/segments", isDirectory: true)
+
+        m.markFinalized(recording: "recording.m4a", FinalizeResult(duration: 600, placements: [
+            SegmentPlacement(file: dir.appendingPathComponent("0001.caf"), offset: 0, duration: 600),
+        ]))
+
+        #expect(m.status == .done)
+        #expect(m.recording == "recording.m4a")
+        #expect(m.duration == 600)
+        #expect(m.segments.map(\.duration) == [600])
+        #expect(m.transcription == TranscriptionState(status: .queued))
+    }
 }

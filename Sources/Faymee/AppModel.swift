@@ -12,8 +12,13 @@ final class AppModel {
     /// 多久没收到音频数据视为采集停滞，重建引擎
     static let stallAfter: TimeInterval = 5
 
-    private(set) var meetings: [Meeting] = []
-    private(set) var current: Meeting?
+    // 转写是否暂停由这几项决定，变化时统一重新计算，不靠各处手动同步
+    private(set) var meetings: [Meeting] = [] {
+        didSet { syncTranscriptionSuspension() }
+    }
+    private(set) var current: Meeting? {
+        didSet { syncTranscriptionSuspension() }
+    }
     private(set) var elapsed: TimeInterval = 0
     private(set) var levelDB: Float = -160
     private(set) var isSilent = false
@@ -31,12 +36,13 @@ final class AppModel {
         didSet {
             guard hotwordsText != oldValue else { return }
             hotwords = Hotwords.parse(hotwordsText)
-            transcription.hotwords = hotwords
             if hotwordsText != savedHotwords { scheduleHotwordsSave() }
         }
     }
     /// 整理后的热词，每次编辑只算一次
-    private(set) var hotwords: [String] = []
+    private(set) var hotwords: [String] = [] {
+        didSet { transcription.hotwords = hotwords }
+    }
     /// 热词表读不出来或没能保存，显示在热词表窗口里
     private(set) var hotwordsError: String?
 
@@ -78,7 +84,9 @@ final class AppModel {
     @ObservationIgnored private var silenceNotified = false
     @ObservationIgnored private var lastStallRestart = Date.distantPast
     /// 启动时的中断恢复和转写恢复是否已完成，之前不开始转写
-    @ObservationIgnored private var launchRecovered = false
+    @ObservationIgnored private var launchRecovered = false {
+        didSet { syncTranscriptionSuspension() }
+    }
 
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
@@ -98,7 +106,7 @@ final class AppModel {
         meetings = store.loadAll()
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
-        // init 里赋值不触发 didSet，这里补算一次
+        // 不依赖 init 里的赋值是否触发 hotwordsText 的 didSet，直接算一次
         hotwords = Hotwords.parse(hotwordsText)
         refreshDevices()
         AudioDevices.observeChanges { [weak self] in self?.refreshDevices() }
@@ -116,7 +124,6 @@ final class AppModel {
             await recoverInterrupted()
             transcription.restore(meetings)
             launchRecovered = true
-            syncTranscriptionSuspension()
         }
     }
 
@@ -133,14 +140,12 @@ final class AppModel {
         do {
             let m = try store.create(startedAt: Date())
             meetings.insert(m, at: 0)
+            // 录音可靠性优先：正在进行的转写立即取消（见 syncTranscriptionSuspension）
             current = m
-            // 录音可靠性优先：正在进行的转写立即取消，放回队首，录完整理好再继续
-            syncTranscriptionSuspension()
             do {
                 try recorder.start(directory: store.segmentsDirectory(m.id))
             } catch {
                 current = nil
-                syncTranscriptionSuspension()
                 var failed = m
                 failed.status = .failed
                 failed.error = error.localizedDescription
@@ -286,8 +291,6 @@ final class AppModel {
         m.status = .finalizing
         m.error = nil
         update(m)
-        syncTranscriptionSuspension()
-        defer { syncTranscriptionSuspension() }
 
         let output = store.directory(id).appendingPathComponent("recording.m4a")
         let result: Result<FinalizeResult, Error>
@@ -301,10 +304,7 @@ final class AppModel {
         guard var latest = meeting(id) else { return }
         switch result {
         case let .success(finalized):
-            latest.recording = output.lastPathComponent
-            latest.duration = finalized.duration
-            latest.recordPlacements(finalized.placements)
-            latest.status = .done
+            latest.markFinalized(recording: output.lastPathComponent, finalized)
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
             transcription.enqueue(id)
@@ -404,9 +404,13 @@ final class AppModel {
 
     // MARK: - 转写
 
-    /// 录音和整理期间暂停转写，启动恢复完成前也不开始
+    /// 录音和整理期间暂停转写，启动恢复完成前也不开始。
+    /// 由 meetings、current、launchRecovered 的 didSet 调用，别处不用手动同步。
+    /// 停止录音后到开始整理前，会议还是 .recording（整理在异步任务里才开始），
+    /// 也算在内，免得中间空档里转写刚开始就被取消
     private func syncTranscriptionSuspension() {
-        transcription.isSuspended = !launchRecovered || isRecording || meetings.contains { $0.status == .finalizing }
+        transcription.isSuspended = !launchRecovered || isRecording
+            || meetings.contains { $0.status == .recording || $0.status == .finalizing }
     }
 
     /// 转写完成或失败时发静音通知，录音中不发
