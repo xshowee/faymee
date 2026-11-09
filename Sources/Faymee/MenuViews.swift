@@ -53,6 +53,12 @@ struct MenuContent: View {
             }
             .buttonStyle(.plain)
 
+            Button("热词表…") {
+                openWindow(id: "hotwords")
+                NSApp.activate()
+            }
+            .buttonStyle(.plain)
+
             Button(model.isRecording ? "停止录音并退出" : "退出 Faymee") {
                 // 正在整理的录音下次启动时会自动续上
                 model.stop()

@@ -25,6 +25,21 @@ final class AppModel {
     /// 系统级休眠是否已关闭（Caffy 开启）。熄屏录音依赖它，否则系统无操作一段时间后会休眠
     private(set) var sleepDisabled = true
 
+    /// 热词表原文，编辑框直接绑定。整理后立即交给转写管线，停止输入片刻后写盘；
+    /// 只影响之后开始的转写，已有会议不会自动重转
+    var hotwordsText = "" {
+        didSet {
+            guard hotwordsText != oldValue else { return }
+            hotwords = Hotwords.parse(hotwordsText)
+            transcription.hotwords = hotwords
+            if hotwordsText != savedHotwords { scheduleHotwordsSave() }
+        }
+    }
+    /// 整理后的热词，每次编辑只算一次
+    private(set) var hotwords: [String] = []
+    /// 热词表读不出来或没能保存，显示在热词表窗口里
+    private(set) var hotwordsError: String?
+
     private(set) var inputDevices: [AudioInputDevice] = []
     private(set) var defaultInputUID: String?
     /// 用户选择的麦克风，记在 UserDefaults。录音中修改会立即切换（从新分片开始）
@@ -53,6 +68,10 @@ final class AppModel {
     var isLidGapOpen: Bool { current?.openGap != nil }
 
     @ObservationIgnored let store = MeetingStore()
+    @ObservationIgnored private let hotwordStore = HotwordStore()
+    /// 热词表文件里现在的内容（上次读到或存下的），保存前用它核对文件没被别处改过
+    @ObservationIgnored private var savedHotwords = ""
+    @ObservationIgnored private var pendingHotwordsSave: Task<Void, Never>?
     @ObservationIgnored private let recorder = Recorder()
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var silentSince: Date?
@@ -68,6 +87,7 @@ final class AppModel {
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
                                              engine: engine.name, host: self)
         pipeline.isSuspended = true
+        pipeline.hotwords = hotwords
         pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
         return pipeline
     }()
@@ -76,6 +96,10 @@ final class AppModel {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         meetings = store.loadAll()
+        reloadHotwords()
+        if let hotwordsError { lastError = hotwordsError }
+        // init 里赋值不触发 didSet，这里补算一次
+        hotwords = Hotwords.parse(hotwordsText)
         refreshDevices()
         AudioDevices.observeChanges { [weak self] in self?.refreshDevices() }
         // startEngine 总在主线程调用（开始录音、设备变化通知、定时器）
@@ -333,6 +357,48 @@ final class AppModel {
             if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
                 transcription.enqueue(id)
             }
+        }
+    }
+
+    // MARK: - 热词表
+
+    /// 从文件重新载入热词表（启动时、打开热词表窗口时），用户可能用文本编辑器改过。
+    /// 还有没写盘的修改时不载入，免得冲掉正在输入的内容
+    func reloadHotwords() {
+        guard pendingHotwordsSave == nil else { return }
+        do {
+            let text = try hotwordStore.load()
+            savedHotwords = text
+            hotwordsText = text
+            hotwordsError = nil
+        } catch {
+            hotwordsError = "读取热词表失败：\(error.localizedDescription)。在这里的修改不会保存，以免覆盖原文件"
+        }
+    }
+
+    /// 立即写盘还没保存的修改（关窗口、退出 App 时调用）
+    func saveHotwords() {
+        pendingHotwordsSave?.cancel()
+        pendingHotwordsSave = nil
+        guard hotwordsText != savedHotwords else { return }
+        do {
+            try hotwordStore.save(hotwordsText, replacing: savedHotwords)
+            savedHotwords = hotwordsText
+            hotwordsError = nil
+        } catch HotwordStoreError.changedOnDisk {
+            hotwordsError = "热词表文件在别处被修改过，这里的修改没有保存。关掉窗口再打开可载入文件里的内容"
+        } catch {
+            hotwordsError = "保存热词表失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 边输入边保存，但不必每个按键都写一次盘：停止输入片刻后再写
+    private func scheduleHotwordsSave() {
+        pendingHotwordsSave?.cancel()
+        pendingHotwordsSave = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.saveHotwords()
         }
     }
 
