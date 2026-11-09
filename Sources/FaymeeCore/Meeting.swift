@@ -70,6 +70,8 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var error: String?
     /// 可选是为了兼容没有此字段的旧 meeting.json，读写请用 lidGaps
     public var gaps: [Gap]?
+    /// 转写状态，nil 表示从未转写（含 v0.1 的旧会议）。转写内容在 transcript.json，不在这里
+    public var transcription: TranscriptionState?
 
     public var lidGaps: [Gap] {
         get { gaps ?? [] }
@@ -77,6 +79,23 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var openGap: Int? { lidGaps.lastIndex { $0.end == nil } }
+}
+
+/// 转写是建立在录音之上的独立流程，不并入 MeetingStatus：
+/// 那个表示录音本身的状态（done 意味着可以回放），转写失败不影响回放
+public struct TranscriptionState: Codable, Hashable, Sendable {
+    public enum Status: String, Codable, Sendable {
+        case queued, running, done, failed
+    }
+
+    public var status: Status
+    /// 失败原因，给用户看
+    public var error: String?
+
+    public init(status: Status, error: String? = nil) {
+        self.status = status
+        self.error = error
+    }
 }
 
 public func formatTimeRange(_ gap: Gap) -> String {

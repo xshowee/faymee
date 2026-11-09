@@ -6,6 +6,7 @@ import Foundation
 ///         meeting.json        元数据（原子写入）
 ///         segments/0001.caf   录音分片，整理完成后删除
 ///         recording.m4a       合并后的录音
+///         transcript.json     转写稿（原子写入），只由转写和编辑写入
 ///
 /// 文件系统是唯一的数据来源；分片以磁盘上的文件为准，不依赖 meeting.json 是否记全。
 public final class MeetingStore {
@@ -33,6 +34,7 @@ public final class MeetingStore {
     public func directory(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
     public func segmentsDirectory(_ id: String) -> URL { directory(id).appendingPathComponent("segments", isDirectory: true) }
     private func manifest(_ id: String) -> URL { directory(id).appendingPathComponent("meeting.json") }
+    private func transcriptURL(_ id: String) -> URL { directory(id).appendingPathComponent("transcript.json") }
 
     public func recordingURL(_ m: Meeting) -> URL? {
         m.recording.map { directory(m.id).appendingPathComponent($0) }
@@ -66,6 +68,18 @@ public final class MeetingStore {
             return try? decoder.decode(Meeting.self, from: data)
         }
         .sorted { $0.startedAt > $1.startedAt }
+    }
+
+    /// 还没有转写稿时返回 nil；文件存在但读不了时抛错，免得界面把“坏了”当成“没有”
+    public func loadTranscript(_ id: String) throws -> Transcript? {
+        let url = transcriptURL(id)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try decoder.decode(Transcript.self, from: Data(contentsOf: url))
+    }
+
+    /// 原子写入：中途崩溃不会留下半份转写稿。会议目录已不存在（被删除）时失败，不会重建目录
+    public func saveTranscript(_ t: Transcript, for id: String) throws {
+        try encoder.encode(t).write(to: transcriptURL(id), options: .atomic)
     }
 
     /// 磁盘上的录音分片，按文件名（即录制顺序）排序
