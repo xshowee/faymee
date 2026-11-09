@@ -21,7 +21,8 @@ private func date(_ iso: String) -> Date {
         m.endedAt = date("2026-11-10T03:00:00Z")
         m.status = .done
         m.segments = [Segment(file: "0001.caf", startedAt: date("2026-11-10T02:00:00Z"),
-                              sampleRate: 48000, channels: 1, device: "MacBook Pro 麦克风", deviceUID: "BuiltIn")]
+                              sampleRate: 48000, channels: 1, device: "MacBook Pro 麦克风", deviceUID: "BuiltIn",
+                              offset: 0, duration: 3540)]
         m.recording = "recording.m4a"
         m.duration = 3540
         m.lidGaps = [Gap(start: date("2026-11-10T02:10:00Z"), end: date("2026-11-10T02:11:00Z"), reason: .lidClosed)]
@@ -64,6 +65,8 @@ private func date(_ iso: String) -> Date {
         #expect(loaded.endedAt == nil)
         #expect(loaded.segments.map(\.file) == ["0001.caf"])
         #expect(loaded.segments.first?.deviceUID == nil)
+        #expect(loaded.segments.first?.offset == nil)
+        #expect(loaded.segments.first?.duration == nil)
         #expect(loaded.lidGaps.isEmpty)
         #expect(loaded.openGap == nil)
     }

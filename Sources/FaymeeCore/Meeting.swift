@@ -17,15 +17,22 @@ public struct Segment: Codable, Hashable, Sendable {
     public var channels: Int
     public var device: String
     public var deviceUID: String?
+    /// 在 recording.m4a 中的起点（秒），整理成功时写入。v0.1 的旧会议没有此字段
+    public var offset: TimeInterval?
+    /// 实际并入 recording.m4a 的音频时长（秒），被整理跳过的分片为 0。v0.1 的旧会议没有此字段
+    public var duration: TimeInterval?
 
     public init(file: String, startedAt: Date, sampleRate: Double, channels: Int,
-                device: String, deviceUID: String?) {
+                device: String, deviceUID: String?,
+                offset: TimeInterval? = nil, duration: TimeInterval? = nil) {
         self.file = file
         self.startedAt = startedAt
         self.sampleRate = sampleRate
         self.channels = channels
         self.device = device
         self.deviceUID = deviceUID
+        self.offset = offset
+        self.duration = duration
     }
 }
 
