@@ -68,6 +68,7 @@ final class AppModel {
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
                                              engine: engine.name, host: self)
         pipeline.isSuspended = true
+        pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
         return pipeline
     }()
 
@@ -340,6 +341,14 @@ final class AppModel {
     /// 录音和整理期间暂停转写，启动恢复完成前也不开始
     private func syncTranscriptionSuspension() {
         transcription.isSuspended = !launchRecovered || isRecording || meetings.contains { $0.status == .finalizing }
+    }
+
+    /// 转写完成或失败时发静音通知，录音中不发
+    private func transcriptionFinished(_ id: String, _ outcome: TranscriptionOutcome) {
+        guard let m = meeting(id),
+              let notice = TranscriptionNotice.make(for: outcome, meetingTitle: m.title, isRecording: isRecording)
+        else { return }
+        Notifier.post(notice.title, notice.body, silent: true)
     }
 
     private func update(_ m: Meeting) {
