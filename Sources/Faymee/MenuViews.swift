@@ -1,3 +1,4 @@
+import FaymeeCore
 import SwiftUI
 
 struct MenuBarLabel: View {

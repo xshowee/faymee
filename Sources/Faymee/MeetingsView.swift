@@ -1,4 +1,5 @@
 import AVKit
+import FaymeeCore
 import SwiftUI
 
 struct MeetingsView: View {

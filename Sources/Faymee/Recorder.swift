@@ -1,5 +1,6 @@
 import Accelerate
 import AVFoundation
+import FaymeeCore
 
 enum RecorderError: LocalizedError {
     case noInputDevice

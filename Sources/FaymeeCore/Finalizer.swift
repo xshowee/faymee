@@ -1,11 +1,11 @@
 import AVFoundation
 
-enum FinalizeError: LocalizedError {
+public enum FinalizeError: LocalizedError {
     case noAudio
     case cannotExport
     case durationMismatch(expected: TimeInterval, actual: TimeInterval)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noAudio: "没有录到音频"
         case .cannotExport: "无法创建导出任务"
@@ -17,9 +17,9 @@ enum FinalizeError: LocalizedError {
 
 /// 把录音分片按顺序拼接并压缩为 AAC（m4a）。
 /// 分片之间的采样率可能不同（中途换了麦克风），交给 AVFoundation 统一转换。
-enum Finalizer {
+public enum Finalizer {
     /// 返回导出文件的时长。只有时长核对无误才算成功，调用方据此决定能否删除分片
-    static func export(segments: [URL], to output: URL) async throws -> TimeInterval {
+    public static func export(segments: [URL], to output: URL) async throws -> TimeInterval {
         let composition = AVMutableComposition()
         guard let track = composition.addMutableTrack(withMediaType: .audio,
                                                       preferredTrackID: kCMPersistentTrackID_Invalid)

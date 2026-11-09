@@ -8,8 +8,8 @@ import Foundation
 ///         recording.m4a       合并后的录音
 ///
 /// 文件系统是唯一的数据来源；分片以磁盘上的文件为准，不依赖 meeting.json 是否记全。
-final class MeetingStore {
-    let root: URL
+public final class MeetingStore {
+    public let root: URL
 
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -24,21 +24,21 @@ final class MeetingStore {
         return d
     }()
 
-    init(root: URL? = nil) {
+    public init(root: URL? = nil) {
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Faymee/Meetings", isDirectory: true)
         try? FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
     }
 
-    func directory(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
-    func segmentsDirectory(_ id: String) -> URL { directory(id).appendingPathComponent("segments", isDirectory: true) }
+    public func directory(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
+    public func segmentsDirectory(_ id: String) -> URL { directory(id).appendingPathComponent("segments", isDirectory: true) }
     private func manifest(_ id: String) -> URL { directory(id).appendingPathComponent("meeting.json") }
 
-    func recordingURL(_ m: Meeting) -> URL? {
+    public func recordingURL(_ m: Meeting) -> URL? {
         m.recording.map { directory(m.id).appendingPathComponent($0) }
     }
 
-    func create(startedAt: Date) throws -> Meeting {
+    public func create(startedAt: Date) throws -> Meeting {
         let idFormat = Date.VerbatimFormatStyle(
             format: "\(year: .defaultDigits)-\(month: .twoDigits)-\(day: .twoDigits)_\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased))-\(minute: .twoDigits)-\(second: .twoDigits)",
             timeZone: .current, calendar: .current)
@@ -55,11 +55,11 @@ final class MeetingStore {
         return m
     }
 
-    func save(_ m: Meeting) throws {
+    public func save(_ m: Meeting) throws {
         try encoder.encode(m).write(to: manifest(m.id), options: .atomic)
     }
 
-    func loadAll() -> [Meeting] {
+    public func loadAll() -> [Meeting] {
         let dirs = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         return dirs.compactMap { dir in
             guard let data = try? Data(contentsOf: dir.appendingPathComponent("meeting.json")) else { return nil }
@@ -69,7 +69,7 @@ final class MeetingStore {
     }
 
     /// 磁盘上的录音分片，按文件名（即录制顺序）排序
-    func segmentFiles(_ id: String) -> [URL] {
+    public func segmentFiles(_ id: String) -> [URL] {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: segmentsDirectory(id), includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         return files.filter { $0.pathExtension == "caf" }
@@ -77,7 +77,7 @@ final class MeetingStore {
     }
 
     /// 移到废纸篓而不是直接删除，误删还能找回
-    func trash(_ id: String) throws {
+    public func trash(_ id: String) throws {
         try FileManager.default.trashItem(at: directory(id), resultingItemURL: nil)
     }
 }
