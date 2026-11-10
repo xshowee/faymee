@@ -687,6 +687,23 @@ private final class Fixture {
         #expect(try f.store.loadMinutes("edited") == edited)
     }
 
+    /// 人工改动按修改数算：加了又删的手动条目等于没改，重新转写后照样自动重新生成
+    @Test func 重新转写后_修改数为零的纪要自动重新排队() async throws {
+        let f = Fixture()
+        f.addMeeting("m1")
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+        var minutes = try #require(try f.store.loadMinutes("m1"))
+        let id = minutes.addItem(to: .overview, text: "写错了")
+        minutes.delete(item: try #require(id))
+        try f.store.saveMinutes(minutes, for: "m1")
+        f.pipeline.isSuspended = true
+
+        try f.store.saveTranscript(makeTranscript(createdAt: at(7200)), for: "m1")
+
+        #expect(f.pipeline.transcriptionFinished("m1"))
+    }
+
     @Test func 进度只在内存里_完成和失败时回调() async throws {
         let engine = FakeGenerator()
         engine.block = true

@@ -185,7 +185,7 @@ public final class MinutesPipeline {
 
     /// 转写成功后调用，按规则决定要不要自动排队，返回是否排了队：
     /// - 自动生成开着，转写稿有效文字不少于 `minimumTextCount`
-    /// - 还没有纪要（含从未生成、上次失败），或者有纪要但没有人工改动（重新转写后出处已不准，重新生成，
+    /// - 还没有纪要（含从未生成、上次失败），或者有纪要但修改数为 0（重新转写后出处已不准，重新生成，
     ///   沿用原来的模板）。有人工改动的不动，由界面提示“转写稿已重新生成”
     /// - 纪要文件读不了时不动，免得覆盖
     @discardableResult
@@ -193,7 +193,7 @@ public final class MinutesPipeline {
         guard autoGenerate, let transcript = try? store.loadTranscript(id),
               transcript.effectiveTextCount >= Self.minimumTextCount else { return false }
         guard case let .success(existing) = Result(catching: { try store.loadMinutes(id) }),
-              !(existing?.hasManualEdits ?? false) else { return false }
+              (existing?.editCount ?? 0) == 0 else { return false }
         return enqueue(id)
     }
 
@@ -365,12 +365,5 @@ extension Transcript {
                     && !CharacterSet.symbols.contains($0)
             }
         }
-    }
-}
-
-extension Minutes {
-    /// 有人工改动（修改、删除、新增）。07 会提供正式的修改数，这里先用同样的规则
-    var hasManualEdits: Bool {
-        sections.contains { $0.items.contains { $0.original != nil || $0.deleted || $0.origin == .manual } }
     }
 }

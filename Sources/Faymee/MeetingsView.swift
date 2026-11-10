@@ -185,7 +185,7 @@ private struct MeetingDetail: View {
                 .fixedSize()
             }
             layout {
-                MinutesPanel(meeting: meeting, minutes: minutes, loadError: minutesError, transcript: transcript,
+                MinutesPanel(meeting: meeting, minutes: $minutes, loadError: minutesError, transcript: transcript,
                              onJump: jump)
                     .modifier(PaneVisibility(isVisible: isWide || pane == .minutes))
                 TranscriptSection(meeting: meeting, playback: playback, transcript: $transcript,
