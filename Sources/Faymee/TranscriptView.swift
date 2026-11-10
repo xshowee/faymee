@@ -101,6 +101,8 @@ struct TranscriptSection: View {
                 progress("正在准备转写引擎（\(formatPercent(p))）", p)
             case let .transcribing(p):
                 progress("转写中 \(formatPercent(p))", p)
+            case let .diarizing(p):
+                progress("区分说话人中 \(formatPercent(p))", p)
             }
         } else {
             switch meeting.transcription?.status {

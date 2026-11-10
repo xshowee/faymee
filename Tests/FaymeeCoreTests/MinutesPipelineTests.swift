@@ -133,6 +133,13 @@ private final class FakeHost: MinutesHost, TranscriptionHost {
         meetings[id] = m
         try! store.save(m)
     }
+
+    func setDiarization(_ state: DiarizationState?, for id: String) {
+        guard var m = meetings[id] else { return }
+        m.diarization = state
+        meetings[id] = m
+        try! store.save(m)
+    }
 }
 
 /// 转写稿：两句一段合盖空白。createdAt 带小数秒，和真实转写一样（写盘后会丢掉小数）

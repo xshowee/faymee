@@ -66,7 +66,9 @@ private struct MeetingRow: View {
         case .finalizing:
             Text("整理中…")
         case .done:
-            if model.transcription.activity(for: meeting.id) != nil {
+            if case .diarizing = model.transcription.activity(for: meeting.id) {
+                Text("区分说话人中…")
+            } else if model.transcription.activity(for: meeting.id) != nil {
                 Text("转写中…")
             } else if model.minutes.activity(for: meeting.id) != nil {
                 Text("生成纪要中…")

@@ -57,12 +57,64 @@ private final class SlowToCancelTranscriber: Transcriber, @unchecked Sendable {
     }
 }
 
+/// 假区分说话人引擎：按脚本返回说话片段和声纹，记录收到的参数。block 为 true 时 diarize 一直等到被取消
+private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
+    let engine = "fake/diarizer"
+    let voiceprintModel = "fake/voiceprint"
+    var result = DiarizationResult(segments: [], voiceprints: [:])
+    var prepareError: Error?
+    var diarizeError: Error?
+    var block = false
+    /// 在 diarize 返回前调用，模拟区分期间别处改了文件
+    var onDiarize: (() -> Void)?
+    private(set) var calls: [(audio: URL, speakerCount: Int?)] = []
+    /// 每次进入 diarize 时 yield 一次
+    let started: AsyncStream<Void>
+    private let startedContinuation: AsyncStream<Void>.Continuation
+
+    init(_ segments: [SpeakerSegment] = [], voiceprints: [Int: Voiceprint] = [:]) {
+        result = DiarizationResult(segments: segments, voiceprints: voiceprints)
+        (started, startedContinuation) = AsyncStream.makeStream()
+    }
+
+    func prepare(progress: @escaping (Double) -> Void) async throws {
+        progress(1)
+        if let prepareError { throw prepareError }
+    }
+
+    func diarize(audio: URL, speakerCount: Int?,
+                 progress: @escaping (Double) -> Void) async throws -> DiarizationResult {
+        calls.append((audio, speakerCount))
+        startedContinuation.yield()
+        progress(0.5)
+        if block { try await Task.sleep(for: .seconds(3600)) }
+        onDiarize?()
+        if let diarizeError { throw diarizeError }
+        return result
+    }
+}
+
+/// 不理会取消的区分引擎：diarize 挂起，直到测试手动给出结果
+private final class SlowToCancelDiarizer: SpeakerDiarizer, @unchecked Sendable {
+    let engine = "slow/diarizer"
+    let voiceprintModel = "slow/voiceprint"
+    var continuation: CheckedContinuation<DiarizationResult, Error>?
+
+    func prepare(progress: @escaping (Double) -> Void) async throws {}
+
+    func diarize(audio: URL, speakerCount: Int?,
+                 progress: @escaping (Double) -> Void) async throws -> DiarizationResult {
+        try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+}
+
 /// 代替 AppModel：会议元数据的唯一写入者，记录转写状态的每次变化
 @MainActor
 private final class FakeHost: TranscriptionHost {
     let store: MeetingStore
     var meetings: [String: Meeting] = [:]
     private(set) var history: [String: [TranscriptionState.Status]] = [:]
+    private(set) var diarizationHistory: [String: [DiarizationState.Status?]] = [:]
 
     init(store: MeetingStore) { self.store = store }
 
@@ -75,6 +127,14 @@ private final class FakeHost: TranscriptionHost {
         history[id, default: []].append(state.status)
         try! store.save(m)
     }
+
+    func setDiarization(_ state: DiarizationState?, for id: String) {
+        guard var m = meetings[id] else { return }
+        m.diarization = state
+        meetings[id] = m
+        diarizationHistory[id, default: []].append(state?.status)
+        try! store.save(m)
+    }
 }
 
 @MainActor
@@ -83,13 +143,16 @@ private final class Fixture {
         .appendingPathComponent("FaymeeCoreTests-\(UUID().uuidString)", isDirectory: true))
     let host: FakeHost
     let engine: FakeTranscriber
+    let diarizer: FakeDiarizer?
     let pipeline: TranscriptionPipeline
     private(set) var finished: [(id: String, outcome: TranscriptionOutcome)] = []
 
-    init(_ engine: FakeTranscriber = FakeTranscriber()) {
+    init(_ engine: FakeTranscriber = FakeTranscriber(), diarizer: FakeDiarizer? = nil) {
         host = FakeHost(store: store)
         self.engine = engine
-        pipeline = TranscriptionPipeline(store: store, transcriber: engine, engine: "fake/1", host: host)
+        self.diarizer = diarizer
+        pipeline = TranscriptionPipeline(store: store, transcriber: engine, engine: "fake/1", diarizer: diarizer,
+                                         host: host)
         pipeline.onFinish = { [unowned self] in self.finished.append(($0, $1)) }
     }
 
@@ -403,3 +466,461 @@ private final class Fixture {
         #expect(f.host.history.isEmpty)
     }
 }
+
+private let vp1 = Voiceprint([1, 0, 0])
+private let vp2 = Voiceprint([0, 1, 0])
+
+/// 两人对话：引擎编号 7 先开口、编号 3 后开口
+private let twoPeople = [
+    TranscribedSentence(start: 0, end: 5, text: "我们开始吧"),
+    TranscribedSentence(start: 6, end: 10, text: "好的我先说"),
+    TranscribedSentence(start: 11, end: 15, text: "你接着讲"),
+    TranscribedSentence(start: 30, end: 33, text: "没人说话时的噪声"),
+]
+private let twoPeopleSegments = [
+    SpeakerSegment(start: 0, end: 5.5, speaker: 7),
+    // 第二句横跨两人：编号 3 占 3 秒，编号 7 占 1 秒，归给 3
+    SpeakerSegment(start: 5.5, end: 7, speaker: 7),
+    SpeakerSegment(start: 7, end: 10, speaker: 3),
+    SpeakerSegment(start: 11, end: 15, speaker: 7),
+]
+
+/// v0.3 写出的转写稿：没有说话人，第二句被人工改过。createdAt 取整秒，同从磁盘读回的值
+private func legacyTranscript(createdAt: Date = at(700)) -> Transcript {
+    Transcript(engine: "fake/1", createdAt: createdAt, hotwords: ["王总"], items: [
+        .sentence(.init(id: "s1", start: 0, end: 5, text: "我们开始吧")),
+        .sentence(.init(id: "s2", start: 6, end: 10, text: "好的我先说（改过）", original: "好的我先说")),
+        .gap(.init(start: 16, end: 20, reason: .lidClosed)),
+        .sentence(.init(id: "s5", start: 11, end: 15, text: "你接着讲")),
+    ])
+}
+
+extension Fixture {
+    /// 一场已转写好（v0.3 及更早、没区分过说话人）的会议
+    @discardableResult
+    func addTranscribedMeeting(_ id: String = "m1", transcript: Transcript = legacyTranscript()) -> Meeting {
+        addMeeting(id, transcription: TranscriptionState(status: .done))
+        try! store.saveTranscript(transcript, for: id)
+        return host.meetings[id]!
+    }
+}
+
+@MainActor @Suite struct DiarizationStepTests {
+    @Test func 完整转写时区分说话人并写进转写稿() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2]))
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2", "spk1", nil])
+        #expect(t.sentences.map(\.text) == ["我们开始吧", "好的我先说", "你接着讲", "没人说话时的噪声"])
+        let d = try #require(t.diarization)
+        #expect(d.engine == "fake/diarizer")
+        #expect(d.voiceprintModel == "fake/voiceprint")
+        #expect(d.speakers.map(\.id) == ["spk1", "spk2"])
+        #expect(d.speakers.map(\.voiceprint) == [vp1, vp2])
+        #expect(d.speakers.map(\.speechDuration) == [11, 3])
+        #expect(f.diarizer?.calls.map(\.speakerCount) == [nil])
+        #expect(f.diarizer?.calls.map(\.audio) == [f.store.directory(m.id).appendingPathComponent("recording.m4a")])
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+        #expect(f.store.loadAll().first?.diarization == DiarizationState(status: .done))
+        #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    @Test func 区分失败时转写稿照常保存_说话人状态记下原因() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.diarizeError = EngineError()
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: diarizer)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.text) == ["我们开始吧", "好的我先说", "你接着讲", "没人说话时的噪声"])
+        #expect(t.diarization == nil)
+        #expect(t.sentences.allSatisfy { $0.speaker == nil })
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .failed, error: "模型加载失败"))
+        #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    @Test func 准备区分引擎失败也只让说话人失败() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.prepareError = EngineError()
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: diarizer)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(try f.store.loadTranscript(m.id)?.sentences.count == 4)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .failed, error: "模型加载失败"))
+    }
+
+    @Test func 关闭开关时不调用区分引擎_说话人状态不变() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
+        let m = f.addMeeting()
+        f.host.setDiarization(DiarizationState(status: .failed, error: "上次的原因"), for: m.id)
+        f.pipeline.diarizes = false
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(f.diarizer?.calls.isEmpty == true)
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.diarization == nil)
+        #expect(t.sentences.count == 4)
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .failed, error: "上次的原因"))
+        #expect(f.host.diarizationHistory[m.id] == [.failed])
+    }
+
+    @Test func 没有区分引擎时跳过这一步_不算失败() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(try f.store.loadTranscript(m.id)?.diarization == nil)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == nil)
+    }
+
+    @Test func 只区分说话人只写说话人_句子id文字修改记录都不动() async throws {
+        let f = Fixture(diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2]))
+        let m = f.addTranscribedMeeting()
+
+        #expect(f.pipeline.enqueueDiarization(m.id, speakerCount: 2))
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.items == [
+            .sentence(.init(id: "s1", start: 0, end: 5, text: "我们开始吧", speaker: "spk1")),
+            .sentence(.init(id: "s2", start: 6, end: 10, text: "好的我先说（改过）", original: "好的我先说", speaker: "spk2")),
+            .gap(.init(start: 16, end: 20, reason: .lidClosed)),
+            .sentence(.init(id: "s5", start: 11, end: 15, text: "你接着讲", speaker: "spk1")),
+        ])
+        #expect(t.createdAt == at(700))
+        #expect(t.engine == "fake/1")
+        #expect(t.hotwords == ["王总"])
+        #expect(t.textHash == legacyTranscript().textHash)
+        #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
+        #expect(f.diarizer?.calls.map(\.speakerCount) == [2])
+        #expect(f.engine.calls.isEmpty)
+        #expect(f.host.history[m.id] == nil)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.diarizationHistory[m.id] == [.queued, .running, .done])
+        // 不是转写完成：不回调（App 据此自动生成纪要、发“转写完成”通知）
+        #expect(f.finished.isEmpty)
+    }
+
+    @Test func 只区分说话人期间改了文字_结束时保留新文字() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        let f = Fixture(diarizer: diarizer)
+        let m = f.addTranscribedMeeting()
+        var edited = legacyTranscript()
+        edited.items[0] = .sentence(.init(id: "s1", start: 0, end: 5, text: "区分期间改的", original: "我们开始吧"))
+        let store = f.store
+        diarizer.onDiarize = { [edited] in try! store.saveTranscript(edited, for: m.id) }
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.text) == ["区分期间改的", "好的我先说（改过）", "你接着讲"])
+        #expect(t.sentences.map(\.original) == ["我们开始吧", "好的我先说", nil])
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2", "spk1"])
+    }
+
+    @Test func 只区分说话人期间转写稿被重新转写时丢弃结果() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        let f = Fixture(diarizer: diarizer)
+        let m = f.addTranscribedMeeting()
+        // 引擎读完快照、还没返回时，转写稿换成了另一份
+        let store = f.store
+        diarizer.onDiarize = { try! store.saveTranscript(legacyTranscript(createdAt: at(1000)), for: m.id) }
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t == legacyTranscript(createdAt: at(1000)))
+        #expect(f.host.meetings[m.id]?.diarization?.status == .failed)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+    }
+
+    @Test func 只区分说话人需要已有转写稿() async throws {
+        let f = Fixture(diarizer: FakeDiarizer(twoPeopleSegments))
+        let fresh = f.addMeeting("fresh")
+        f.addMeeting("transcribing", transcription: TranscriptionState(status: .done))
+
+        #expect(!f.pipeline.enqueueDiarization(fresh.id))
+        // 状态是完成但转写稿文件不在
+        #expect(!f.pipeline.enqueueDiarization("transcribing"))
+        #expect(!f.pipeline.enqueueDiarization("不存在"))
+        #expect(f.pipeline.isIdle)
+        #expect(f.host.diarizationHistory.isEmpty)
+    }
+
+    @Test func 重新区分时新说话人按句子重合沿用旧名字_每个名字最多给一个() async throws {
+        // 原来：张三说 s1、s3、s4，李四说 s2。张三是声纹认出的
+        let old = Transcript(engine: "fake/1", createdAt: at(700), hotwords: [], items: [
+            .sentence(.init(id: "s1", start: 0, end: 5, text: "一", speaker: "spk1")),
+            .sentence(.init(id: "s2", start: 6, end: 10, text: "二", speaker: "spk2")),
+            .sentence(.init(id: "s3", start: 11, end: 15, text: "三", speaker: "spk1")),
+            .sentence(.init(id: "s4", start: 16, end: 20, text: "四", speaker: "spk1", originalSpeaker: .init(speaker: "spk2"))),
+        ], diarization: Diarization(engine: "fake/diarizer", voiceprintModel: "fake/voiceprint",
+                                    speakersCreatedAt: at(800), speakers: [
+            Speaker(id: "spk1", name: "张三", nameSource: .voiceprint, personID: "p1", voiceprint: vp1, speechDuration: 13),
+            Speaker(id: "spk2", name: "李四", nameSource: .user, voiceprint: vp2, speechDuration: 4),
+        ]))
+        // 重新区分：s1 归一个新人（新 spk1），s2–s4 归另一个人（新 spk2）。
+        // 新 spk2 与张三重合 2 句、与李四 1 句；新 spk1 只与张三重合 1 句
+        let f = Fixture(diarizer: FakeDiarizer([
+            SpeakerSegment(start: 0, end: 5, speaker: 0),
+            SpeakerSegment(start: 6, end: 20, speaker: 1),
+        ]))
+        let m = f.addTranscribedMeeting(transcript: old)
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2", "spk2", "spk2"])
+        #expect(t.sentences.allSatisfy { $0.originalSpeaker == nil })
+        #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
+        // 张三给了重合最多的新 spk2，连同来源和声纹库关联；李四只和已被张三占走的 spk2 重合，不给别人
+        #expect(t.speakers.map(\.name) == [nil, "张三"])
+        #expect(t.speakers.map(\.nameSource) == [nil, .voiceprint])
+        #expect(t.speakers.map(\.personID) == [nil, "p1"])
+    }
+
+    @Test func 重新转写时按时间重合沿用旧名字() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
+        let m = f.addMeeting()
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+        var first = try #require(try f.store.loadTranscript(m.id))
+        first.diarization?.speakers[0].name = "张三"
+        first.diarization?.speakers[0].nameSource = .user
+        first.diarization?.speakers[1].name = "李四"
+        first.diarization?.speakers[1].nameSource = .user
+        try f.store.saveTranscript(first, for: m.id)
+
+        // 重新转写：句子切法、编号都变了。这次李四（引擎编号 3）先开口，成了新 spk1；
+        // 他的第一句与张三的旧句子重合，但张三与新 spk2 重合更多
+        f.engine.sentences = [
+            .init(start: 0, end: 0.5, text: "嗯"),
+            .init(start: 1, end: 5, text: "开始吧"),
+            .init(start: 6, end: 10, text: "好的我先说"),
+            .init(start: 11, end: 15, text: "你接着讲"),
+        ]
+        f.diarizer?.result = DiarizationResult(segments: [
+            SpeakerSegment(start: 0, end: 0.5, speaker: 3),
+            SpeakerSegment(start: 1, end: 5, speaker: 7),
+            SpeakerSegment(start: 6, end: 10, speaker: 3),
+            SpeakerSegment(start: 11, end: 15, speaker: 7),
+        ], voiceprints: [:])
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2", "spk1", "spk2"])
+        #expect(t.speakers.map(\.name) == ["李四", "张三"])
+    }
+
+    @Test func 区分说话人中开始录音时取消并放回队首_恢复后从头再转() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.block = true
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: diarizer)
+        let m = f.addMeeting()
+        f.pipeline.enqueue(m.id)
+        var started = diarizer.started.makeAsyncIterator()
+        await started.next()
+        try await f.until { f.pipeline.activity(for: m.id) == .diarizing(0.5) }
+
+        f.pipeline.isSuspended = true
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.queue == [m.id])
+        #expect(f.host.meetings[m.id]?.transcription?.status == .queued)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(try f.store.loadTranscript(m.id) == nil)
+        #expect(f.finished.isEmpty)
+
+        diarizer.block = false
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.engine.calls.count == 2)
+        #expect(diarizer.calls.count == 2)
+        #expect(f.host.history[m.id] == [.queued, .running, .queued, .running, .done])
+        #expect(f.host.diarizationHistory[m.id] == [.done])
+        #expect(try f.store.loadTranscript(m.id)?.speakers.count == 2)
+        #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    @Test func 只区分说话人中开始录音时放回队首_不碰转写状态() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.block = true
+        let f = Fixture(diarizer: diarizer)
+        let m = f.addTranscribedMeeting()
+        f.addTranscribedMeeting("m2")
+        f.pipeline.enqueueDiarization(m.id, speakerCount: 3)
+        f.pipeline.enqueueDiarization("m2")
+        var started = diarizer.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.isSuspended = true
+        #expect(f.pipeline.queue == [m.id, "m2"])
+        #expect(f.host.meetings[m.id]?.diarization?.status == .queued)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+
+        diarizer.block = false
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        // 人数跟着任务放回队首
+        #expect(diarizer.calls.map(\.speakerCount) == [3, 3, nil])
+        #expect(f.host.diarizationHistory[m.id] == [.queued, .running, .queued, .running, .done])
+        #expect(f.host.history[m.id] == nil)
+        #expect(f.engine.calls.isEmpty)
+        #expect(try f.store.loadTranscript(m.id)?.speakers.count == 2)
+    }
+
+    @Test func 只区分说话人中删除会议时取消且不写任何文件() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.block = true
+        let f = Fixture(diarizer: diarizer)
+        let m = f.addTranscribedMeeting()
+        f.addTranscribedMeeting("m2")
+        f.pipeline.enqueueDiarization(m.id)
+        f.pipeline.enqueueDiarization("m2")
+        var started = diarizer.started.makeAsyncIterator()
+        await started.next()
+        let historyBefore = f.host.diarizationHistory[m.id]
+
+        diarizer.block = false
+        f.pipeline.remove(m.id)
+        try f.store.trash(m.id)
+        f.host.meetings[m.id] = nil
+        try await f.drain()
+
+        #expect(!FileManager.default.fileExists(atPath: f.store.directory(m.id).path))
+        #expect(f.host.diarizationHistory[m.id] == historyBefore)
+        #expect(f.host.meetings["m2"]?.diarization?.status == .done)
+    }
+
+    @Test func 区分引擎不理会取消照常返回时结果作废() async throws {
+        let diarizer = SlowToCancelDiarizer()
+        let f = Fixture()
+        let pipeline = TranscriptionPipeline(store: f.store, transcriber: f.engine, engine: "fake/1",
+                                             diarizer: diarizer, host: f.host)
+        let m = f.addTranscribedMeeting()
+        let before = try f.store.loadTranscript(m.id)
+        pipeline.enqueueDiarization(m.id)
+        try await f.until { diarizer.continuation != nil }
+
+        pipeline.isSuspended = true
+        diarizer.continuation?.resume(returning: DiarizationResult(segments: twoPeopleSegments, voiceprints: [:]))
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(try f.store.loadTranscript(m.id) == before)
+        #expect(f.host.meetings[m.id]?.diarization?.status == .queued)
+        #expect(pipeline.queue == [m.id])
+    }
+
+    @Test func 区分说话人期间转写不算空闲() async throws {
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        diarizer.block = true
+        let f = Fixture(diarizer: diarizer)
+        var idle: [Bool] = []
+        f.pipeline.onIdleChange = { idle.append($0) }
+        let m = f.addTranscribedMeeting()
+        f.pipeline.enqueueDiarization(m.id)
+        var started = diarizer.started.makeAsyncIterator()
+        await started.next()
+
+        #expect(!f.pipeline.isIdle)
+        #expect(idle == [false])
+        diarizer.block = false
+        f.pipeline.remove(m.id)
+        f.addTranscribedMeeting("m2")
+        f.pipeline.enqueueDiarization("m2")
+        try await f.drain()
+        #expect(idle == [false, true])
+    }
+
+    @Test func 排队只区分说话人时又点重新转写_改成完整转写() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
+        f.pipeline.isSuspended = true
+        let m = f.addTranscribedMeeting()
+        #expect(f.pipeline.enqueueDiarization(m.id))
+        #expect(f.pipeline.enqueue(m.id))
+        // 已在排队完整转写：完整转写里会区分，不再单独排
+        #expect(!f.pipeline.enqueueDiarization(m.id))
+        #expect(f.pipeline.queue == [m.id])
+
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.engine.calls.count == 1)
+        #expect(try f.store.loadTranscript(m.id)?.sentences.count == 4)
+        #expect(f.host.meetings[m.id]?.diarization?.status == .done)
+    }
+
+    @Test func 开关关闭时完整转写不留下排队中的说话人状态() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
+        f.pipeline.isSuspended = true
+        let m = f.addTranscribedMeeting()
+        f.pipeline.enqueueDiarization(m.id)
+        f.pipeline.enqueue(m.id)
+        f.pipeline.diarizes = false
+
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.diarizer?.calls.isEmpty == true)
+        // 排队中的说话人状态不会再有任务来完成它，否则下次启动会被当成只区分说话人的任务恢复
+        #expect(f.host.meetings[m.id]?.diarization == nil)
+    }
+
+    @Test func 启动时恢复只区分说话人的任务() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
+        f.pipeline.isSuspended = true
+        let queued = f.addTranscribedMeeting("diarize-queued")
+        f.host.setDiarization(DiarizationState(status: .queued), for: queued.id)
+        var running = f.addTranscribedMeeting("diarize-running")
+        running.endedAt = at(900)
+        f.host.meetings[running.id] = running
+        f.host.setDiarization(DiarizationState(status: .running), for: running.id)
+        // 完整转写在区分说话人那一步时退出：转写和说话人状态都不是完成，按完整转写恢复
+        f.addMeeting("full", transcription: TranscriptionState(status: .running))
+        f.host.setDiarization(DiarizationState(status: .done), for: "full")
+        let done = f.addTranscribedMeeting("done")
+        f.host.setDiarization(DiarizationState(status: .done), for: done.id)
+        let failed = f.addTranscribedMeeting("failed")
+        f.host.setDiarization(DiarizationState(status: .failed, error: "x"), for: failed.id)
+
+        f.pipeline.restore(["diarize-queued", "done", "full", "diarize-running", "failed"].map { f.host.meetings[$0]! })
+
+        // 上次正在进行的排最前（不分任务种类），其余按结束时间
+        #expect(f.pipeline.queue == ["full", "diarize-running", "diarize-queued"])
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.engine.calls.map { $0.audio.deletingLastPathComponent().lastPathComponent } == ["full"])
+        #expect(f.diarizer?.calls.map { $0.audio.deletingLastPathComponent().lastPathComponent }
+            == ["full", "diarize-running", "diarize-queued"])
+        for id in ["diarize-queued", "diarize-running", "full"] {
+            #expect(f.host.meetings[id]?.diarization?.status == .done)
+            #expect(f.host.meetings[id]?.transcription?.status == .done)
+        }
+        #expect(f.host.meetings["failed"]?.diarization?.status == .failed)
+    }
+}
+
