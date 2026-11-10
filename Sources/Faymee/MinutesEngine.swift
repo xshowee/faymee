@@ -1,21 +1,17 @@
 import FaymeeCore
 
-/// App 用哪个纪要引擎。换引擎只改这里；name 写进每份纪要的 model，用来区分是哪个模型生成的
+/// App 用哪个纪要引擎、哪个模型文件。换引擎只改这里；name 写进每份纪要的 model，用来区分是哪个模型生成的。
+/// 模型文件由 ModelDownloader 下到同一个约定目录，引擎和下载器都按 LocalModel 找文件
 enum MinutesEngine {
+    static let model = LocalModel.qwen3_4B
+    /// 模型放在哪个目录。下载器和引擎必须用同一个
+    static let directory = LocalModel.defaultDirectory
+
     static func make() -> (generator: any TextGenerator, name: String) {
-        (UnavailableTextGenerator(), "none")
+        (LlamaTextGenerator(model: model, directory: directory), model.id)
     }
-}
 
-/// 占位引擎：接上真实模型（05 换成 llama 引擎）之前，模型一直“未下载”，
-/// 纪要任务保持排队、显示“等待下载模型”，不会开始
-final class UnavailableTextGenerator: TextGenerator {
-    struct Unavailable: Error {}
-
-    var contextTokens: Int { 0 }
-    var isDownloaded: Bool { false }
-    func countTokens(_ text: String) -> Int { text.count }
-    func load(progress: @escaping (Double) -> Void) async throws { throw Unavailable() }
-    func generate(system: String, prompt: String, maxTokens: Int) async throws -> String { throw Unavailable() }
-    func unload() {}
+    @MainActor static func makeDownloader() -> ModelDownloader {
+        ModelDownloader(model: model, directory: directory, transport: URLSessionModelTransport())
+    }
 }

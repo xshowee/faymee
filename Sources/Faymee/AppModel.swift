@@ -92,7 +92,10 @@ final class AppModel {
         didSet { if !deferSuspensionSync { syncTranscriptionSuspension() } }
     }
 
-    /// “转写完成后自动生成纪要”，记在 UserDefaults，默认打开（设置界面在 05）
+    /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
+    @ObservationIgnored let modelDownloader = MinutesEngine.makeDownloader()
+
+    /// “转写完成后自动生成纪要”，记在 UserDefaults，默认打开，设置窗口里可以改
     var autoGenerateMinutes: Bool {
         didSet {
             UserDefaults.standard.set(autoGenerateMinutes, forKey: "autoGenerateMinutes")
@@ -152,6 +155,8 @@ final class AppModel {
             guard let self, self.minutes.isOnPower != onPower else { return }
             self.minutes.isOnPower = onPower
         }
+        // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”
+        modelDownloader.onAvailabilityChange = { [weak self] in self?.minutes.modelAvailabilityChanged() }
         Notifier.onAction = { [weak self] in self?.handleNoticeAction($0) }
         Notifier.setUp()
         Task {
@@ -463,7 +468,7 @@ final class AppModel {
     // MARK: - 转写、纪要通知
 
     /// 用户点了“生成纪要需要先下载模型”的通知，等着打开设置里的模型下载。
-    /// 设置界面（05）观察它：为 true 时打开模型下载，再调 `modelDownloadRequestHandled()` 复位。
+    /// MenuBarLabel（App 启动就在）观察它：为 true 时打开设置窗口，再调 `modelDownloadRequestHandled()` 复位。
     /// 用留存的状态而不是一次性回调：点通知可能冷启动 App，那时还没有视图在监听
     private(set) var isModelDownloadRequested = false
 
@@ -498,6 +503,16 @@ final class AppModel {
               let notice = MeetingNotice.minutes(outcome, meetingTitle: m.title, isRecording: isRecording)
         else { return }
         Notifier.post(notice)
+    }
+
+    // MARK: - 纪要模型
+
+    /// 正在加载模型或生成纪要时不能删除模型：引擎还在用这个文件
+    var canDeleteModel: Bool { minutes.activeID == nil }
+
+    func deleteModel() async throws {
+        guard canDeleteModel else { return }
+        try await modelDownloader.delete()
     }
 
     private func update(_ m: Meeting) {

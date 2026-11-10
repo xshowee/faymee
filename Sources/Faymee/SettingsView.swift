@@ -1,0 +1,138 @@
+import AppKit
+import FaymeeCore
+import SwiftUI
+
+/// 设置窗口：纪要的自动生成开关、本机模型的下载与删除
+struct SettingsView: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirmingDelete = false
+    @State private var deleteError: String?
+
+    var body: some View {
+        @Bindable var model = model
+        let downloader = model.modelDownloader
+
+        Form {
+            Section("纪要") {
+                Toggle("转写完成后自动生成纪要", isOn: $model.autoGenerateMinutes)
+                Text("只在接通电源时自动开始；用电池时排队，接上电源后再生成")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("本机模型") {
+                LabeledContent("Qwen3 4B（Q4_K_M）") {
+                    ModelDownloadControls(style: .settings)
+                }
+                Text("纪要在本机生成，不上传任何数据。模型约 \(gigabytes(downloader.model.size))，只在点“下载”后才开始下载，可以暂停，中断后能续传")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if downloader.isReady {
+                    HStack {
+                        Button("在访达中显示") {
+                            NSWorkspace.shared.activateFileViewerSelecting([downloader.model.url(in: downloader.directory)])
+                        }
+                        Spacer()
+                        Button("删除模型…", role: .destructive) { confirmingDelete = true }
+                            .disabled(!model.canDeleteModel)
+                    }
+                    if !model.canDeleteModel {
+                        Text("正在生成纪要，生成完才能删除模型")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let deleteError {
+                    Label(deleteError, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        // grouped Form 自带滚动，不给高度会被压扁；内容最多时（已就绪 + 删除说明 + 错误）也放得下
+        .frame(width: 480, height: 400)
+        .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
+            Button("删除模型", role: .destructive) {
+                Task {
+                    do {
+                        try await model.deleteModel()
+                        deleteError = nil
+                    } catch {
+                        deleteError = "删除模型失败：\(error.localizedDescription)"
+                    }
+                }
+            }
+        } message: {
+            Text("释放约 \(gigabytes(downloader.model.size)) 空间。之后生成纪要需要重新下载，已生成的纪要不受影响。")
+        }
+    }
+
+    private func gigabytes(_ bytes: Int64) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1e9)
+    }
+}
+
+/// 模型的状态、进度和操作按钮。设置里显示完整状态并可以取消；
+/// 详情页（纪要在等模型时）只显示一句说明和下一步该点的按钮
+struct ModelDownloadControls: View {
+    enum Style { case settings, minutes }
+
+    @Environment(AppModel.self) private var model
+    var style: Style
+
+    var body: some View {
+        let downloader = model.modelDownloader
+        let status = downloader.status
+
+        HStack(spacing: 6) {
+            switch status.phase {
+            case .downloading, .paused:
+                ProgressView(value: status.progress)
+                    .frame(width: 80)
+            case .verifying:
+                ProgressView().controlSize(.small)
+            default:
+                EmptyView()
+            }
+            Text(style == .settings ? status.text : status.minutesText)
+                .monospacedDigit()
+                .foregroundStyle(status.phase.isFailed ? Color.orange : Color.secondary)
+                .lineLimit(2)
+
+            switch status.phase {
+            case .notDownloaded:
+                Button("下载") { downloader.start() }
+            case .downloading:
+                Button("暂停") { downloader.pause() }
+            case .paused:
+                Button("继续下载") { downloader.start() }
+            case .failed:
+                Button("重试") { downloader.start() }
+            case .verifying, .ready:
+                EmptyView()
+            }
+            if style == .settings, status.phase.isCancellable, status.receivedBytes > 0 {
+                Button("取消") { Task { await downloader.cancel() } }
+                    .help("停止下载并删掉已下载的部分")
+            }
+        }
+    }
+}
+
+private extension ModelDownloadPhase {
+    var isFailed: Bool {
+        if case .failed = self { true } else { false }
+    }
+
+    /// 有没下完的部分可以丢掉
+    var isCancellable: Bool {
+        switch self {
+        case .downloading, .paused, .failed: true
+        default: false
+        }
+    }
+}

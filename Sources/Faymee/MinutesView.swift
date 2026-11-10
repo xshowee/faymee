@@ -33,7 +33,12 @@ struct MinutesPanel: View {
                     Text(MinutesTemplate(key: minutes.template)?.name ?? minutes.template)
                         .foregroundStyle(.secondary)
                 }
-                StatusView(status: status) { regenerate(status) }
+                if status == .queued(.model) {
+                    // 不静默下载：在这里说明要下多大的模型，用户点“下载”才开始
+                    ModelDownloadControls(style: .minutes)
+                } else {
+                    StatusView(status: status) { regenerate(status) }
+                }
                 Spacer()
                 actions(status)
             }

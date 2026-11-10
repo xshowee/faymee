@@ -30,7 +30,19 @@ struct FaymeeApp: App {
             CommandGroup(replacing: .newItem) {
                 RecordingCommand(model: model)
             }
+            CommandGroup(replacing: .appSettings) {
+                SettingsCommand()
+            }
         }
+
+        // 用普通 Window 而不是 Settings 场景：菜单栏程序（accessory）里 openSettings 不可靠
+        Window("设置", id: "settings") {
+            SettingsView()
+                .environment(model)
+                .onAppear(perform: AppDelegate.windowAppeared)
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
 
         Window("热词表", id: "hotwords") {
             HotwordsView()
@@ -54,6 +66,15 @@ private struct RecordingCommand: View {
             }
         }
         .keyboardShortcut("r", modifiers: [.command, .shift])
+    }
+}
+
+private struct SettingsCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("设置…") { openWindow(id: "settings") }
+            .keyboardShortcut(",", modifiers: .command)
     }
 }
 
