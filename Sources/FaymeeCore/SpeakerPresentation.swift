@@ -7,6 +7,8 @@ public struct SpeakerTurn: Hashable, Sendable {
     public var name: String
     /// 调色板下标，见 `Speaker.colorIndex`；未知为 nil（界面用中性色）
     public var colorIndex: Int?
+    /// 名字是声纹自动认出的，段首带一个不显眼的“自动认出”标记
+    public var isRecognized = false
 }
 
 extension Transcript {
@@ -26,7 +28,7 @@ extension Transcript {
             defer { previous = .some(speaker?.id) }
             if let previous, previous == speaker?.id { return nil }
             return SpeakerTurn(speakerID: speaker?.id, name: speaker?.displayName ?? Speaker.unknownName,
-                               colorIndex: speaker?.colorIndex)
+                               colorIndex: speaker?.colorIndex, isRecognized: speaker?.isRecognized ?? false)
         }
     }
 }
@@ -138,6 +140,9 @@ public enum SpeakerStatus: Hashable, Sendable {
 }
 
 extension Speaker {
+    /// 名字是声纹自动认出的（机器判断，可能出错）：界面带“自动认出”标记，菜单里有“不是此人”
+    public var isRecognized: Bool { nameSource == .voiceprint }
+
     /// 调色板下标，取自 id 的编号（spk1 → 0、spk3 → 2），不随列表位置变：
     /// 合并、新建说话人后其他人的颜色不变。界面按调色板长度取模
     public var colorIndex: Int {

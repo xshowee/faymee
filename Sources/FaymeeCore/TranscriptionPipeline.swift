@@ -129,6 +129,9 @@ public final class TranscriptionPipeline {
     /// 有没有区分说话人引擎。没有时 `enqueueDiarization` 总是返回 false，界面据此隐藏“区分说话人”等入口
     public var canDiarize: Bool { diarizer != nil }
 
+    /// 当前区分引擎的声纹模型标识；没有引擎时为 nil。声纹管理窗口据此标出“需要重新登记”的人
+    public var voiceprintModel: String? { diarizer?.voiceprintModel }
+
     /// 没有排队、正在转写、预定了转写的会议，被取消的转写也已退出
     public var isIdle: Bool { activeID == nil && queue.isEmpty && cancelled == nil && reserved.isEmpty }
 

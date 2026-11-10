@@ -47,6 +47,15 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
         #expect(t.speakerTurns.map { $0?.name } == ["说话人 1", nil, "说话人 1", "说话人 2"])
     }
 
+    /// 段首给“自动认出”标记用：只有声纹认出的名字算，手动起的、没名字的不算
+    @Test func 段首标出声纹自动认出的人() {
+        let recognized = Speaker(id: "spk2", name: "张三", nameSource: .voiceprint, personID: "p1",
+                                 voiceprint: Voiceprint([1]), speechDuration: 1)
+        let t = transcript(["spk1", "spk2", "spk3", nil],
+                           speakers: [speaker("spk1", "李四"), recognized, speaker("spk3")])
+        #expect(t.speakerTurns.map { $0?.isRecognized } == [false, true, false, false])
+    }
+
     @Test func 只有一个说话人或没区分过时没有段首() {
         #expect(transcript(["spk1", nil, "spk1"], speakers: [speaker("spk1")]).speakerTurns == [nil, nil, nil])
         #expect(transcript([nil, nil], speakers: nil).speakerTurns == [nil, nil])
