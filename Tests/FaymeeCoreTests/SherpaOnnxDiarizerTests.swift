@@ -191,6 +191,16 @@ struct SherpaOnnxDiarizerModelTests {
     }
 }
 
+/// 引擎处理失败（sherpa-onnx 返回 NULL）时要抛错，不能当成“没有说话人”：否则重新区分会用空结果覆盖原来的说话人和名字。
+/// 真实引擎没法稳定地造出 NULL，直接测把 C 结果转成说话片段的那一步。不需要真实模型
+struct SherpaOnnxDiarizerResultTests {
+    @Test func 引擎没有返回结果时抛错() {
+        #expect(throws: SherpaOnnxDiarizerError.processingFailed) {
+            try SherpaOnnxDiarizer.segments(of: nil)
+        }
+    }
+}
+
 private final class Values: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Double] = []

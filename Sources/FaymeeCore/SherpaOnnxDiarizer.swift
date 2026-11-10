@@ -164,13 +164,23 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
                 + Double(done) / Double(total) * (SherpaOnnxDiarizer.clusteringEnd - SherpaOnnxDiarizer.segmentationEnd))
             return 0
         }
-        guard let result = samples.withUnsafeBufferPointer({
+        return try Self.segments(of: samples.withUnsafeBufferPointer {
             SherpaOnnxOfflineSpeakerDiarizationProcessWithCallback(sd, $0.baseAddress, Int32($0.count), callback, context)
-        }) else { return [] }
+        })
+    }
+
+    /// 把 sherpa-onnx 的区分结果转成按开始时间排序的说话片段，并释放结果。
+    /// 结果为 NULL（处理失败）时抛错，不当成“没有说话人”：空结果会覆盖原来的说话人和名字。
+    /// 有结果但 0 个片段（全程静音）是正常的空结果
+    static func segments(of result: OpaquePointer?) throws -> [SpeakerSegment] {
+        guard let result else { throw SherpaOnnxDiarizerError.processingFailed }
         defer { SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result) }
 
         let count = Int(SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result))
-        guard count > 0, let sorted = SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result) else { return [] }
+        guard count > 0 else { return [] }
+        guard let sorted = SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result) else {
+            throw SherpaOnnxDiarizerError.processingFailed
+        }
         defer { SherpaOnnxOfflineSpeakerDiarizationDestroySegment(sorted) }
         return (0..<count).map {
             SpeakerSegment(start: TimeInterval(sorted[$0].start), end: TimeInterval(sorted[$0].end),
@@ -340,6 +350,8 @@ public enum SherpaOnnxDiarizerError: LocalizedError, Equatable {
     case modelCorrupted(String)
     /// sherpa-onnx 创建引擎失败（返回 NULL）
     case engineUnavailable
+    /// sherpa-onnx 处理录音失败（返回 NULL）
+    case processingFailed
     case unreadableAudio(String)
 
     public var errorDescription: String? {
@@ -347,6 +359,7 @@ public enum SherpaOnnxDiarizerError: LocalizedError, Equatable {
         case let .modelMissing(name): "缺少区分说话人模型 \(name)，请重新安装 Faymee"
         case let .modelCorrupted(name): "区分说话人模型 \(name) 已损坏，请重新安装 Faymee"
         case .engineUnavailable: "区分说话人引擎启动失败"
+        case .processingFailed: "区分说话人引擎处理录音失败"
         case let .unreadableAudio(reason): "读不了录音：\(reason)"
         }
     }
