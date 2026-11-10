@@ -74,6 +74,8 @@ final class AppModel {
     var isLidGapOpen: Bool { current?.openGap != nil }
 
     @ObservationIgnored let store = MeetingStore()
+    /// 声纹库。界面（说话人菜单、声纹管理窗口）经它读写；转写管线识别时自己读盘
+    @ObservationIgnored let voiceprints = VoiceprintLibraryModel()
     @ObservationIgnored private let hotwordStore = HotwordStore()
     /// 热词表文件里现在的内容（上次读到或存下的），保存前用它核对文件没被别处改过
     @ObservationIgnored private var savedHotwords = ""

@@ -51,6 +51,15 @@ struct FaymeeApp: App {
         }
         .defaultSize(width: 380, height: 440)
         .defaultLaunchBehavior(.suppressed)
+
+        // 从设置进入
+        Window("声纹管理", id: "voiceprints") {
+            VoiceprintsView()
+                .environment(model)
+                .onAppear(perform: AppDelegate.windowAppeared)
+        }
+        .defaultSize(width: 420, height: 400)
+        .defaultLaunchBehavior(.suppressed)
     }
 }
 

@@ -30,6 +30,8 @@ struct TranscriptSection: View {
     @State private var pendingMerge: SpeakerMerge?
     /// 有说话人修改时重新区分前先确认
     @State private var pendingRediarize: Rediarize?
+    /// 记住声音成功后的短暂提示，和哪次登记设的（连点两次时，第一次的计时不清掉第二次的提示）
+    @State private var voiceprintNotice: VoiceprintNotice?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -48,10 +50,17 @@ struct TranscriptSection: View {
                     .foregroundStyle(.orange)
             }
 
+            if let voiceprintNotice {
+                Label(voiceprintNotice.text, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if let transcript, transcript.diarization != nil, !transcript.items.isEmpty {
                 SpeakerBar(transcript: transcript, canEdit: canEditSpeakers, canRediarize: canRediarize,
                            onRename: beginRename,
                            onMerge: { source, target in update { $0.mergeSpeaker(source, into: target) } },
+                           voiceprintActions: voiceprintActions(transcript),
                            onRediarize: rediarize)
             }
 
@@ -73,6 +82,7 @@ struct TranscriptSection: View {
         // 转写稿由 MeetingDetail 在转写、说话人状态变化时重读，之前的保存错误随之作废
         .onChange(of: meeting.transcription) { saveError = nil }
         .onChange(of: meeting.diarization) { saveError = nil }
+        .onChange(of: meeting.id) { voiceprintNotice = nil }
         // 开始区分说话人时关掉还没确认的改名、合并：结束时说话人整体替换
         .onChange(of: canEditSpeakers) { _, editable in
             if !editable {
@@ -132,6 +142,34 @@ struct TranscriptSection: View {
             onNew: { id in update { $0.setNewSpeaker(sentence: id) != nil } },
             onRestore: { id in update { $0.restoreSpeaker(sentence: id) } },
             onRename: { id in if let s = transcript?.speaker(id) { beginRename(s) } })
+    }
+
+    private func voiceprintActions(_ transcript: Transcript) -> VoiceprintActions {
+        let library = model.voiceprints.library
+        let current = model.transcription.voiceprintModel
+        return VoiceprintActions(
+            enrollment: { speaker in
+                library.enrollmentOption(speaker: speaker.id, in: transcript, meetingID: meeting.id,
+                                         currentVoiceprintModel: current)
+            },
+            onEnroll: { speaker in enroll(speaker, from: transcript) },
+            onReject: { speaker in update { $0.rejectRecognizedPerson(speaker.id) } })
+    }
+
+    /// 记住这个声音：只写声纹库，不改转写稿。之后的会议才会认出此人
+    private func enroll(_ speaker: Speaker, from transcript: Transcript) {
+        do {
+            try model.voiceprints.enroll(speaker: speaker.id, from: transcript, meetingID: meeting.id)
+            saveError = nil
+            let notice = VoiceprintNotice(text: "已记住\(speaker.displayName)的声音，之后的会议会自动认出")
+            voiceprintNotice = notice
+            Task {
+                try? await Task.sleep(for: .seconds(4))
+                if voiceprintNotice?.id == notice.id { voiceprintNotice = nil }
+            }
+        } catch {
+            saveError = "没能记住声音：\(error.localizedDescription)"
+        }
     }
 
     private func beginRename(_ speaker: Speaker) {
@@ -300,6 +338,11 @@ private struct SpeakerMerge {
 
 private struct Rediarize {
     var speakerCount: Int?
+}
+
+private struct VoiceprintNotice {
+    let id = UUID()
+    var text: String
 }
 
 /// 转写稿区分过说话人时，句子菜单里改说话人、段首点名字改名用的操作
