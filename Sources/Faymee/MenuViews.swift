@@ -3,17 +3,28 @@ import SwiftUI
 
 struct MenuBarLabel: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        if model.isRecording {
-            HStack(spacing: 4) {
-                Image(systemName: model.isSilent || model.hasRecordingError || model.isLidGapOpen
-                      ? "exclamationmark.triangle.fill" : "record.circle.fill")
-                Text(formatDuration(model.elapsed))
-                    .monospacedDigit()
+        Group {
+            if model.isRecording {
+                HStack(spacing: 4) {
+                    Image(systemName: model.isSilent || model.hasRecordingError || model.isLidGapOpen
+                          ? "exclamationmark.triangle.fill" : "record.circle.fill")
+                    Text(formatDuration(model.elapsed))
+                        .monospacedDigit()
+                }
+            } else {
+                Image(systemName: "waveform")
             }
-        } else {
-            Image(systemName: "waveform")
+        }
+        // 点了“生成纪要需要先下载模型”的通知：打开设置里的模型下载。菜单栏图标 App 启动就在，
+        // 冷启动时请求可能比它先置上，所以 initial: true
+        .onChange(of: model.isModelDownloadRequested, initial: true) {
+            guard model.isModelDownloadRequested else { return }
+            openWindow(id: "settings")
+            NSApp.activate()
+            model.modelDownloadRequestHandled()
         }
     }
 }
@@ -55,6 +66,12 @@ struct MenuContent: View {
 
             Button("热词表…") {
                 openWindow(id: "hotwords")
+                NSApp.activate()
+            }
+            .buttonStyle(.plain)
+
+            Button("设置…") {
+                openWindow(id: "settings")
                 NSApp.activate()
             }
             .buttonStyle(.plain)

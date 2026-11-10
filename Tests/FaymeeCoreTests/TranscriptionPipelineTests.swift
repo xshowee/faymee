@@ -44,12 +44,16 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
 /// 不理会取消的引擎：transcribe 挂起，直到测试手动给出结果
 private final class SlowToCancelTranscriber: Transcriber, @unchecked Sendable {
     var continuation: CheckedContinuation<[TranscribedSentence], Error>?
+    private(set) var calls = 0
 
     func prepare(progress: @escaping (Double) -> Void) async throws {}
 
     func transcribe(audio: URL, hotwords: [String],
                     progress: @escaping (Double) -> Void) async throws -> [TranscribedSentence] {
-        try await withCheckedThrowingContinuation { continuation = $0 }
+        try await withCheckedThrowingContinuation {
+            continuation = $0
+            calls += 1
+        }
     }
 }
 
@@ -323,6 +327,41 @@ private final class Fixture {
         #expect(f.host.meetings["m1"]?.transcription?.status == .queued)
         #expect(pipeline.queue == ["m1"])
         #expect(finished.isEmpty)
+    }
+
+    @Test func 取消后引擎还没退出时不算空闲_下一场等它退出再开始() async throws {
+        let engine = SlowToCancelTranscriber()
+        let f = Fixture()
+        let pipeline = TranscriptionPipeline(store: f.store, transcriber: engine, engine: "slow", host: f.host)
+        var idle: [Bool] = []
+        pipeline.onIdleChange = { idle.append($0) }
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        pipeline.enqueue("m1")
+        pipeline.enqueue("m2")
+        try await f.until { engine.continuation != nil }
+        let first = engine.continuation
+
+        pipeline.remove("m1")
+        pipeline.remove("m2")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!pipeline.isIdle)
+        #expect(idle == [false])
+
+        f.addMeeting("m3")
+        pipeline.enqueue("m3")
+        try await Task.sleep(for: .milliseconds(50))
+        // 同一时间只用一次引擎
+        #expect(engine.calls == 1)
+        #expect(pipeline.activeID == "m3")
+
+        first?.resume(returning: [])
+        try await f.until { engine.calls == 2 }
+        engine.continuation?.resume(returning: [.init(start: 0, end: 1, text: "嗯")])
+        try await f.until { pipeline.isIdle }
+        #expect(idle == [false, true])
+        #expect(f.host.meetings["m3"]?.transcription?.status == .done)
+        #expect(try f.store.loadTranscript("m1") == nil)
     }
 
     @Test func 启动时把排队中和转写中的会议重新排队() async throws {

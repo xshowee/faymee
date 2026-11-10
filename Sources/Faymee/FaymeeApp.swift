@@ -23,13 +23,26 @@ struct FaymeeApp: App {
                 .environment(model)
                 .onAppear(perform: AppDelegate.windowAppeared)
         }
-        .defaultSize(width: 760, height: 480)
+        // 详情页并排显示纪要和转写稿，要宽一些
+        .defaultSize(width: 1100, height: 680)
         .defaultLaunchBehavior(.suppressed)
         .commands {
             CommandGroup(replacing: .newItem) {
                 RecordingCommand(model: model)
             }
+            CommandGroup(replacing: .appSettings) {
+                SettingsCommand()
+            }
         }
+
+        // 用普通 Window 而不是 Settings 场景：菜单栏程序（accessory）里 openSettings 不可靠
+        Window("设置", id: "settings") {
+            SettingsView()
+                .environment(model)
+                .onAppear(perform: AppDelegate.windowAppeared)
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(.suppressed)
 
         Window("热词表", id: "hotwords") {
             HotwordsView()
@@ -53,6 +66,15 @@ private struct RecordingCommand: View {
             }
         }
         .keyboardShortcut("r", modifiers: [.command, .shift])
+    }
+}
+
+private struct SettingsCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("设置…") { openWindow(id: "settings") }
+            .keyboardShortcut(",", modifiers: .command)
     }
 }
 

@@ -2,13 +2,25 @@ import AppKit
 import FaymeeCore
 import SwiftUI
 
-/// 详情页的转写部分：转写状态与操作，加上转写稿本身。只在录音整理好（可回放）后显示
+/// 点纪要出处时请转写稿定位到某句。每次点击都是新的请求（id 不同），同一处点两次也会再定位
+struct TranscriptReveal: Equatable {
+    let id = UUID()
+    /// 要定位、高亮的句子；为 nil 时按 time 找
+    var sentenceID: String?
+    var time: TimeInterval
+}
+
+/// 详情页的转写部分：转写状态与操作，加上转写稿本身。只在录音整理好（可回放）后显示。
+/// 转写稿由 MeetingDetail 读盘、和纪要共用（纪要要按最新的转写稿判断不同步），这里改完写回 transcript
 struct TranscriptSection: View {
     @Environment(AppModel.self) private var model
     var meeting: Meeting
     var playback: Playback?
-    @State private var transcript: Transcript?
-    @State private var loadError: String?
+    @Binding var transcript: Transcript?
+    /// 转写稿读取失败的原因
+    var loadError: String?
+    /// 纪要点出处时的定位请求，处理完置空
+    @Binding var reveal: TranscriptReveal?
     @State private var saveError: String?
     @State private var confirmingRetranscribe = false
 
@@ -33,6 +45,7 @@ struct TranscriptSection: View {
                     placeholder("没有识别出文字")
                 } else {
                     TranscriptList(transcript: transcript, playback: playback, isEditable: isEditable,
+                                   reveal: $reveal,
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
                                    onRestore: { id in update { $0.restore(sentence: id) } })
                 }
@@ -41,8 +54,8 @@ struct TranscriptSection: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        // 转写状态变化时重读：完成后换上新稿；重新转写进行中或失败时文件没动，仍显示旧稿
-        .task(id: meeting.transcription) { reload() }
+        // 转写稿由 MeetingDetail 在转写状态变化时重读，之前的保存错误随之作废
+        .onChange(of: meeting.transcription) { saveError = nil }
         .confirmationDialog("重新转写会丢弃 \(transcript?.editCount ?? 0) 处修改",
                             isPresented: $confirmingRetranscribe) {
             Button("重新转写", role: .destructive) { model.transcription.enqueue(meeting.id) }
@@ -85,9 +98,9 @@ struct TranscriptSection: View {
         if let activity = model.transcription.activity(for: meeting.id) {
             switch activity {
             case let .preparing(p):
-                progress("正在准备转写引擎（\(percent(p))）", p)
+                progress("正在准备转写引擎（\(formatPercent(p))）", p)
             case let .transcribing(p):
-                progress("转写中 \(percent(p))", p)
+                progress("转写中 \(formatPercent(p))", p)
             }
         } else {
             switch meeting.transcription?.status {
@@ -133,21 +146,6 @@ struct TranscriptSection: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func percent(_ p: Double) -> String {
-        "\(Int((min(max(p, 0), 1) * 100).rounded()))%"
-    }
-
-    private func reload() {
-        do {
-            transcript = try model.store.loadTranscript(meeting.id)
-            loadError = nil
-            saveError = nil
-        } catch {
-            transcript = nil
-            loadError = "转写稿读取失败：\(error.localizedDescription)"
-        }
-    }
-
     private func copy(_ transcript: Transcript) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(transcript.plainText, forType: .string)
@@ -167,9 +165,13 @@ private struct TranscriptList: View {
     var transcript: Transcript
     var playback: Playback?
     var isEditable: Bool
+    @Binding var reveal: TranscriptReveal?
     var onEdit: (_ id: String, _ text: String) -> Void
     var onRestore: (_ id: String) -> Void
     @State private var following = true
+    /// 纪要点出处后短暂高亮的条目，和哪次请求高亮的（连点两次时，第一次的计时不清掉第二次的高亮）
+    @State private var revealed: Int?
+    @State private var revealedBy: UUID?
     @State private var allSelected = false
     @State private var editingID: String?
     @State private var draft = ""
@@ -182,7 +184,7 @@ private struct TranscriptList: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(transcript.items.indices, id: \.self) { i in
-                        row(i, isCurrent: i == current)
+                        row(i, isCurrent: i == current, isRevealed: i == revealed)
                             .id(i)
                     }
                 }
@@ -202,6 +204,12 @@ private struct TranscriptList: View {
             }
             .onChange(of: current) { _, current in
                 if following, let current { scroll(proxy, to: current) }
+            }
+            // initial：窄窗口下转写稿刚换上来、或刚读完盘时请求就已经在了
+            .onChange(of: reveal, initial: true) { _, request in
+                guard let request else { return }
+                reveal = nil
+                handle(request, proxy)
             }
             .onChange(of: playback?.isPlaying) { _, playing in
                 if playing == true {
@@ -251,12 +259,13 @@ private struct TranscriptList: View {
         .onExitCommand { allSelected = false }
     }
 
-    @ViewBuilder private func row(_ i: Int, isCurrent: Bool) -> some View {
+    @ViewBuilder private func row(_ i: Int, isCurrent: Bool, isRevealed: Bool) -> some View {
         Group {
             switch transcript.items[i] {
             case let .sentence(s):
                 TranscriptSentenceRow(
-                    sentence: s, isCurrent: isCurrent, timeWidth: timeWidth, isEditable: isEditable,
+                    sentence: s, isCurrent: isCurrent, isRevealed: isRevealed, timeWidth: timeWidth,
+                    isEditable: isEditable,
                     isEditing: editingID == s.id, draft: $draft, focus: $focus,
                     onSeek: {
                         commitEdit()
@@ -277,6 +286,23 @@ private struct TranscriptList: View {
             }
         }
         .background(allSelected ? Color(nsColor: .selectedTextBackgroundColor) : .clear)
+    }
+
+    /// 定位到纪要出处那句：结束编辑、恢复跟随、滚过去并短暂高亮。播放由点出处的一方负责
+    private func handle(_ request: TranscriptReveal, _ proxy: ScrollViewProxy) {
+        commitEdit()
+        let index = request.sentenceID.flatMap { id in
+            transcript.items.firstIndex { if case let .sentence(s) = $0 { s.id == id } else { false } }
+        } ?? transcript.itemIndex(at: request.time)
+        guard let index else { return }
+        following = true
+        scroll(proxy, to: index)
+        revealed = index
+        revealedBy = request.id
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            if revealedBy == request.id { withAnimation(.easeOut(duration: 0.4)) { revealed = nil } }
+        }
     }
 
     private func beginEdit(_ s: TranscriptSentence) {
@@ -333,6 +359,8 @@ private struct CurrentItemTracker: View {
 private struct TranscriptSentenceRow: View {
     var sentence: TranscriptSentence
     var isCurrent: Bool
+    /// 纪要点出处定位到这句，比播放高亮更醒目
+    var isRevealed = false
     var timeWidth: CGFloat
     var isEditable: Bool
     var isEditing: Bool
@@ -353,7 +381,7 @@ private struct TranscriptSentenceRow: View {
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
-        .background(isCurrent ? Color.accentColor.opacity(0.15) : .clear,
+        .background(Color.accentColor.opacity(isRevealed ? 0.3 : isCurrent ? 0.15 : 0),
                     in: RoundedRectangle(cornerRadius: 5))
         .padding(.horizontal, 4)
     }

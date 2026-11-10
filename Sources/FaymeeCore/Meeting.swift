@@ -72,6 +72,9 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var gaps: [Gap]?
     /// 转写状态，nil 表示从未转写（含 v0.1 的旧会议）。转写内容在 transcript.json，不在这里
     public var transcription: TranscriptionState?
+    /// 纪要状态，nil 表示从未生成（含 v0.2 及更早的旧会议）。纪要内容在 minutes.json，不在这里。
+    /// “等待接通电源”“等待下载模型”“等待转写完成”都是 queued 的派生说明，不写盘；进度只在内存
+    public var minutes: MinutesState?
 
     public var lidGaps: [Gap] {
         get { gaps ?? [] }
@@ -81,9 +84,9 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var openGap: Int? { lidGaps.lastIndex { $0.end == nil } }
 }
 
-/// 转写是建立在录音之上的独立流程，不并入 MeetingStatus：
-/// 那个表示录音本身的状态（done 意味着可以回放），转写失败不影响回放
-public struct TranscriptionState: Codable, Hashable, Sendable {
+/// 转写、纪要都是建立在录音之上的独立流程，不并入 MeetingStatus：
+/// 那个表示录音本身的状态（done 意味着可以回放），转写或纪要失败不影响回放
+public struct JobState: Codable, Hashable, Sendable {
     public enum Status: String, Codable, Sendable {
         case queued, running, done, failed
     }
@@ -97,6 +100,9 @@ public struct TranscriptionState: Codable, Hashable, Sendable {
         self.error = error
     }
 }
+
+public typealias TranscriptionState = JobState
+public typealias MinutesState = JobState
 
 public func formatTimeRange(_ gap: Gap) -> String {
     let start = gap.start.formatted(date: .omitted, time: .shortened)
