@@ -121,7 +121,7 @@ struct VoiceprintsView: View {
             voiceprints.reload()
             actionError = nil
         }
-        .alert("给声纹改名", isPresented: isPresent($renaming), presenting: renaming) { person in
+        .alert("给声纹改名", isPresented: $renaming.isPresent(), presenting: renaming) { person in
             TextField(person.name, text: $renameDraft)
             Button("改名") { perform { try voiceprints.rename(person.id, to: renameDraft) } }
             Button("取消", role: .cancel) {}
@@ -129,7 +129,7 @@ struct VoiceprintsView: View {
             Text("只影响之后的会议，过去会议里已经显示的名字不变。")
         }
         .confirmationDialog(deleting.map { "删除“\($0.name)”的声纹？" } ?? "",
-                            isPresented: isPresent($deleting), presenting: deleting) { person in
+                            isPresented: $deleting.isPresent(), presenting: deleting) { person in
             Button("删除", role: .destructive) { perform { try voiceprints.remove(person.id) } }
         } message: { _ in
             Text("之后的会议不再认出此人，过去会议里已经显示的名字不变。")
@@ -153,11 +153,6 @@ struct VoiceprintsView: View {
         } catch {
             actionError = error.localizedDescription
         }
-    }
-
-    /// 把可选值绑定成 alert / confirmationDialog 的 isPresented：关掉时置空
-    private func isPresent<T>(_ value: Binding<T?>) -> Binding<Bool> {
-        Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
     }
 }
 

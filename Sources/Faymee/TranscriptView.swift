@@ -117,7 +117,7 @@ struct TranscriptSection: View {
                 Text("转写完成前仍显示当前转写稿，成功后整体替换。")
             }
         }
-        .alert("给说话人改名", isPresented: isPresent($renaming), presenting: renaming) { speaker in
+        .alert("给说话人改名", isPresented: $renaming.isPresent(), presenting: renaming) { speaker in
             TextField(speaker.displayName, text: $renameDraft)
             Button("改名") { rename(speaker.id, to: renameDraft) }
             Button("取消", role: .cancel) {}
@@ -125,7 +125,7 @@ struct TranscriptSection: View {
             Text("转写稿里这个人的所有句子都会显示新名字。留空则恢复为编号。")
         }
         .confirmationDialog(pendingMerge.map { "“\($0.name)”已是本场的另一个说话人，合并为同一人？" } ?? "",
-                            isPresented: isPresent($pendingMerge), presenting: pendingMerge) { merge in
+                            isPresented: $pendingMerge.isPresent(), presenting: pendingMerge) { merge in
             Button("合并") {
                 guard var edited = transcript, edited.mergeSpeaker(merge.source, into: merge.target),
                       save(edited) else { return }
@@ -136,7 +136,7 @@ struct TranscriptSection: View {
             Text("两人的句子会归到同一个说话人下。")
         }
         .confirmationDialog("重新区分说话人会丢弃 \(transcript?.speakerEditCount ?? 0) 处说话人修改",
-                            isPresented: isPresent($pendingRediarize), presenting: pendingRediarize) { request in
+                            isPresented: $pendingRediarize.isPresent(), presenting: pendingRediarize) { request in
             Button("重新区分说话人", role: .destructive) {
                 model.transcription.enqueueDiarization(meeting.id, speakerCount: request.speakerCount)
             }
@@ -333,11 +333,6 @@ struct TranscriptSection: View {
             saveError = "修改没能保存：\(error.localizedDescription)"
             return false
         }
-    }
-
-    /// 把可选值绑定成 alert / confirmationDialog 的 isPresented：关掉时置空
-    private func isPresent<T>(_ value: Binding<T?>) -> Binding<Bool> {
-        Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
     }
 
     /// 说话人的状态和操作：区分进度、排队、失败原因和重试、旧会议的“区分说话人”。
