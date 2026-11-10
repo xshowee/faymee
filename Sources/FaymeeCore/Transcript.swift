@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// 一场会议的转写稿，存为 transcript.json。
@@ -25,6 +26,25 @@ public struct Transcript: Codable, Hashable, Sendable {
 
     public var sentences: [TranscriptSentence] {
         items.compactMap { if case let .sentence(s) = $0 { s } else { nil } }
+    }
+
+    /// 所有句子 `(id, text)` 的 SHA-256，形如 `sha256:<64 位小写十六进制>`。
+    /// 生成纪要时记进 `Minutes.source`，之后与当前转写稿比对：只有它不同，才说明句子被修改过。
+    /// 时间、合盖空白、`original` 不参与。
+    ///
+    /// 值会写盘并在以后比对，字节格式不能改：按句子顺序，每句依次写
+    /// `<id 的 UTF-8 字节数>:<id><text 的 UTF-8 字节数>:<text>`，中间没有分隔符。
+    /// 带长度前缀，文字在相邻句子间挪动不会撞出同一个哈希
+    public var textHash: String {
+        var bytes = Data()
+        for s in sentences {
+            for field in [s.id, s.text] {
+                let utf8 = Data(field.utf8)
+                bytes.append(contentsOf: "\(utf8.count):".utf8)
+                bytes.append(utf8)
+            }
+        }
+        return "sha256:" + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 }
 

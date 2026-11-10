@@ -27,6 +27,7 @@ private func date(_ iso: String) -> Date {
         m.duration = 3540
         m.lidGaps = [Gap(start: date("2026-11-10T02:10:00Z"), end: date("2026-11-10T02:11:00Z"), reason: .lidClosed)]
         m.transcription = TranscriptionState(status: .failed, error: "录音无法读取")
+        m.minutes = MinutesState(status: .failed, error: "模型输出无法解析")
         try store.save(m)
 
         #expect(store.loadAll() == [m])
@@ -71,6 +72,45 @@ private func date(_ iso: String) -> Date {
         #expect(loaded.lidGaps.isEmpty)
         #expect(loaded.openGap == nil)
         #expect(loaded.transcription == nil)
+        #expect(loaded.minutes == nil)
+    }
+
+    /// v0.2 写出的 meeting.json：已转写，没有 minutes 字段
+    @Test func 能读取没有minutes字段的v02会议() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let legacy = """
+        {
+          "id" : "2026-11-05_14-00-00",
+          "recording" : "recording.m4a",
+          "segments" : [],
+          "startedAt" : "2026-11-05T06:00:00Z",
+          "status" : "done",
+          "title" : "会议 11月5日 14:00",
+          "transcription" : { "status" : "done" }
+        }
+        """
+        let dir = store.directory("2026-11-05_14-00-00")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(legacy.utf8).write(to: dir.appendingPathComponent("meeting.json"))
+
+        let loaded = try #require(store.loadAll().first)
+        #expect(loaded.transcription == TranscriptionState(status: .done))
+        #expect(loaded.minutes == nil)
+    }
+
+    @Test func 纪要状态按约定字段写入() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        var m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        m.minutes = MinutesState(status: .queued)
+        try store.save(m)
+
+        let url = store.directory(m.id).appendingPathComponent("meeting.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let minutes = try #require(json["minutes"] as? [String: Any])
+        #expect(minutes["status"] as? String == "queued")
+        #expect(store.loadAll().first?.minutes == MinutesState(status: .queued))
     }
 
     @Test func 按开始时间从新到旧列出且跳过无法读取的目录() throws {
