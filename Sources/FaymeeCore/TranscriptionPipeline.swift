@@ -30,9 +30,13 @@ public enum TranscriptionActivity: Hashable, Sendable {
 @MainActor @Observable
 public final class TranscriptionPipeline {
     /// 排队中的会议，不含正在转写的
-    public private(set) var queue: [String] = []
+    public private(set) var queue: [String] = [] {
+        didSet { reportIdle() }
+    }
     /// 正在转写的会议
-    public private(set) var activeID: String?
+    public private(set) var activeID: String? {
+        didSet { reportIdle() }
+    }
     public private(set) var activity: TranscriptionActivity?
     /// 转写时传给引擎的热词。每场转写开始时取一次快照，写进转写稿
     public var hotwords: [String] = []
@@ -42,8 +46,9 @@ public final class TranscriptionPipeline {
         didSet {
             guard isSuspended != oldValue else { return }
             if isSuspended, let id = activeID {
-                cancelActive()
+                // 先放回队首再取消，中间不出现“空闲”的瞬间
                 queue.insert(id, at: 0)
+                cancelActive()
                 host?.setTranscription(TranscriptionState(status: .queued), for: id)
             } else if !isSuspended {
                 startNext()
@@ -51,7 +56,17 @@ public final class TranscriptionPipeline {
         }
     }
 
-    /// 转写完成或失败时调用（不含取消）
+    /// 为 true 时不开始新的转写，但不取消正在进行的。纪要生成中由纪要管线置位：
+    /// 两者都是重任务，一次只跑一个，已经在生成的纪要跑完再让给转写（见 `MinutesPipeline.coordinate`）
+    public var isHeld = false {
+        didSet { if !isHeld && oldValue { startNext() } }
+    }
+
+    /// `isIdle` 变化时调用。纪要管线据此决定能否开始：转写不空闲时不开始新的纪要
+    @ObservationIgnored public var onIdleChange: ((Bool) -> Void)?
+    @ObservationIgnored private var reportedIdle = true
+
+    /// 转写完成或失败时调用（不含取消）。调用时 activeID 还是这场会议，管线还不算空闲
     @ObservationIgnored public var onFinish: ((String, TranscriptionOutcome) -> Void)?
 
     @ObservationIgnored private let store: MeetingStore
@@ -110,15 +125,19 @@ public final class TranscriptionPipeline {
     }
 
     private func startNext() {
-        guard !isSuspended, activeID == nil, !queue.isEmpty else { return }
-        let id = queue.removeFirst()
-        guard let m = host?.meeting(id), let audio = store.recordingURL(m) else { return startNext() }
+        guard !isSuspended, !isHeld, activeID == nil, let id = queue.first else { return }
+        guard let m = host?.meeting(id), let audio = store.recordingURL(m) else {
+            queue.removeFirst()
+            return startNext()
+        }
 
         generation += 1
         let token = generation
         let hotwords = hotwords
         let transcriber = transcriber
+        // 先设 activeID 再移出队列，中间不出现“空闲”的瞬间
         activeID = id
+        queue.removeFirst()
         activity = .preparing(0)
         host?.setTranscription(TranscriptionState(status: .running), for: id)
 
@@ -146,10 +165,13 @@ public final class TranscriptionPipeline {
     private func finish(_ id: String, token: Int, hotwords: [String], result: Result<[TranscribedSentence], Error>) {
         // 已被取消：结果作废，什么都不写
         guard token == generation, activeID == id else { return }
-        activeID = nil
         activity = nil
         task = nil
-        defer { startNext() }
+        // 写好转写稿、更新状态、回调之后才清 activeID：清掉就算空闲，等着的纪要会马上读转写稿快照
+        defer {
+            activeID = nil
+            startNext()
+        }
         // 转写期间会议被删除
         guard let host, let m = host.meeting(id) else { return }
 
@@ -165,6 +187,12 @@ public final class TranscriptionPipeline {
             host.setTranscription(TranscriptionState(status: .failed, error: error.localizedDescription), for: id)
         }
         onFinish?(id, outcome)
+    }
+
+    private func reportIdle() {
+        guard isIdle != reportedIdle else { return }
+        reportedIdle = isIdle
+        onIdleChange?(isIdle)
     }
 
     private func cancelActive() {

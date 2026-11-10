@@ -83,9 +83,21 @@ final class AppModel {
     @ObservationIgnored private var silentSince: Date?
     @ObservationIgnored private var silenceNotified = false
     @ObservationIgnored private var lastStallRestart = Date.distantPast
-    /// 启动时的中断恢复和转写恢复是否已完成，之前不开始转写
+    /// 启动时的中断恢复和转写、纪要恢复是否已完成，之前不开始转写和纪要
     @ObservationIgnored private var launchRecovered = false {
         didSet { syncTranscriptionSuspension() }
+    }
+    /// 为 true 时先不重新计算暂停，见 finalize
+    @ObservationIgnored private var deferSuspensionSync = false {
+        didSet { if !deferSuspensionSync { syncTranscriptionSuspension() } }
+    }
+
+    /// “转写完成后自动生成纪要”，记在 UserDefaults，默认打开（设置界面在 05）
+    var autoGenerateMinutes: Bool {
+        didSet {
+            UserDefaults.standard.set(autoGenerateMinutes, forKey: "autoGenerateMinutes")
+            minutes.autoGenerate = autoGenerateMinutes
+        }
     }
 
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
@@ -100,9 +112,23 @@ final class AppModel {
         return pipeline
     }()
 
+    /// 纪要队列。界面观察它的 queue / activeID / activity，用 waitReason(for:) 取排队说明，
+    /// 手动生成调 enqueue；会议的纪要状态在 meeting.minutes 里，由本类作为 MinutesHost 写入。
+    /// 和转写管线互相让行（coordinate），录音、整理、启动恢复期间和转写一起暂停
+    @ObservationIgnored private(set) lazy var minutes: MinutesPipeline = {
+        let engine = MinutesEngine.make()
+        let pipeline = MinutesPipeline(store: store, generator: engine.generator, model: engine.name, host: self)
+        pipeline.isSuspended = true
+        pipeline.isOnPower = SystemState.isOnPower
+        pipeline.autoGenerate = autoGenerateMinutes
+        pipeline.coordinate(with: transcription)
+        return pipeline
+    }()
+
     init() {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
+        autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
         meetings = store.loadAll()
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
@@ -119,10 +145,17 @@ final class AppModel {
         recorder.onSegment = { [weak self] in self?.segmentOpened($0) }
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
+        SystemState.observePowerChanges { [weak self] in
+            // 电量变化也会通知，只在接电状态变了时更新
+            let onPower = SystemState.isOnPower
+            guard let self, self.minutes.isOnPower != onPower else { return }
+            self.minutes.isOnPower = onPower
+        }
         Notifier.setUp()
         Task {
             await recoverInterrupted()
             transcription.restore(meetings)
+            minutes.restore(meetings)
             launchRecovered = true
         }
     }
@@ -305,9 +338,13 @@ final class AppModel {
         switch result {
         case let .success(finalized):
             latest.markFinalized(recording: output.lastPathComponent, finalized)
+            // 新会议的转写先入队再解除暂停：否则解除暂停的瞬间转写队列是空的，
+            // 排队的纪要会抢先开始，新会议的转写稿要等一整场纪要生成完
+            deferSuspensionSync = true
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
             transcription.enqueue(id)
+            deferSuspensionSync = false
         case let .failure(error):
             latest.status = .failed
             latest.error = error.localizedDescription
@@ -346,8 +383,9 @@ final class AppModel {
 
     func trash(_ id: String) {
         guard id != current?.id else { return }
-        // 先取消转写，免得转写完成时往已删除的目录里写文件
+        // 先取消转写和纪要，免得完成时往已删除的目录里写文件
         transcription.remove(id)
+        minutes.remove(id)
         do {
             try store.trash(id)
             meetings.removeAll { $0.id == id }
@@ -356,6 +394,9 @@ final class AppModel {
             // 会议还在，把被取消的转写放回队列
             if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
                 transcription.enqueue(id)
+            }
+            if let status = meeting(id)?.minutes?.status, status == .queued || status == .running {
+                minutes.enqueue(id)
             }
         }
     }
@@ -404,17 +445,22 @@ final class AppModel {
 
     // MARK: - 转写
 
-    /// 录音和整理期间暂停转写，启动恢复完成前也不开始。
+    /// 录音和整理期间暂停转写和纪要，启动恢复完成前也不开始。
     /// 由 meetings、current、launchRecovered 的 didSet 调用，别处不用手动同步。
     /// 停止录音后到开始整理前，会议还是 .recording（整理在异步任务里才开始），
-    /// 也算在内，免得中间空档里转写刚开始就被取消
+    /// 也算在内，免得中间空档里转写刚开始就被取消。
+    /// 先设转写再设纪要：同时解除时转写先开始（纪要管线另外也会等转写空闲）
     private func syncTranscriptionSuspension() {
-        transcription.isSuspended = !launchRecovered || isRecording
+        guard !deferSuspensionSync else { return }
+        let suspended = !launchRecovered || isRecording
             || meetings.contains { $0.status == .recording || $0.status == .finalizing }
+        transcription.isSuspended = suspended
+        minutes.isSuspended = suspended
     }
 
-    /// 转写完成或失败时发静音通知，录音中不发
+    /// 转写成功后按规则自动排队生成纪要；转写完成或失败时发静音通知，录音中不发
     private func transcriptionFinished(_ id: String, _ outcome: TranscriptionOutcome) {
+        if case .done = outcome { minutes.transcriptionFinished(id) }
         guard let m = meeting(id),
               let notice = TranscriptionNotice.make(for: outcome, meetingTitle: m.title, isRecording: isRecording)
         else { return }
@@ -436,11 +482,17 @@ final class AppModel {
     }
 }
 
-/// meeting.json 只由 AppModel 写入，转写管线经这里更新转写状态
-extension AppModel: TranscriptionHost {
+/// meeting.json 只由 AppModel 写入，转写、纪要管线经这里更新状态
+extension AppModel: TranscriptionHost, MinutesHost {
     func setTranscription(_ state: TranscriptionState, for id: String) {
         guard var m = meeting(id) else { return }
         m.transcription = state
+        update(m)
+    }
+
+    func setMinutes(_ state: MinutesState, for id: String) {
+        guard var m = meeting(id) else { return }
+        m.minutes = state
         update(m)
     }
 }
