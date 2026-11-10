@@ -224,6 +224,28 @@ private func sentence(_ t: Transcript, _ id: String) -> TranscriptSentence? {
         #expect(t.speakerEditCount == 2)
         #expect(t.editCount == 3)
     }
+
+    /// 这次转写会区分说话人时，名字按时间重合沿用到新说话人，不算丢失
+    @Test func 重新转写会区分说话人时名字不算修改() {
+        var t = transcript()
+        t.edit(sentence: "s1", to: "我们先过一下上周的待办事项")
+        t.renameSpeaker("spk1", to: "李四")
+
+        #expect(t.retranscribeEditCount(diarizes: true) == 1)
+    }
+
+    /// 开关关着（或没有区分引擎）时新稿没有说话人，手动起的名字（含合并、采纳建议）也会丢，每个名字算一处；
+    /// 声纹认出的名字不是人工修改，下次区分还会认出来，不算
+    @Test func 重新转写不区分说话人时手动起的名字也算修改() {
+        var t = transcript()
+        t.edit(sentence: "s1", to: "我们先过一下上周的待办事项")
+        t.setSpeaker(sentence: "s4", to: "spk2")
+        #expect(t.retranscribeEditCount(diarizes: false) == 2)
+
+        t.renameSpeaker("spk1", to: "李四")
+        t.renameSpeaker("spk3", to: "王五")
+        #expect(t.retranscribeEditCount(diarizes: false) == 4)
+    }
 }
 
 /// 合并两个说话人：纠正同一个人被拆成两个

@@ -563,21 +563,25 @@ extension Fixture {
         #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .failed, error: "模型加载失败"))
     }
 
-    @Test func 关闭开关时不调用区分引擎_说话人状态不变() async throws {
+    /// 开关关着重新转写：新稿没有说话人，说话人状态如实退回“从未区分”，不留着旧的完成或失败
+    @Test func 关闭开关时不调用区分引擎_说话人状态退回从未区分() async throws {
         let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
         let m = f.addMeeting()
-        f.host.setDiarization(DiarizationState(status: .failed, error: "上次的原因"), for: m.id)
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+        #expect(try f.store.loadTranscript(m.id)?.speakers.count == 2)
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
         f.pipeline.diarizes = false
 
         f.pipeline.enqueue(m.id)
         try await f.drain()
 
-        #expect(f.diarizer?.calls.isEmpty == true)
+        #expect(f.diarizer?.calls.count == 1)
         let t = try #require(try f.store.loadTranscript(m.id))
         #expect(t.diarization == nil)
         #expect(t.sentences.count == 4)
-        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .failed, error: "上次的原因"))
-        #expect(f.host.diarizationHistory[m.id] == [.failed])
+        #expect(f.host.meetings[m.id]?.diarization == nil)
+        #expect(f.store.loadAll().first?.diarization == nil)
     }
 
     @Test func 没有区分引擎时跳过这一步_不算失败() async throws {

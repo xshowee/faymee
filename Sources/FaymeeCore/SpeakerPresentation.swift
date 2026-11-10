@@ -86,8 +86,8 @@ public enum SpeakerStatus: Hashable, Sendable {
     ///   - transcription: `meeting.transcription`
     ///   - diarization: `meeting.diarization`
     ///   - activity: `TranscriptionPipeline.activity(for:)`，区分中以它的进度为准
-    ///   - transcript: 当前转写稿，没有或读不出来时为 nil。有没有说话人看它，不看 `diarization`：
-    ///     开关关着重新转写后说话人状态还是旧的 done，新稿却没有说话人
+    ///   - transcript: 当前转写稿，没有或读不出来时为 nil（没什么可区分的，不显示）。
+    ///     有没有说话人看 `diarization`：管线保存转写稿时同步更新它，完成即新稿有说话人
     ///   - canDiarize: 有没有区分引擎
     public init(transcription: TranscriptionState?, diarization: DiarizationState?,
                 activity: TranscriptionActivity?, transcript: Transcript?, canDiarize: Bool) {
@@ -102,13 +102,11 @@ public enum SpeakerStatus: Hashable, Sendable {
         case .running: self = .diarizing(nil); return
         case nil, .done, .failed: break
         }
-        guard let transcript else { self = .hidden; return }
-        if diarization?.status == .failed {
-            self = .failed(diarization?.error ?? "区分说话人失败", canRetry: canDiarize)
-        } else if transcript.diarization != nil {
-            self = .done
-        } else {
-            self = canDiarize ? .notDiarized : .hidden
+        guard transcript != nil else { self = .hidden; return }
+        switch diarization?.status {
+        case .failed: self = .failed(diarization?.error ?? "区分说话人失败", canRetry: canDiarize)
+        case .done: self = .done
+        default: self = canDiarize ? .notDiarized : .hidden
         }
     }
 

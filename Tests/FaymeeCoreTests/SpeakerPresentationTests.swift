@@ -137,10 +137,10 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
         #expect(status(transcript: plain, canDiarize: false) == .hidden)
     }
 
-    /// 判断有没有说话人看转写稿：开关关着重新转写后说话人状态还是旧的 done，但新稿没有说话人
-    @Test func 有没有说话人看转写稿不看说话人状态() {
+    /// 有没有说话人看说话人状态：管线保存转写稿时同步更新它（开关关着重新转写后退回 nil）
+    @Test func 区分完成() {
         #expect(status(diarization: .init(status: .done), transcript: diarized) == .done)
-        #expect(status(diarization: .init(status: .done), transcript: plain) == .notDiarized)
+        #expect(status(diarization: nil, transcript: plain) == .notDiarized)
     }
 
     @Test func 区分中显示进度() {

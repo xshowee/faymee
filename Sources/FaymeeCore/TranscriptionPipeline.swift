@@ -49,8 +49,13 @@ public final class TranscriptionPipeline {
     /// 转写时传给引擎的热词。每场转写开始时取一次快照，写进转写稿
     public var hotwords: [String] = []
     /// “区分说话人”开关（App 存 UserDefaults，默认开）。关闭时完整转写跳过这一步，不调用区分引擎，
-    /// 说话人状态不变。每场转写开始时取一次快照
+    /// 新稿没有说话人，说话人状态退回 nil（旧稿的名字、合并随之丢掉，见 `transcriptionDiarizes`）。
+    /// 每场转写开始时取一次快照
     public var diarizes = true
+
+    /// 现在开始的完整转写会不会区分说话人（开关开着且有区分引擎）。不会时重新转写丢掉全部说话人信息，
+    /// 确认提示据此把说话人名字也算进修改数（见 `Transcript.retranscribeEditCount(diarizes:)`）
+    public var transcriptionDiarizes: Bool { diarizes && diarizer != nil }
     /// 声纹识别的阈值（余弦相似度，超过才认）。引擎给出推荐值后由 App 设置
     public var voiceprintThreshold = VoiceprintLibrary.defaultMatchThreshold
     /// 暂停时不开始新的转写；暂停的瞬间正在进行的转写被取消并放回队首，恢复后从头再转。
@@ -389,6 +394,7 @@ public final class TranscriptionPipeline {
         do {
             var transcript = Transcript.assemble(try result.get(), meeting: m, engine: engine,
                                                  hotwords: hotwords, createdAt: Date())
+            // 没走区分这一步（开关关着、没有引擎）时新稿没有说话人：状态如实退回“从未区分”
             var diarizationState: DiarizationState?
             if let diarization, let diarizer {
                 switch diarization {
@@ -409,7 +415,7 @@ public final class TranscriptionPipeline {
             try store.saveTranscript(transcript, for: id)
             outcome = .done(transcript)
             host.setTranscription(TranscriptionState(status: .done), for: id)
-            if let diarizationState { host.setDiarization(diarizationState, for: id) }
+            host.setDiarization(diarizationState, for: id)
         } catch {
             outcome = .failed(error.localizedDescription)
             host.setTranscription(TranscriptionState(status: .failed, error: error.localizedDescription), for: id)

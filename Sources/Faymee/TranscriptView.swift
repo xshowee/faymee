@@ -107,11 +107,15 @@ struct TranscriptSection: View {
                 enrollOffer = nil
             }
         }
-        .confirmationDialog("重新转写会丢弃 \(transcript?.editCount ?? 0) 处修改",
+        .confirmationDialog("重新转写会丢弃 \(retranscribeEditCount) 处修改",
                             isPresented: $confirmingRetranscribe) {
             Button("重新转写", role: .destructive) { model.transcription.enqueue(meeting.id) }
         } message: {
-            Text("转写完成前仍显示当前转写稿，成功后整体替换。")
+            if transcript?.diarization != nil, !model.transcription.transcriptionDiarizes {
+                Text("转写完成前仍显示当前转写稿，成功后整体替换。这次不区分说话人，新转写稿没有说话人，说话人和名字都会丢掉。")
+            } else {
+                Text("转写完成前仍显示当前转写稿，成功后整体替换。")
+            }
         }
         .alert("给说话人改名", isPresented: isPresent($renaming), presenting: renaming) { speaker in
             TextField(speaker.displayName, text: $renameDraft)
@@ -297,9 +301,14 @@ struct TranscriptSection: View {
         }
     }
 
+    /// 重新转写会丢弃的修改数。这次不区分说话人（开关关着、没有引擎）时说话人名字也会丢，一起算
+    private var retranscribeEditCount: Int {
+        transcript?.retranscribeEditCount(diarizes: model.transcription.transcriptionDiarizes) ?? 0
+    }
+
     /// “重试”和“重新转写”成功后都会整份替换现有转写稿，有人工修改时先确认
     private func retranscribe() {
-        if let transcript, transcript.editCount > 0 {
+        if retranscribeEditCount > 0 {
             confirmingRetranscribe = true
         } else {
             model.transcription.enqueue(meeting.id)
