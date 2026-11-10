@@ -1,0 +1,444 @@
+import Foundation
+import Testing
+@testable import FaymeeCore
+
+private func date(_ iso: String) -> Date {
+    try! Date(iso, strategy: .iso8601)
+}
+
+private let shanghai = TimeZone(identifier: "Asia/Shanghai")!
+
+/// 假引擎：按脚本依次返回固定输出，记录每次调用。countTokens 按字数计
+private final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
+    let contextTokens: Int
+    var outputs: [String]
+    /// 设了就在 generate 里抛出
+    var error: Error?
+    /// 设了就不用 outputs，按提示词现算输出
+    var respond: ((_ system: String, _ prompt: String) -> String)?
+    private(set) var calls: [(system: String, prompt: String, maxTokens: Int)] = []
+
+    init(contextTokens: Int = 100_000, outputs: [String] = []) {
+        self.contextTokens = contextTokens
+        self.outputs = outputs
+    }
+
+    /// 提取调用：提示词里有转写稿的句子行。其余是合并调用
+    var extractionCalls: [String] { calls.map(\.prompt).filter { !transcriptLines(in: $0).isEmpty } }
+    var mergeCalls: [String] { calls.map(\.prompt).filter { transcriptLines(in: $0).isEmpty } }
+
+    func countTokens(_ text: String) -> Int { text.count }
+    var isDownloaded: Bool { true }
+    func load(progress: @escaping (Double) -> Void) async throws {}
+    func unload() {}
+
+    func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
+        calls.append((system, prompt, maxTokens))
+        if let error { throw error }
+        if let respond { return respond(system, prompt) }
+        guard !outputs.isEmpty else { Issue.record("脚本里的输出用完了"); return "" }
+        return outputs.removeFirst()
+    }
+}
+
+/// 提示词里的转写稿行：句子行 `[s12 …] …` 和合盖行 `[合盖，…]`
+private func transcriptLines(in prompt: String) -> [String] {
+    prompt.split(separator: "\n").map(String.init)
+        .filter { $0.hasPrefix("[合盖") || $0.wholeMatch(of: try! Regex(#"\[s\d+ [\d:]+\] .*"#)) != nil }
+}
+
+/// 一份长转写稿：s1…sN 每句 30 来个字，句间隔 10 秒（停顿 2 秒）。
+/// `gapAfter` 句之后插一段合盖空白，`pauseAfter` 句之后停顿 60 秒
+private func longTranscript(count: Int, gapAfter: Int? = nil, pauseAfter: Int? = nil) -> Transcript {
+    var items: [TranscriptItem] = []
+    var t: TimeInterval = 0
+    for i in 1...count {
+        items.append(.sentence(TranscriptSentence(id: "s\(i)", start: t, end: t + 8,
+                                                  text: "这是第\(i)句话，大家讨论了项目的进度和下一步的安排")))
+        t += 10
+        if i == gapAfter {
+            items.append(.gap(TranscriptGap(start: t, end: t + 120, reason: .lidClosed)))
+            t += 120
+        }
+        if i == pauseAfter { t += 60 }
+    }
+    return Transcript(engine: "apple/speechanalyzer", createdAt: date("2026-11-10T03:01:00Z"), hotwords: [],
+                      items: items)
+}
+
+/// 提取时每段给一条概要，出处是该段第一句；合并时把收到的出处都放进一条概要
+private func echoingResponder(_ system: String, _ prompt: String) -> String {
+    let lines = transcriptLines(in: prompt)
+    if let first = lines.first(where: { $0.hasPrefix("[s") }) {
+        let id = first.dropFirst().prefix { $0 != " " }
+        return #"{"overview": [{"text": "\#(id) 开始的一段", "refs": ["\#(id)"]}]}"#
+    }
+    let ids = prompt.matches(of: try! Regex(#""s\d+""#)).map { String(prompt[$0.range]) }
+    return #"{"overview": [{"text": "全场概要", "refs": [\#(ids.joined(separator: ", "))]}]}"#
+}
+
+/// 一份短转写稿：五句，中间一段合盖空白；s3 被人工修改过。
+/// start 故意取和时间标签对不上的小数，证明出处记的是句子的 start
+private let transcript = Transcript(
+    engine: "apple/speechanalyzer", createdAt: date("2026-11-10T03:01:00Z"), hotwords: [],
+    items: [
+        .sentence(TranscriptSentence(id: "s1", start: 3.2, end: 6, text: "我们今天讨论 v2.3 的发布时间")),
+        .sentence(TranscriptSentence(id: "s2", start: 760.4, end: 765, text: "支付接口还没准备好")),
+        .gap(TranscriptGap(start: 800, end: 980, reason: .lidClosed)),
+        .sentence(TranscriptSentence(id: "s3", start: 1880.2, end: 1885, text: "张三你下周三之前把报价单发给客户",
+                                     original: "张三你下周三之前把报价但发给客户")),
+        .sentence(TranscriptSentence(id: "s4", start: 1890, end: 1893, text: "那就推迟一周发布")),
+        .sentence(TranscriptSentence(id: "s5", start: 2645.5, end: 2650, text: "海外版的预算还没定")),
+    ])
+
+private func generate(_ generator: ScriptedGenerator, transcript: Transcript = transcript,
+                      template: MinutesTemplate = .general,
+                      progress: @escaping (Double) -> Void = { _ in }) async throws -> Minutes {
+    try await generateMinutes(
+        transcript: transcript, title: "产品周会", startedAt: date("2026-11-10T02:00:00Z"),
+        template: template, generator: generator, model: "fake/scripted",
+        createdAt: date("2026-11-10T03:05:00Z"), timeZone: shanghai, progress: progress)
+}
+
+@Suite struct MinutesGenerationTests {
+    @Test func 出处记下句子的start_不存在的出处被丢弃() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"overview": [{"text": "讨论了 v2.3 的发布时间", "refs": ["s1", "s99", "s2"]}],
+         "decisions": [{"text": "推迟一周发布", "refs": ["s4"]}],
+         "actions": [],
+         "questions": [{"text": "竞品的定价", "refs": ["s42", "x"]}]}
+        """#])
+
+        let minutes = try await generate(generator)
+
+        let overview = try #require(minutes.sections.first { $0.kind == .overview })
+        #expect(overview.items.map(\.refs) == [[MinutesRef(id: "s1", start: 3.2), MinutesRef(id: "s2", start: 760.4)]])
+        let decisions = try #require(minutes.sections.first { $0.kind == .decisions })
+        #expect(decisions.items.map(\.refs) == [[MinutesRef(id: "s4", start: 1890)]])
+        let questions = try #require(minutes.sections.first { $0.kind == .questions })
+        #expect(questions.items.map(\.text) == ["竞品的定价"])
+        #expect(questions.items.map(\.isUnsourced) == [true])
+        #expect(overview.items.map(\.isUnsourced) == [false])
+    }
+
+    @Test func 输入用修改后的文字_合盖空白以标记行出现_附会议标题日期星期() async throws {
+        let generator = ScriptedGenerator(outputs: [emptyOutput])
+
+        _ = try await generate(generator)
+
+        let prompt = try #require(generator.calls.first?.prompt)
+        #expect(prompt.contains("""
+        [s1 00:03] 我们今天讨论 v2.3 的发布时间
+        [s2 12:40] 支付接口还没准备好
+        [合盖，未录到声音 13:20–16:20]
+        [s3 31:20] 张三你下周三之前把报价单发给客户
+        [s4 31:30] 那就推迟一周发布
+        [s5 44:05] 海外版的预算还没定
+        """))
+        #expect(!prompt.contains("报价但"))
+        #expect(prompt.contains("产品周会"))
+        #expect(prompt.contains("2026-11-10"))
+        #expect(prompt.contains("星期二"))
+        #expect(prompt.contains("10:00"))
+    }
+
+    @Test func source记录快照的createdAt和哈希() async throws {
+        let minutes = try await generate(ScriptedGenerator(outputs: [emptyOutput]))
+
+        #expect(minutes.source == MinutesSource(transcriptCreatedAt: date("2026-11-10T03:01:00Z"),
+                                                textHash: transcript.textHash))
+        #expect(minutes.model == "fake/scripted")
+        #expect(minutes.template == "general")
+        #expect(minutes.createdAt == date("2026-11-10T03:05:00Z"))
+    }
+
+    @Test func 待办带负责人和截止时间_dueDate非法时置空保留due_空节保留() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"overview": [{"text": "讨论了发布时间", "refs": ["s1"], "owner": "李四"}],
+         "decisions": [],
+         "actions": [
+           {"text": "把报价单发给客户", "owner": "张三", "due": "下周三", "dueDate": "2026-11-18", "refs": ["s3"]},
+           {"text": "确认支付接口", "owner": null, "due": "月底", "dueDate": "2026-11-31", "refs": ["s2"]},
+           {"text": "整理海外版预算", "owner": "", "due": "", "dueDate": "下周", "refs": ["s5"]},
+           {"refs": ["s4"]},
+           "坏条目"
+         ]}
+        """#])
+
+        let minutes = try await generate(generator)
+
+        #expect(minutes.sections.map(\.kind) == [.overview, .decisions, .actions, .questions])
+        #expect(minutes.sections.map(\.title) == ["概要", "决议", "待办", "未决问题"])
+        #expect(minutes.sections[0].items == [
+            MinutesItem(id: "o1", text: "讨论了发布时间", refs: [MinutesRef(id: "s1", start: 3.2)]),
+        ])
+        #expect(minutes.sections[1].items.isEmpty)
+        #expect(minutes.sections[2].items == [
+            MinutesItem(id: "a1", text: "把报价单发给客户", owner: "张三", due: "下周三",
+                        dueDate: CalendarDate(year: 2026, month: 11, day: 18),
+                        refs: [MinutesRef(id: "s3", start: 1880.2)]),
+            MinutesItem(id: "a2", text: "确认支付接口", due: "月底", refs: [MinutesRef(id: "s2", start: 760.4)]),
+            MinutesItem(id: "a3", text: "整理海外版预算", refs: [MinutesRef(id: "s5", start: 2645.5)]),
+        ])
+        #expect(minutes.sections[3].items.isEmpty)
+    }
+
+    /// 生成的纪要写盘再读回应当不变：01 的编码只给待办节写 owner/due/dueDate
+    @Test func 生成的纪要写盘读回不变() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"overview": [{"text": "讨论了发布时间", "refs": ["s1"], "owner": "李四", "due": "明天"}],
+         "actions": [{"text": "把报价单发给客户", "owner": "张三", "due": "下周三", "dueDate": "2026-11-18", "refs": ["s3"]}],
+         "questions": [{"text": "海外版预算", "refs": ["s5", "s5"]}]}
+        """#])
+        let minutes = try await generate(generator)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        #expect(try decoder.decode(Minutes.self, from: encoder.encode(minutes)) == minutes)
+        #expect(minutes.sections[3].items.map(\.refs) == [[MinutesRef(id: "s5", start: 2645.5)]])
+    }
+
+    @Test(arguments: [
+        ("general", "通用", [], nil),
+        ("weekly", "周会", [("progress", "各项进展")], "风险"),
+        ("customer", "客户拜访", [("requests", "客户诉求"), ("commitments", "我方承诺")], "预算"),
+        ("interview", "面试", [("strengths", "候选人亮点"), ("concerns", "顾虑"), ("recommendation", "结论建议")],
+         "不替面试官下结论"),
+        ("review", "评审", [("issues", "问题清单")], "严重程度"),
+    ] as [(String, String, [(String, String)], String?)])
+    func 每个模板都生成出对应的节(key: String, name: String, custom: [(String, String)], focus: String?) async throws {
+        let template = try #require(MinutesTemplate(key: key))
+        let customJSON = custom.map { #""\#($0.0)": [{"text": "\#($0.1)的一条", "refs": ["s2"]}]"# }
+        let generator = ScriptedGenerator(outputs: [
+            "{" + ([#""overview": [{"text": "概要的一条", "refs": ["s1"]}]"#] + customJSON).joined(separator: ", ") + "}",
+        ])
+
+        let minutes = try await generate(generator, template: template)
+
+        #expect(template.name == name)
+        #expect(minutes.template == key)
+        #expect(minutes.sections.map(\.kind) == [.overview, .decisions, .actions, .questions] + custom.map { .custom($0.0) })
+        #expect(minutes.sections.map(\.title) == ["概要", "决议", "待办", "未决问题"] + custom.map(\.1))
+        #expect(minutes.sections.map(\.items.count) == [1, 0, 0, 0] + custom.map { _ in 1 })
+        for (section, (k, title)) in zip(minutes.sections.dropFirst(4), custom) {
+            #expect(section.items.map(\.id) == ["\(k)-1"])
+            #expect(section.items.map(\.text) == ["\(title)的一条"])
+            #expect(generator.calls[0].system.contains(title))
+        }
+        if let focus { #expect(generator.calls[0].system.contains(focus)) }
+    }
+
+    @Test func 内置五个模板_通用为默认() {
+        #expect(MinutesTemplate.all.map(\.key) == ["general", "weekly", "customer", "interview", "review"])
+        #expect(MinutesTemplate.all.first == .general)
+        #expect(MinutesTemplate(key: "nope") == nil)
+    }
+
+    @Test func 长转写稿按contextTokens分段_每段都在预算内_切点落在句子边界() async throws {
+        let long = longTranscript(count: 200, gapAfter: 120)
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = echoingResponder
+
+        _ = try await generate(generator, transcript: long)
+
+        #expect(generator.extractionCalls.count >= 3)
+        #expect(generator.mergeCalls.count >= 1)
+        for call in generator.calls {
+            #expect(call.maxTokens > 0)
+            #expect(call.system.count + call.prompt.count + call.maxTokens <= 4000)
+        }
+        // 按顺序拼起来正好是完整的输入，每行都完整、只出现一次
+        let expected = (1...200).flatMap { i -> [String] in
+            let t = (i - 1) * 10 + (i > 120 ? 120 : 0)
+            let line = String(format: "[s%d %02d:%02d] 这是第%d句话，大家讨论了项目的进度和下一步的安排", i, t / 60, t % 60, i)
+            return i == 120 ? [line, "[合盖，未录到声音 20:00–22:00]"] : [line]
+        }
+        #expect(generator.extractionCalls.flatMap(transcriptLines) == expected)
+    }
+
+    /// 合并时出处只认合并输入里出现过的：转写稿里存在、但提取时没人引用过的句子也要丢掉
+    @Test func 合并输出里没在合并输入中出现过的出处被丢弃() async throws {
+        let long = longTranscript(count: 200)
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        let allIDs = (1...200).map { #""s\#($0)""# }.joined(separator: ", ")
+        generator.respond = { system, prompt in
+            let lines = transcriptLines(in: prompt)
+            if let first = lines.first {
+                let id = first.dropFirst().prefix { $0 != " " }
+                return #"{"decisions": [{"text": "\#(id) 开始的一段", "refs": ["\#(id)", "s999"]}]}"#
+            }
+            return #"""
+            {"decisions": [{"text": "全场决议", "refs": [\#(allIDs)]}],
+             "questions": [{"text": "编出来的问题", "refs": ["s999"]}]}
+            """#
+        }
+
+        let minutes = try await generate(generator, transcript: long)
+
+        let cited = generator.extractionCalls.map { prompt in
+            Int(transcriptLines(in: prompt)[0].dropFirst(2).prefix { $0 != " " })!
+        }
+        #expect(cited.count >= 3)
+        #expect(minutes.sections[1].items.map(\.refs) == [cited.map { MinutesRef(id: "s\($0)", start: Double($0 - 1) * 10) }])
+        #expect(minutes.sections[3].items.map(\.isUnsourced) == [true])
+        // 合并只给条目和出处，不给原文
+        #expect(generator.mergeCalls.allSatisfy { !$0.contains("大家讨论了项目的进度") })
+        #expect(generator.mergeCalls.allSatisfy { !$0.contains("s999") })
+    }
+
+    /// 合并输入的字段顺序固定（与输出格式示例一致），待办的负责人和截止时间一并带上
+    @Test func 合并输入里的待办带负责人和截止时间_字段顺序固定() async throws {
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = { system, prompt in
+            if !transcriptLines(in: prompt).isEmpty {
+                return #"{"actions": [{"text": "发报价单", "owner": "张三", "due": "下周三", "dueDate": "2026-11-18", "refs": ["s1"]}]}"#
+            }
+            return emptyOutput
+        }
+
+        _ = try await generate(generator, transcript: longTranscript(count: 200))
+
+        let merge = try #require(generator.mergeCalls.first)
+        #expect(merge.contains(#"{"text":"发报价单","owner":"张三","due":"下周三","dueDate":"2026-11-18","refs":["s1"]}"#))
+    }
+
+    /// 先不带空白跑一遍，看第一段装满时切在哪；再把合盖空白或长停顿放在切点前几句，第一段应该切在那里
+    @Test(arguments: [true, false])
+    func 优先在合盖空白或长停顿处切(gap: Bool) async throws {
+        let plain = ScriptedGenerator(contextTokens: 4000)
+        plain.respond = echoingResponder
+        _ = try await generate(plain, transcript: longTranscript(count: 200))
+        let full = transcriptLines(in: plain.extractionCalls[0]).count
+        let cut = full - 5
+
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = echoingResponder
+        let transcript = gap ? longTranscript(count: 200, gapAfter: cut) : longTranscript(count: 200, pauseAfter: cut)
+        _ = try await generate(generator, transcript: transcript)
+
+        let first = transcriptLines(in: generator.extractionCalls[0])
+        let second = transcriptLines(in: generator.extractionCalls[1])
+        if gap {
+            #expect(first.count == cut + 1)
+            #expect(first.last?.hasPrefix("[合盖") == true)
+        } else {
+            #expect(first.count == cut)
+        }
+        #expect(second.first?.hasPrefix("[s\(cut + 1) ") == true)
+    }
+
+    /// 各段条目加起来一次放不下时，分批多轮合并，每次调用都在预算内，出处仍只来自提取时引用过的句子
+    @Test func 合并输入超出预算时分批多轮合并() async throws {
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = { system, prompt in
+            let lines = transcriptLines(in: prompt)
+            if !lines.isEmpty {
+                // 每段给 8 条长条目，几段加起来就超出一次合并的预算
+                let items = lines.prefix(8).map { line in
+                    let id = line.dropFirst().prefix { $0 != " " }
+                    return #"{"text": "\#(id) 这一句提到的事情需要后续跟进，大家讨论了很久还没有最终的结论，下次会议之前各自再想一想有没有更好的办法", "refs": ["\#(id)"]}"#
+                }
+                return #"{"questions": [\#(items.joined(separator: ", "))]}"#
+            }
+            let ids = prompt.matches(of: try! Regex(#""s\d+""#)).map { String(prompt[$0.range]) }
+            return #"{"questions": [{"text": "合并后的问题", "refs": [\#(ids.joined(separator: ", ")), "s200"]}]}"#
+        }
+
+        let minutes = try await generate(generator, transcript: longTranscript(count: 200))
+
+        #expect(generator.mergeCalls.count >= 2)
+        for call in generator.calls {
+            #expect(call.system.count + call.prompt.count + call.maxTokens <= 4000)
+        }
+        let cited = Set(generator.extractionCalls.flatMap { transcriptLines(in: $0).prefix(8) }
+            .map { String($0.dropFirst().prefix { $0 != " " }) })
+        let refs = minutes.sections[3].items.flatMap(\.refs)
+        #expect(!refs.isEmpty)
+        #expect(Set(refs.map(\.id)).isSubset(of: cited))
+        #expect(!refs.map(\.id).contains("s200"))
+    }
+
+    @Test func 连一句都放不下时抛错() async throws {
+        let generator = ScriptedGenerator(contextTokens: 200, outputs: [emptyOutput])
+
+        await #expect(throws: MinutesGenerationError.contextTooSmall) { try await generate(generator) }
+        #expect(generator.calls.isEmpty)
+    }
+
+    @Test func 进度按完成的段数加合并计() async throws {
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = echoingResponder
+        var reported: [Double] = []
+
+        _ = try await generate(generator, transcript: longTranscript(count: 200)) { reported.append($0) }
+
+        let n = generator.extractionCalls.count
+        #expect(n >= 3)
+        #expect(reported == (1...n).map { Double($0) / Double(n + 1) } + [1])
+    }
+
+    @Test func 只有一段时进度直接到1() async throws {
+        var reported: [Double] = []
+        _ = try await generate(ScriptedGenerator(outputs: [emptyOutput])) { reported.append($0) }
+        #expect(reported == [1])
+    }
+
+    @Test func 只有一段时跳过合并() async throws {
+        let generator = ScriptedGenerator()
+        generator.respond = echoingResponder
+
+        _ = try await generate(generator, transcript: longTranscript(count: 20))
+
+        #expect(generator.calls.count == 1)
+    }
+
+    @Test func 解析容忍代码块包裹和前后多余文字() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        好的，下面是纪要：
+        ```json
+        {"overview": [], "decisions": [{"text": "推迟一周发布", "refs": ["s4"]}], "actions": [], "questions": []}
+        ```
+        以上内容仅供参考。
+        """#])
+
+        let minutes = try await generate(generator)
+
+        #expect(minutes.sections.first { $0.kind == .decisions }?.items.map(\.text) == ["推迟一周发布"])
+    }
+
+    @Test func 解析失败时用同一段输入重试一次() async throws {
+        let generator = ScriptedGenerator(outputs: ["抱歉，我无法完成。", #"{"decisions": [{"text": "推迟一周发布", "refs": ["s4"]}]}"#])
+
+        let minutes = try await generate(generator)
+
+        #expect(generator.calls.count == 2)
+        #expect(generator.calls[0].prompt == generator.calls[1].prompt)
+        #expect(generator.calls[0].system == generator.calls[1].system)
+        #expect(minutes.sections.first { $0.kind == .decisions }?.items.map(\.text) == ["推迟一周发布"])
+    }
+
+    /// 没有一个预期的节，如多包了一层，不能当成各节为空，悄悄产出一份空纪要
+    @Test(arguments: ["这次会议没有什么内容", #"{"error": "context too long"}"#,
+                      #"{"minutes": {"overview": []}}"#, #"{"overview": [ "#])
+    func 两次都解析失败时抛错_模型输出无法解析(bad: String) async throws {
+        let generator = ScriptedGenerator(outputs: [bad, bad])
+
+        let error = await #expect(throws: MinutesGenerationError.unparseableOutput) { try await generate(generator) }
+
+        #expect(error?.localizedDescription == "模型输出无法解析")
+        #expect(generator.calls.count == 2)
+    }
+
+    /// 引擎报错（含取消）不是解析失败，不重试
+    @Test func 引擎报错原样抛出_不重试() async throws {
+        let generator = ScriptedGenerator(outputs: [])
+        generator.error = CancellationError()
+
+        await #expect(throws: CancellationError.self) { try await generate(generator) }
+        #expect(generator.calls.count == 1)
+    }
+}
+
+private let emptyOutput = #"{"overview": [], "decisions": [], "actions": [], "questions": []}"#
