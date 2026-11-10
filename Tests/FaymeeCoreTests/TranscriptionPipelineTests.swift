@@ -874,6 +874,35 @@ extension Fixture {
         #expect(f.host.meetings[m.id]?.diarization?.status == .done)
     }
 
+    /// 排队重新区分后改成完整转写：说话人状态在改的那一刻就按现有转写稿落定，不等转写结束。
+    /// 转写失败时旧稿（带说话人）保留，说话人状态也还是完成
+    @Test func 排队只区分说话人改成完整转写时说话人状态按现有转写稿落定() async throws {
+        let engine = FakeTranscriber(twoPeople)
+        engine.transcribeError = EngineError()
+        let f = Fixture(engine, diarizer: FakeDiarizer(twoPeopleSegments))
+        f.pipeline.isSuspended = true
+        var diarized = legacyTranscript()
+        diarized.items[0] = .sentence(.init(id: "s1", start: 0, end: 5, text: "我们开始吧", speaker: "spk1"))
+        diarized.diarization = Diarization(engine: "fake/diarizer", voiceprintModel: "fake/voiceprint",
+                                           speakersCreatedAt: at(800), speakers: [
+            Speaker(id: "spk1", name: "张三", nameSource: .user, voiceprint: vp1, speechDuration: 5),
+        ])
+        let m = f.addTranscribedMeeting(transcript: diarized)
+        f.host.setDiarization(DiarizationState(status: .done), for: m.id)
+        f.pipeline.enqueueDiarization(m.id, speakerCount: 2)
+
+        f.pipeline.enqueue(m.id)
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.host.meetings[m.id]?.transcription?.status == .failed)
+        #expect(try f.store.loadTranscript(m.id) == diarized)
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+        #expect(f.diarizer?.calls.isEmpty == true)
+    }
+
     @Test func 开关关闭时完整转写不留下排队中的说话人状态() async throws {
         let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
         f.pipeline.isSuspended = true

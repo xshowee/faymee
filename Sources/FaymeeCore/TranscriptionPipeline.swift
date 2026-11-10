@@ -154,7 +154,8 @@ public final class TranscriptionPipeline {
 
     /// 排队转写（自动转写、旧会议的“转写”、“重试”、“重新转写”都走这里）。
     /// 只接受已整理好的会议；已在排队转写或正在进行（两种任务都算）时忽略。返回是否入队。预定随之作废。
-    /// 已在排队只区分说话人的，改成完整转写（完整转写里也会区分说话人），位置不变
+    /// 已在排队只区分说话人的，改成完整转写（完整转写里也会区分说话人），位置不变；
+    /// 排队中的说话人状态不会再有任务来完成，当场按现有转写稿落定（启动恢复时两种状态都在排队也一样）
     @discardableResult
     public func enqueue(_ id: String) -> Bool {
         // 入队后才取消预定，中间不出现“空闲”的瞬间
@@ -164,6 +165,9 @@ public final class TranscriptionPipeline {
         if !queue.contains(id) { queue.append(id) }
         jobs[id] = .transcription
         host?.setTranscription(TranscriptionState(status: .queued), for: id)
+        if let status = m.diarization?.status, status == .queued || status == .running {
+            settleDiarization(id)
+        }
         startNext()
         return true
     }
@@ -409,11 +413,6 @@ public final class TranscriptionPipeline {
         } catch {
             outcome = .failed(error.localizedDescription)
             host.setTranscription(TranscriptionState(status: .failed, error: error.localizedDescription), for: id)
-        }
-        // 没走区分这一步（开关关着、没有引擎、转写失败）时说话人状态不变，只有排队中、进行中的例外：
-        // 那是排队只区分说话人后又改成完整转写留下的，不会再有任务完成它，留着下次启动会被当成任务恢复
-        if let status = host.meeting(id)?.diarization?.status, status == .queued || status == .running {
-            host.setDiarization(nil, for: id)
         }
         onFinish?(id, outcome)
     }
