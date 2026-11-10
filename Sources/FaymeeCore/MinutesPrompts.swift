@@ -124,8 +124,8 @@ func mergeSystemPrompt(_ template: MinutesTemplate) -> String {
     你是会议纪要助手。一场较长的会议被分成几段分别提取了纪要条目，现在请把这些条目合并成整场会议的纪要。
 
     要求：
-    - 去掉重复的条目，把说同一件事的条目合并成一条，合并后的 refs 取这些条目 refs 的并集。
-    - 根据全部条目重新写整场会议的概要，3–6 条，refs 取所依据条目的 refs。
+    - 去掉重复的条目，把说同一件事的条目合并成一条，合并后的 refs 从这些条目的 refs 里选最直接的 1–3 个，最多 3 个。
+    - 根据全部条目重新写整场会议的概要，3–6 条，refs 从所依据条目的 refs 里选最直接的 1–3 个，最多 3 个。
     - refs 只能使用输入里出现过的句子编号，不要新增或改写编号。
     - 不要添加输入里没有的内容。前后矛盾时以后面的为准。
     - 用简体中文书写，语句简洁，一条只说一件事。
@@ -137,19 +137,37 @@ func mergeSystemPrompt(_ template: MinutesTemplate) -> String {
     """
 }
 
-/// 合并的输入只有各段的条目和出处，没有原文
-func mergePrompt(_ meeting: MeetingInfo, draft: Draft, template: MinutesTemplate) -> String {
+/// 合并的输入只有各段的条目和出处，没有原文。`sections` 给了就只写这几节
+func mergePrompt(_ meeting: MeetingInfo, draft: Draft, template: MinutesTemplate,
+                 sections: [MinutesSectionKind]? = nil) -> String {
     """
     \(meeting.header)
 
     各段提取的条目：
-    \(draftJSON(draft, template: template))
+    \(draftJSON(draft, sections: sections ?? template.sections.map(\.kind)))
+    """
+}
+
+/// 合并放不下、直接拼接各段条目时，只把各段的概要合并成整场的概要
+func overviewMergeSystemPrompt(_ template: MinutesTemplate) -> String {
+    """
+    你是会议纪要助手。一场较长的会议被分成几段分别写了概要，现在请把这些概要合并成整场会议的概要。
+
+    要求：
+    - 3–6 条，每条一句话，各说一个议题，合起来说清会议讨论了什么；不要把整场会写成一条。
+    - 说同一个议题的几条合并成一条，refs 从这些条目的 refs 里选最直接的 1–3 个，最多 3 个。
+    - refs 只能使用输入里出现过的句子编号，不要新增或改写编号。
+    - 不要添加输入里没有的内容。
+    - 用简体中文书写，语句简洁。
+    \(template.focus.map { "\n这是一场\(template.name)，请侧重：\($0)\n" } ?? "")
+    只输出一个 JSON 对象，不要输出其他文字。格式如下：
+    {"overview": [{"text": "…", "refs": ["s12"]}, {"text": "…", "refs": ["s15", "s16"]}]}
     """
 }
 
 /// 按模板的节顺序写成 JSON，格式与要求模型输出的相同。
 /// 字段顺序手写固定（text 在前、refs 在后）：JSONEncoder 不保证键的顺序，提示词要可复现
-func draftJSON(_ draft: Draft, template: MinutesTemplate) -> String {
+func draftJSON(_ draft: Draft, sections kinds: [MinutesSectionKind]) -> String {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
     func json(_ value: some Encodable) -> String { String(decoding: try! encoder.encode(value), as: UTF8.self) }
@@ -160,7 +178,7 @@ func draftJSON(_ draft: Draft, template: MinutesTemplate) -> String {
         ]
         return "{" + fields.compactMap { k, v in v.map { "\"\(k)\":\($0)" } }.joined(separator: ",") + "}"
     }
-    let sections = template.sections.map { kind, _ -> String in
+    let sections = kinds.map { kind -> String in
         let key = sectionKey(kind)
         return "\"\(key)\": [" + (draft[key] ?? []).map(item).joined(separator: ", ") + "]"
     }
@@ -200,4 +218,30 @@ private func outputFormat(_ template: MinutesTemplate) -> String {
         return #""\#(key)": [{"text": "…", "refs": ["s12"]}, {"text": "…", "refs": ["s15", "s16"]}]"#
     }
     return "只输出一个 JSON 对象，不要输出其他文字。格式如下：\n{" + fields.joined(separator: ", ") + "}"
+}
+
+/// 约束输出形状的 GBNF 文法：一个 JSON 对象，`kinds` 的键按顺序各出现一次，每节是条目数组；
+/// 待办的条目依次是 text、owner、due、dueDate、refs（后三个可以是 null），其余节是 text、refs；
+/// refs 是 0–3 个句子编号。实测模型会在 refs 里一直往下列编号直到输出上限（ticket 04、11），
+/// 提示词管不住，所以用文法硬性限制。字段间最多一个空白字符，免得模型一直输出空白。
+/// 最后允许再跟至多两个值为空数组的键：模型习惯在末尾多写一个 `"questions": []`、`"notes": []`，
+/// 不让写的话它会接着往最后一节里加条目，实测因此陷入重复直到输出上限。解析时多出的键被忽略，
+/// 重复的键取第一次出现的值
+func outputGrammar(_ kinds: [MinutesSectionKind]) -> String {
+    let fields = kinds.map { kind in
+        #""\"\#(sectionKey(kind))\":" ws \#(kind == .actions ? "actions" : "items")"#
+    }
+    return #"""
+    root ::= "{" ws \#(fields.joined(separator: #" "," ws "#)) ( "," ws extra ( "," ws extra )? )? ws "}"
+    extra ::= string ":" ws "[" ws "]"
+    items ::= "[" ws ( item ( "," ws item )* )? ws "]"
+    actions ::= "[" ws ( action ( "," ws action )* )? ws "]"
+    item ::= "{" ws "\"text\":" ws string "," ws "\"refs\":" ws refs ws "}"
+    action ::= "{" ws "\"text\":" ws string "," ws "\"owner\":" ws nullable "," ws "\"due\":" ws nullable "," ws "\"dueDate\":" ws nullable "," ws "\"refs\":" ws refs ws "}"
+    refs ::= "[" ws ( ref ( "," ws ref ( "," ws ref )? )? )? ws "]"
+    ref ::= "\"" [A-Za-z0-9_-]+ "\""
+    nullable ::= string | "null"
+    string ::= "\"" ( [^"\\\x00-\x1f] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) )* "\""
+    ws ::= [ \n]?
+    """#
 }

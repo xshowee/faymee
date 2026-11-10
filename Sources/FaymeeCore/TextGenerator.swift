@@ -15,6 +15,15 @@ public protocol TextGenerator {
     func load(progress: @escaping (Double) -> Void) async throws
     /// 生成文字，需要支持取消
     func generate(system: String, prompt: String, maxTokens: Int) async throws -> String
+    /// 同上，用 `grammar`（llama.cpp 的 GBNF 文法，根规则名 `root`）约束输出的形状。
+    /// 纪要生成总是调这个。不支持文法的引擎可以不实现，默认忽略文法、转调上面的版本
+    func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String
     /// 释放模型占用的内存
     func unload()
+}
+
+extension TextGenerator {
+    public func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
+        try await generate(system: system, prompt: prompt, maxTokens: maxTokens)
+    }
 }

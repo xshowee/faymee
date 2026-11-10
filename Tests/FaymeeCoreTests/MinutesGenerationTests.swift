@@ -17,6 +17,8 @@ private final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     /// 设了就不用 outputs，按提示词现算输出
     var respond: ((_ system: String, _ prompt: String) -> String)?
     private(set) var calls: [(system: String, prompt: String, maxTokens: Int)] = []
+    /// 每次调用收到的输出文法
+    private(set) var grammars: [String?] = []
 
     init(contextTokens: Int = 100_000, outputs: [String] = []) {
         self.contextTokens = contextTokens
@@ -31,6 +33,11 @@ private final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     var isDownloaded: Bool { true }
     func load(progress: @escaping (Double) -> Void) async throws {}
     func unload() {}
+
+    func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
+        grammars.append(grammar)
+        return try await generate(system: system, prompt: prompt, maxTokens: maxTokens)
+    }
 
     func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
         calls.append((system, prompt, maxTokens))
@@ -119,6 +126,20 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         #expect(questions.items.map(\.text) == ["竞品的定价"])
         #expect(questions.items.map(\.isUnsourced) == [true])
         #expect(overview.items.map(\.isUnsourced) == [false])
+    }
+
+    /// 实测模型会在 refs 里一直往下列编号（ticket 04），每条最多留 3 个：
+    /// 先丢掉不存在的和重复的，再按模型给的顺序取前 3 个
+    @Test func 每条出处最多保留3个_丢掉无效的之后取最先列出的() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"decisions": [{"text": "推迟一周发布", "refs": ["s99", "s4", "s4", "s2", "x", "s5", "s1", "s3"]}],
+         "actions": [{"text": "发报价单", "owner": "张三", "refs": ["s3", "s1"]}]}
+        """#])
+
+        let minutes = try await generate(generator)
+
+        #expect(minutes.sections[1].items.map { $0.refs.map(\.id) } == [["s4", "s2", "s5"]])
+        #expect(minutes.sections[2].items.map { $0.refs.map(\.id) } == [["s3", "s1"]])
     }
 
     @Test func 输入用修改后的文字_合盖空白以标记行出现_附会议标题日期星期() async throws {
@@ -353,7 +374,7 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
             Int(transcriptLines(in: prompt)[0].dropFirst(2).prefix { $0 != " " })!
         }
         #expect(cited.count >= 3)
-        #expect(minutes.sections[1].items.map(\.refs) == [cited.map { MinutesRef(id: "s\($0)", start: Double($0 - 1) * 10) }])
+        #expect(minutes.sections[1].items.map(\.refs) == [cited.prefix(maxRefs).map { MinutesRef(id: "s\($0)", start: Double($0 - 1) * 10) }])
         #expect(minutes.sections[3].items.map(\.isUnsourced) == [true])
         // 合并只给条目和出处，不给原文
         #expect(generator.mergeCalls.allSatisfy { !$0.contains("大家讨论了项目的进度") })
@@ -450,10 +471,110 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         }
         let cited = Set(generator.extractionCalls.flatMap { transcriptLines(in: $0).prefix(8) }
             .map { String($0.dropFirst().prefix { $0 != " " }) })
+        // 多轮合并收敛到一份，没有落进拼接的兜底
+        #expect(minutes.sections[3].items.map(\.text) == ["合并后的问题"])
         let refs = minutes.sections[3].items.flatMap(\.refs)
         #expect(!refs.isEmpty)
         #expect(Set(refs.map(\.id)).isSubset(of: cited))
         #expect(!refs.map(\.id).contains("s200"))
+    }
+
+    /// 任意两段的条目加起来都放不下一次合并（ticket 04 实测的 1 小时密集稿就是这样）：不让整场失败，
+    /// 各节直接拼接各段条目（文字、负责人、截止时间都相同的去重，出处取并集），概要单独做一次小合并
+    @Test func 任意两段都凑不成一批合并时_直接拼接各段条目_概要单独合并() async throws {
+        let generator = ScriptedGenerator(contextTokens: 6000)
+        generator.respond = { system, prompt in
+            if let output = bulkyExtraction(prompt) { return output }
+            // 合并：把输入里的出处都放进一条概要，再加一个输入里没有的
+            let ids = prompt.matches(of: try! Regex(#""s\d+""#)).map { String(prompt[$0.range]) }
+            return #"{"overview": [{"text": "全场概要", "refs": [\#((ids + ["\"s200\""]).joined(separator: ", "))]}]}"#
+        }
+
+        let minutes = try await generate(generator, transcript: longTranscript(count: 200))
+
+        for call in generator.calls {
+            #expect(call.system.count + call.prompt.count + call.maxTokens <= 6000)
+        }
+        let cited = generator.extractionCalls.map { String(transcriptLines(in: $0)[0].dropFirst().prefix { $0 != " " }) }
+        #expect(cited.count >= 3)
+        // 只有一次合并，输入只有各段的概要
+        #expect(generator.mergeCalls.count == 1)
+        #expect(!generator.mergeCalls[0].contains("定下的"))
+        #expect(!generator.mergeCalls[0].contains("补齐测试用例"))
+
+        func ids(_ kind: MinutesSectionKind) -> [[String]] {
+            minutes.sections.first { $0.kind == kind }!.items.map { $0.refs.map(\.id) }
+        }
+        #expect(minutes.sections[0].items.map(\.text) == ["全场概要"])
+        #expect(ids(.overview) == [Array(cited.prefix(3))])
+
+        let decisions = minutes.sections[1].items.map(\.text)
+        let expected = cited.enumerated().flatMap { n, id in
+            (1...20).map { "\(id) 这一段定下的第\($0)件事，大家讨论了很久，最后一致同意按这个方案执行" } + (n == 0 ? ["老版本客户端不再支持"] : [])
+        }
+        #expect(decisions == expected)
+        let shared = try #require(minutes.sections[1].items.first { $0.text == "老版本客户端不再支持" })
+        #expect(shared.refs.map(\.id) == Array(cited.prefix(3)))
+
+        let actions = minutes.sections[2].items
+        #expect(actions.map(\.text) == ["补齐测试用例"] + cited.map { _ in "确认交互稿" })
+        #expect(actions.map(\.owner) == ["张三"] + cited.map { "\($0) 的人" })
+        #expect(actions[0].refs.map(\.id) == Array(cited.prefix(3)))
+        #expect(actions[0].due == "明天")
+        #expect(minutes.sections.flatMap(\.items).allSatisfy { $0.refs.count <= 3 })
+    }
+
+    /// 兜底时概要的小合并重试后仍解析不出：也不让整场失败，概要用各段的拼起来
+    @Test func 兜底时概要合并解析失败_用各段概要拼接() async throws {
+        let generator = ScriptedGenerator(contextTokens: 6000)
+        generator.respond = { system, prompt in bulkyExtraction(prompt) ?? "抱歉，我无法完成。" }
+
+        let minutes = try await generate(generator, transcript: longTranscript(count: 200))
+
+        #expect(generator.mergeCalls.count == 2)
+        let cited = generator.extractionCalls.map { String(transcriptLines(in: $0)[0].dropFirst().prefix { $0 != " " }) }
+        #expect(minutes.sections[0].items.map(\.text) == cited.map { "\($0) 开始的一段" })
+        #expect(minutes.sections[0].items.map { $0.refs.map(\.id) } == cited.map { [$0] })
+        #expect(minutes.sections[1].items.count == cited.count * 20 + 1)
+    }
+
+    /// 合并的输出被截断（输出侧的放不下）表现为解析失败。各段的条目已经提取好了，
+    /// 重试一次仍解析不出时退回拼接，不让整场失败
+    @Test func 分批合并重试后仍解析不出时_退回拼接各段条目() async throws {
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = { system, prompt in
+            if let first = transcriptLines(in: prompt).first(where: { $0.hasPrefix("[s") }) {
+                let id = first.dropFirst().prefix { $0 != " " }
+                return #"{"overview": [{"text": "\#(id) 开始的一段", "refs": ["\#(id)"]}], "decisions": [{"text": "\#(id) 定下的事", "refs": ["\#(id)"]}]}"#
+            }
+            // 合并的输出到上限被截断
+            return #"{"overview": [{"text": "全场概要", "refs": ["s1", "s21", "s41", "#
+        }
+
+        let minutes = try await generate(generator, transcript: longTranscript(count: 200))
+
+        let cited = generator.extractionCalls.map { String(transcriptLines(in: $0)[0].dropFirst().prefix { $0 != " " }) }
+        #expect(cited.count >= 3)
+        // 第一批合并试两次，概要的小合并再试两次
+        #expect(generator.mergeCalls.count == 4)
+        #expect(minutes.sections[0].items.map(\.text) == cited.map { "\($0) 开始的一段" })
+        #expect(minutes.sections[1].items.map(\.text) == cited.map { "\($0) 定下的事" })
+    }
+
+    /// 每次调用都带上约束输出形状的文法：提取和合并是模板的全部节，兜底时概要的小合并只有概要
+    @Test func 每次调用都带输出文法_列出该次要的节() async throws {
+        let generator = ScriptedGenerator(contextTokens: 6000)
+        generator.respond = { system, prompt in bulkyExtraction(prompt) ?? #"{"overview": []}"# }
+
+        _ = try await generate(generator, transcript: longTranscript(count: 200), template: .customer)
+
+        #expect(generator.grammars.count == generator.calls.count)
+        let keys = ["overview", "decisions", "actions", "questions", "requests", "commitments"]
+        for (call, grammar) in zip(generator.calls, generator.grammars) {
+            let grammar = try #require(grammar)
+            let expected = transcriptLines(in: call.prompt).isEmpty ? ["overview"] : keys
+            #expect(keys.filter { grammar.contains(#"\"\#($0)\""#) } == expected)
+        }
     }
 
     @Test func 连一句都放不下时抛错() async throws {
@@ -535,6 +656,22 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         await #expect(throws: CancellationError.self) { try await generate(generator) }
         #expect(generator.calls.count == 1)
     }
+}
+
+/// 提取时每段给很多条长条目，任意两段加起来都放不下一次合并（contextTokens 6000 时）。
+/// 每段都有一条文字相同的决议和一条负责人、截止时间都相同的待办。不是提取调用时返回 nil
+private func bulkyExtraction(_ prompt: String) -> String? {
+    guard let first = transcriptLines(in: prompt).first(where: { $0.hasPrefix("[s") }) else { return nil }
+    let id = first.dropFirst().prefix { $0 != " " }
+    let decisions = (1...20).map { k in
+        #"{"text": "\#(id) 这一段定下的第\#(k)件事，大家讨论了很久，最后一致同意按这个方案执行", "refs": ["\#(id)"]}"#
+    } + [#"{"text": "老版本客户端不再支持", "refs": ["\#(id)"]}"#]
+    return #"""
+    {"overview": [{"text": "\#(id) 开始的一段", "refs": ["\#(id)"]}],
+     "decisions": [\#(decisions.joined(separator: ", "))],
+     "actions": [{"text": "补齐测试用例", "owner": "张三", "due": "明天", "refs": ["\#(id)"]},
+                 {"text": "确认交互稿", "owner": "\#(id) 的人", "refs": ["\#(id)"]}]}
+    """#
 }
 
 private let emptyOutput = #"{"overview": [], "decisions": [], "actions": [], "questions": []}"#

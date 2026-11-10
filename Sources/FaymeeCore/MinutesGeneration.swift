@@ -104,7 +104,8 @@ func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: 
 
 /// 合并各段的条目：只给条目和出处，不再给原文。每次合并输出里没在该次输入中出现过的出处丢弃。
 /// 所有条目一次放不下时，按顺序把相邻的几段凑成一批（放得下的最多段数）分别合并，
-/// 再合并各批的结果，直到只剩一份；某一轮一批都凑不成时抛 `contextTooSmall`
+/// 再合并各批的结果，直到只剩一份。某一轮一批都凑不成、或某批合并重试后仍解析不出时，
+/// 不让整场失败，把这一轮的各份交给 `concatenate`
 private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTemplate,
                    generator: TextGenerator, budget: Budget) async throws -> Draft {
     let system = mergeSystemPrompt(template)
@@ -123,18 +124,64 @@ private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTem
             if group.count == 1 {
                 next.append(group[start])
             } else {
-                let combined = combine(group)
-                let allowed = Set(combined.values.flatMap { $0.flatMap(\.refs) })
-                let merged = try await generateDraft(generator, system: system, prompt: prompt(group),
+                let merged: Draft
+                do {
+                    merged = try await generateDraft(generator, system: system, prompt: prompt(group),
                                                      maxTokens: budget.outputTokens, template: template)
-                next.append(merged.validated(against: allowed))
+                } catch MinutesGenerationError.unparseableOutput {
+                    // 多半是输出到上限被截断，也是放不下；各段条目已经有了，不让整场失败
+                    return try await concatenate(level, meeting: meeting, template: template,
+                                                 generator: generator, budget: budget)
+                }
+                next.append(merged.validated(against: allowedRefs(group)))
             }
             start = end
         }
-        guard next.count < level.count else { throw MinutesGenerationError.contextTooSmall }
+        guard next.count < level.count else {
+            return try await concatenate(level, meeting: meeting, template: template, generator: generator, budget: budget)
+        }
         level = next
     }
     return level[0]
+}
+
+/// 合并的兜底：模型一次装不下时，各节直接按顺序拼接各份的条目，不让模型去重。
+/// 文字、负责人、截止时间都相同的才算重复，只留第一条，出处取并集（再截到 `maxRefs` 个）。
+/// 各段的概要拼起来太多太碎，单独做一次只有概要的小合并；放不下、或重试后仍解析不出，就用拼接的
+private func concatenate(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTemplate,
+                         generator: TextGenerator, budget: Budget) async throws -> Draft {
+    var result = Draft()
+    for (kind, _) in template.sections {
+        let key = sectionKey(kind)
+        var items: [DraftItem] = []
+        for item in drafts.flatMap({ $0[key] ?? [] }) {
+            if let n = items.firstIndex(where: { $0.text == item.text && $0.owner == item.owner && $0.due == item.due }) {
+                items[n].refs = Array((items[n].refs + item.refs.filter { !items[n].refs.contains($0) }).prefix(maxRefs))
+            } else {
+                items.append(item)
+            }
+        }
+        if !items.isEmpty { result[key] = items }
+    }
+
+    let overviewKey = sectionKey(.overview)
+    let overviews = drafts.map { [overviewKey: $0[overviewKey] ?? []] }
+    let system = overviewMergeSystemPrompt(template)
+    let prompt = mergePrompt(meeting, draft: combine(overviews[...]), template: template, sections: [.overview])
+    guard overviews.count(where: { !$0[overviewKey]!.isEmpty }) > 1, budget.fits(system: system, prompt: prompt)
+    else { return result }
+    do {
+        let merged = try await generateDraft(generator, system: system, prompt: prompt,
+                                             maxTokens: budget.outputTokens, template: template, sections: [.overview])
+            .validated(against: allowedRefs(overviews[...]))
+        if let items = merged[overviewKey], !items.isEmpty { result[overviewKey] = items }
+    } catch MinutesGenerationError.unparseableOutput {}
+    return result
+}
+
+/// 一次合并的输出里允许出现的出处：该次输入里出现过的
+private func allowedRefs(_ drafts: ArraySlice<Draft>) -> Set<String> {
+    Set(drafts.flatMap { $0.values.flatMap { $0.flatMap(\.refs) } })
 }
 
 /// 按顺序把几份条目拼在一起
@@ -159,14 +206,18 @@ struct DraftItem {
 /// 按节的 key（overview/decisions/actions/questions 或 custom 的 key）分组的条目
 typealias Draft = [String: [DraftItem]]
 
+/// 每个条目最多保留的出处数。实测模型会在 refs 里一直往下列编号（ticket 04），提示词也要求最多 3 个
+let maxRefs = 3
+
 extension Dictionary where Key == String, Value == [DraftItem] {
-    /// 只留下 `allowed` 里的出处，去掉重复。条目即使一个出处都不剩也保留
+    /// 只留下 `allowed` 里的出处，去掉重复，再按模型给的顺序取前 `maxRefs` 个。
+    /// 先校验再截断，免得不存在的编号占了名额。条目即使一个出处都不剩也保留
     func validated(against allowed: Set<String>) -> Draft {
         mapValues { items in
             items.map { item in
                 var seen = Set<String>()
                 var item = item
-                item.refs = item.refs.filter { allowed.contains($0) && seen.insert($0).inserted }
+                item.refs = Array(item.refs.filter { allowed.contains($0) && seen.insert($0).inserted }.prefix(maxRefs))
                 return item
             }
         }
@@ -209,12 +260,14 @@ func sectionKey(_ kind: MinutesSectionKind) -> String {
 }
 
 /// 调用一次模型并解析；解析失败时用同一段输入重试一次，还失败就抛 `unparseableOutput`。
+/// 输出用文法约束成 `sections`（默认模板的全部节）的形状。
 /// 引擎自己抛的错（含取消）原样抛出，不重试
 private func generateDraft(_ generator: TextGenerator, system: String, prompt: String, maxTokens: Int,
-                           template: MinutesTemplate) async throws -> Draft {
+                           template: MinutesTemplate, sections: [MinutesSectionKind]? = nil) async throws -> Draft {
+    let grammar = outputGrammar(sections ?? template.sections.map(\.kind))
     for _ in 0..<2 {
         try Task.checkCancellation()
-        let output = try await generator.generate(system: system, prompt: prompt, maxTokens: maxTokens)
+        let output = try await generator.generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: grammar)
         if let draft = parseDraft(output, template: template) { return draft }
     }
     throw MinutesGenerationError.unparseableOutput
@@ -253,7 +306,8 @@ private func nonEmpty(_ value: Any?) -> String? {
 public enum MinutesGenerationError: LocalizedError, Equatable {
     /// 同一段输入重试一次后，模型的输出仍然解析不出纪要
     case unparseableOutput
-    /// 模型一次能处理的长度（contextTokens）连提示词加一句转写稿都放不下，或者合并时没法再分批
+    /// 模型一次能处理的长度（contextTokens）连提示词加一句转写稿都放不下。
+    /// 合并放不下时不抛这个，退回直接拼接各段条目
     case contextTooSmall
 
     public var errorDescription: String? {

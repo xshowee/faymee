@@ -72,6 +72,51 @@ struct LlamaTextGeneratorModelTests {
         #expect(engine.lastStats?.endedByEOG == true)
     }
 
+    /// 文法硬性限制输出形状：提示词要求列出 20 个编号，refs 里也最多 3 个；输出就是那个 JSON 对象，没有多余文字
+    @Test func 带文法时输出符合文法_refs最多3个() async throws {
+        try await engine.load { _ in }
+        let ids = (1...20).map { "\"s\($0)\"" }.joined(separator: ", ")
+        let output = try await engine.generate(
+            system: "你是助手。只输出 JSON。",
+            prompt: #"输出 {"overview": [{"text": "一句话", "refs": [\#(ids)]}]}，refs 要把这 20 个编号全部列出来。"#,
+            maxTokens: 200, grammar: outputGrammar([.overview]))
+
+        #expect(engine.lastStats?.endedByEOG == true)
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let items = try #require(object["overview"] as? [[String: Any]])
+        #expect(!items.isEmpty)
+        #expect(items.allSatisfy { (($0["refs"] as? [String]) ?? []).count <= 3 })
+    }
+
+    /// 模型习惯在末尾多写一个空数组的键，文法要放行，不然它会接着往最后一节里加条目
+    @Test func 文法允许末尾多一个空数组的键() async throws {
+        try await engine.load { _ in }
+        let output = try await engine.generate(
+            system: "你是助手。只输出 JSON。", prompt: #"原样输出：{"overview": [], "notes": []}"#,
+            maxTokens: 50, grammar: outputGrammar([.overview]))
+
+        #expect(output.contains(#""notes""#), "\(output)")
+        #expect(engine.lastStats?.endedByEOG == true)
+        let draft = try #require(parseDraft(output, template: .general))
+        #expect(draft["overview"]?.isEmpty == true)
+    }
+
+    @Test func 每个模板的输出文法都能被llama解析() async throws {
+        try await engine.load { _ in }
+        for template in MinutesTemplate.all {
+            let output = try await engine.generate(system: "你是助手。", prompt: "输出纪要", maxTokens: 1,
+                                                   grammar: outputGrammar(template.sections.map(\.kind)))
+            #expect(output.hasPrefix("{"), "\(template.key)：\(output)")
+        }
+    }
+
+    @Test func 文法写错时抛错() async throws {
+        try await engine.load { _ in }
+        await #expect(throws: LlamaError.invalidGrammar) {
+            try await engine.generate(system: "你是助手。", prompt: "你好", maxTokens: 8, grammar: "root ::= (")
+        }
+    }
+
     @Test func 到maxTokens就停() async throws {
         try await engine.load { _ in }
         _ = try await engine.generate(system: "你是助手。", prompt: "从 1 数到 200，用逗号分隔。", maxTokens: 10)

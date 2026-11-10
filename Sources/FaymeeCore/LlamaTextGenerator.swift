@@ -82,7 +82,14 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
     }
 
     public func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
-        try await run { call in try self.generateSync(call, system: system, prompt: prompt, maxTokens: maxTokens) }
+        try await generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: nil)
+    }
+
+    /// `grammar` 是 GBNF 文法（根规则 `root`），采样时只允许符合文法的 token，文法走完后只允许结束
+    public func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
+        try await run { call in
+            try self.generateSync(call, system: system, prompt: prompt, maxTokens: maxTokens, grammar: grammar)
+        }
     }
 
     /// 释放模型、上下文和词表。正在跑和排队中的 `load`/`generate` 都会被中止（抛 `CancellationError`），
@@ -156,7 +163,8 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         progress(1)
     }
 
-    private func generateSync(_ call: Call, system: String, prompt: String, maxTokens: Int) throws -> String {
+    private func generateSync(_ call: Call, system: String, prompt: String, maxTokens: Int,
+                              grammar: String?) throws -> String {
         guard let ctx = context, let m = llamaModel else { throw LlamaError.notLoaded }
         let vocab = llama_model_get_vocab(m)
         // 模板标记按特殊 token 解析，内容按普通文字切：转写稿里出现 "<|im_end|>" 字样也不会被当成标记，
@@ -173,8 +181,7 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         var stats = Stats(promptTokens: tokens.count)
         let start = Date()
         llama_memory_clear(llama_get_memory(ctx), true) // 每次调用都是独立的一轮对话
-        let sampler = makeSampler(vocab: vocab)
-        defer { llama_sampler_free(sampler) }
+        let sampler = try makeSampler(vocab: vocab, grammar: grammar)
 
         let batchSize = Int(llama_n_batch(ctx))
         var i = 0
@@ -192,7 +199,7 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         var bytes: [UInt8] = []
         while stats.outputTokens < maxTokens {
             if call.isCancelled { throw CancellationError() }
-            var token = llama_sampler_sample(sampler, ctx, -1)
+            var token = sampler.sample(ctx)
             if llama_vocab_is_eog(vocab, token) { stats.endedByEOG = true; break }
             bytes += piece(token, vocab: vocab)
             stats.outputTokens += 1
@@ -213,9 +220,14 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         }
     }
 
-    private func makeSampler(vocab: OpaquePointer?) -> UnsafeMutablePointer<llama_sampler> {
+    private func makeSampler(vocab: OpaquePointer?, grammar: String?) throws -> Sampler {
         calls &+= 1
         let s = sampling
+        var g: UnsafeMutablePointer<llama_sampler>?
+        if let grammar {
+            g = llama_sampler_init_grammar(vocab, grammar, "root")
+            guard g != nil else { throw LlamaError.invalidGrammar }
+        }
         let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
         llama_sampler_chain_add(chain, llama_sampler_init_top_k(s.topK))
         // 惩罚放在 top-k 之后，免得扫描整个词表
@@ -225,7 +237,7 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         llama_sampler_chain_add(chain, llama_sampler_init_min_p(s.minP, 1))
         llama_sampler_chain_add(chain, llama_sampler_init_temp(s.temperature))
         llama_sampler_chain_add(chain, llama_sampler_init_dist(seed.map { $0 &+ calls } ?? UInt32.random(in: 0..<UInt32.max)))
-        return chain
+        return Sampler(chain: chain, grammar: g, vocabSize: Int(llama_vocab_n_tokens(vocab)))
     }
 
     private func free() {
@@ -287,6 +299,52 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
 }
 
 /// 所有活着的引擎（弱引用），退出时统一释放
+/// 采样链加可选的文法。文法对整个词表（约 15 万个 token）筛一遍很慢，放在采样链最前面时
+/// 每个 token 要多花约 25 毫秒（37 句周会同样 3907 个 token，206 秒对不带文法的 106 秒）。
+/// 所以照 llama.cpp common 的做法：先不带文法采样，只检查选中的这一个 token 合不合文法；
+/// 不合时才用文法筛整个词表、再采样一次。文法要放在 top-k 之前筛，否则留下的候选可能全被拒
+private final class Sampler {
+    let chain: UnsafeMutablePointer<llama_sampler>
+    let grammar: UnsafeMutablePointer<llama_sampler>?
+    private var candidates: [llama_token_data]
+
+    init(chain: UnsafeMutablePointer<llama_sampler>, grammar: UnsafeMutablePointer<llama_sampler>?, vocabSize: Int) {
+        self.chain = chain
+        self.grammar = grammar
+        candidates = grammar == nil ? [] : Array(repeating: llama_token_data(), count: vocabSize)
+    }
+
+    deinit {
+        llama_sampler_free(chain)
+        if let grammar { llama_sampler_free(grammar) }
+    }
+
+    /// 按最后一个位置的 logits 选一个 token，并让采样器（含文法）记下它
+    func sample(_ ctx: OpaquePointer) -> llama_token {
+        guard let grammar else { return llama_sampler_sample(chain, ctx, -1) }
+        let logits = llama_get_logits_ith(ctx, -1)!
+        var token = select(logits, through: [chain])
+        var single = llama_token_data(id: token, logit: 1, p: 0)
+        withUnsafeMutablePointer(to: &single) { data in
+            var one = llama_token_data_array(data: data, size: 1, selected: -1, sorted: false)
+            llama_sampler_apply(grammar, &one)
+        }
+        if single.logit == -Float.infinity { token = select(logits, through: [grammar, chain]) }
+        llama_sampler_accept(grammar, token)
+        llama_sampler_accept(chain, token)
+        return token
+    }
+
+    private func select(_ logits: UnsafeMutablePointer<Float>, through samplers: [UnsafeMutablePointer<llama_sampler>]) -> llama_token {
+        candidates.withUnsafeMutableBufferPointer { buffer in
+            for i in buffer.indices { buffer[i] = llama_token_data(id: llama_token(i), logit: logits[i], p: 0) }
+            var array = llama_token_data_array(data: buffer.baseAddress, size: buffer.count, selected: -1, sorted: false)
+            for sampler in samplers { llama_sampler_apply(sampler, &array) }
+            return array.data[Int(array.selected)].id
+        }
+    }
+}
+
 private let liveEngines = LiveEngines()
 
 private final class LiveEngines: @unchecked Sendable {
@@ -332,6 +390,8 @@ public enum LlamaError: LocalizedError, Equatable {
     /// 提示词加输出超出上下文长度。管线按 `contextTokens` 分段时不会出现
     case promptTooLong(tokens: Int, maxTokens: Int)
     case decodeFailed(Int32)
+    /// 传给 `generate` 的 GBNF 文法解析不了，是代码的错
+    case invalidGrammar
 
     public var errorDescription: String? {
         switch self {
@@ -341,6 +401,7 @@ public enum LlamaError: LocalizedError, Equatable {
         case .notLoaded: "模型还没有加载"
         case let .promptTooLong(tokens, maxTokens): "输入太长（\(tokens) + \(maxTokens) token），超出模型上下文"
         case let .decodeFailed(code): "模型运行出错（\(code)）"
+        case .invalidGrammar: "模型输出格式的约束有误"
         }
     }
 }

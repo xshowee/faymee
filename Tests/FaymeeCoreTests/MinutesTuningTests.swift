@@ -10,6 +10,7 @@ import Testing
 /// - `FAYMEE_TUNING_PRESENCE`：逗号分隔的 presence penalty，默认 "0"
 /// - `FAYMEE_TUNING_OUT`：设了就把每次模型原始输出写到这个目录
 /// - `FAYMEE_TUNING_CONTEXT`：引擎的上下文长度（n_ctx），默认 8192
+/// - `FAYMEE_TUNING_NO_GRAMMAR=1`：不用文法约束输出，和带文法的对比
 ///
 ///     FAYMEE_TUNING=1 FAYMEE_TUNING_PRESENCE=1.5,0 swift test --filter MinutesTuning
 private let env = ProcessInfo.processInfo.environment
@@ -66,6 +67,7 @@ struct MinutesTuningTests {
             do {
                 let run = try await measure(transcript, startedAt: "2026-12-03T02:00:00Z", presence: presence, seed: 7)
                 print("一小时密集稿 presence \(presence)，n_ctx \(contextLength)：调用 \(run.calls) 次，各次输出 \(run.outputTokensEach) token，各次 maxTokens \(run.maxTokens)，EOG \(run.allEOG)，\(Int(run.seconds)) 秒，各节 \(run.counts)，重复 \(run.duplicates)")
+                print("召回（按出处对上构造的句子）：\(denseRecall(run.minutes, rounds: 2))；原始输出里单条 refs 最多 \(run.maxRawRefs) 个")
             } catch {
                 print("一小时密集稿 presence \(presence)，n_ctx \(contextLength)：失败 \(error)；已完成的调用输出 \(lastRecorder?.stats.map(\.outputTokens) ?? [])，maxTokens \(lastRecorder?.maxTokens ?? [])")
             }
@@ -83,16 +85,24 @@ struct MinutesTuningTests {
             try await engine.load { _ in }
             let loaded = footprintMB()
             let started = Date()
+            let recorder = Recorder(engine)
             _ = try await generateMinutes(
                 transcript: transcript, title: "迭代周会", startedAt: try Date("2026-12-03T02:00:00Z", strategy: .iso8601),
-                template: .general, generator: engine, model: LocalModel.qwen3_4B.id)
+                template: .general, generator: recorder, model: LocalModel.qwen3_4B.id)
             let seconds = Date().timeIntervalSince(started)
             let generated = footprintMB()
             let stats = engine.lastStats!
             engine.unload()
-            print(String(format: "第 %d 轮：加载 %.1f 秒；生成 %.1f 秒（prompt %d token %.1f 秒，输出 %d token）；内存 加载后 %d、生成后 %d、释放后 %d",
+            if let dir = env["FAYMEE_TUNING_OUT"] {
+                for (n, output) in recorder.outputs.enumerated() {
+                    try? output.write(toFile: "\(dir)/timing-r\(round)-\(n).json", atomically: true, encoding: .utf8)
+                }
+            }
+            // 解析失败重试时有不止一次调用，各次的输出 token 和秒数都列出来
+            let each = recorder.stats.map { String(format: "%d token %.1f 秒", $0.outputTokens, $0.totalSeconds) }
+            print(String(format: "第 %d 轮：加载 %.1f 秒；生成 %.1f 秒（prompt %d token %.1f 秒）；调用 %d 次：%@；内存 加载后 %d、生成后 %d、释放后 %d",
                          round, started.timeIntervalSince(loadStart), seconds, stats.promptTokens, stats.promptSeconds,
-                         stats.outputTokens, loaded, generated, footprintMB()))
+                         recorder.stats.count, each.joined(separator: "，"), loaded, generated, footprintMB()))
         }
     }
 
@@ -105,6 +115,8 @@ struct MinutesTuningTests {
         var seconds: TimeInterval
         var missingKeys: Int
         var duplicates: Int
+        /// 模型原始输出里单个条目最多列了几个出处（截断之前）
+        var maxRawRefs: Int
         var outputTokens: Int { outputTokensEach.reduce(0, +) }
         var counts: String { minutes.sections.prefix(4).map { "\($0.items.count)" }.joined(separator: "/") }
     }
@@ -132,7 +144,7 @@ struct MinutesTuningTests {
             timeZone: TimeZone(identifier: "Asia/Shanghai")!)
         let seconds = Date().timeIntervalSince(started)
         // 待办缺键、重复条目：看模型原始输出（解析后缺键和 null 分不出来）
-        var missing = 0, duplicates = 0
+        var missing = 0, duplicates = 0, maxRawRefs = 0
         for output in recorder.outputs {
             guard let open = output.firstIndex(of: "{"), let close = output.lastIndex(of: "}"),
                   let object = try? JSONSerialization.jsonObject(with: Data(output[open...close].utf8)) as? [String: Any]
@@ -144,13 +156,14 @@ struct MinutesTuningTests {
                         n + ["text", "owner", "due", "dueDate", "refs"].filter { item[$0] == nil }.count
                     }
                 }
+                maxRawRefs = max(maxRawRefs, items.map { ($0["refs"] as? [Any])?.count ?? 0 }.max() ?? 0)
                 let texts = items.compactMap { $0["text"] as? String }
                 duplicates += texts.count - Set(texts).count
             }
         }
         return Run(minutes: minutes, calls: recorder.stats.count, outputTokensEach: recorder.stats.map(\.outputTokens),
                    maxTokens: recorder.maxTokens, allEOG: recorder.stats.allSatisfy(\.endedByEOG), seconds: seconds,
-                   missingKeys: missing, duplicates: duplicates)
+                   missingKeys: missing, duplicates: duplicates, maxRawRefs: maxRawRefs)
     }
 }
 
@@ -180,12 +193,36 @@ private final class Recorder: TextGenerator, @unchecked Sendable {
     func load(progress: @escaping (Double) -> Void) async throws { try await engine.load(progress: progress) }
     func unload() { engine.unload() }
     func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
-        let output = try await engine.generate(system: system, prompt: prompt, maxTokens: maxTokens)
+        try await generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: nil)
+    }
+    func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
+        let output = try await engine.generate(system: system, prompt: prompt, maxTokens: maxTokens,
+                                               grammar: env["FAYMEE_TUNING_NO_GRAMMAR"] == "1" ? nil : grammar)
         outputs.append(output)
         stats.append(engine.lastStats!)
         self.maxTokens.append(maxTokens)
         return output
     }
+}
+
+/// 按出处算 `denseTranscript` 的召回：某节有条目的出处落在该条构造的句子上就算召回。
+/// 每个议题 14 句，决议是第 7、8 句，两条待办是第 9、10 句和第 11、12 句，未决问题是第 13、14 句。
+/// 议题名有前缀关系（“登录页改版”和“登录页改版二期”），所以按出处而不按文字对
+private func denseRecall(_ minutes: Minutes, rounds: Int) -> String {
+    let topics = 16 * rounds
+    func refs(_ kind: MinutesSectionKind) -> Set<String> {
+        Set(minutes.sections.first { $0.kind == kind }?.items.flatMap { $0.refs.map(\.id) } ?? [])
+    }
+    func recalled(_ kind: MinutesSectionKind, _ lines: [[Int]]) -> String {
+        let cited = refs(kind)
+        let hits = (0..<topics).flatMap { t in lines.map { $0.map { "s\(t * 14 + $0)" } } }
+            .filter { !cited.isDisjoint(with: $0) }.count
+        return "\(hits)/\(topics * lines.count)"
+    }
+    let actions = minutes.sections.first { $0.kind == .actions }?.items ?? []
+    return "决议 \(recalled(.decisions, [[7, 8]]))，待办 \(recalled(.actions, [[9, 10], [11, 12]]))，"
+        + "未决 \(recalled(.questions, [[13, 14]]))；待办 \(actions.count) 条，有负责人 \(actions.count { $0.owner != nil })，"
+        + "有截止日期 \(actions.count { $0.dueDate != nil })"
 }
 
 /// 合成的待办密集转写稿：每轮 16 个议题，每个议题有讨论、一条决议、两条带负责人和截止时间的待办、
