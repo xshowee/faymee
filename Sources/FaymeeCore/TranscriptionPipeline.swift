@@ -178,14 +178,15 @@ public final class TranscriptionPipeline {
     }
 
     /// 排队只区分说话人（旧会议的“区分说话人”、“重新区分说话人”、区分失败后的“重试”）。
-    /// 需要已整理好、已有转写稿、有区分引擎。正在进行或已在排队转写时忽略；
+    /// 需要已整理好、已有转写稿文件、有区分引擎。正在进行或已在排队转写时忽略；
     /// 已在排队只区分说话人的，换成这次的人数。返回是否入队（或更新了人数）。
-    /// 开始时读转写稿快照做区分，结束时重读当前转写稿、按句子只写说话人，期间转写稿被重新转写就丢弃结果
+    /// 只看文件在不在，读不了的转写稿开始时才发现，记为区分失败。
+    /// 开始时记下转写稿的生成时间做区分，结束时重读当前转写稿、按句子只写说话人，期间转写稿被重新转写就丢弃结果
     /// - Parameter speakerCount: 指定人数；nil 由引擎判断
     @discardableResult
     public func enqueueDiarization(_ id: String, speakerCount: Int? = nil) -> Bool {
         guard diarizer != nil, let m = host?.meeting(id), m.status == .done, m.recording != nil,
-              id != activeID, jobs[id] != .transcription, hasTranscript(id) else { return false }
+              id != activeID, jobs[id] != .transcription, store.hasTranscript(id) else { return false }
         if !queue.contains(id) { queue.append(id) }
         jobs[id] = .diarization(speakerCount: speakerCount)
         host?.setDiarization(DiarizationState(status: .queued), for: id)
@@ -193,15 +194,10 @@ public final class TranscriptionPipeline {
         return true
     }
 
-    private func hasTranscript(_ id: String) -> Bool {
-        guard let t = try? store.loadTranscript(id) else { return false }
-        return t != nil
-    }
-
     /// 说话人状态按磁盘上的转写稿如实落定：有说话人为完成，否则为 nil（从未区分）。
     /// 用在排队、进行中的说话人状态不会再有任务来完成它的时候，免得一直停在“区分中”
     private func settleDiarization(_ id: String) {
-        let diarized = ((try? store.loadTranscript(id)) ?? nil)?.diarization != nil
+        let diarized = ((try? store.loadTranscriptSummary(id)) ?? nil)?.hasSpeakers == true
         host?.setDiarization(diarized ? DiarizationState(status: .done) : nil, for: id)
     }
 
@@ -300,9 +296,10 @@ public final class TranscriptionPipeline {
                                   report: @escaping @Sendable (TranscriptionActivity) -> Void) {
         activity = .diarizing(0)
         host?.setDiarization(DiarizationState(status: .running), for: id)
-        let snapshot: Transcript?
+        // 开始时只需记下转写稿的生成时间，结束时据此判断期间有没有被重新转写
+        let snapshot: TranscriptSummary?
         do {
-            snapshot = try store.loadTranscript(id)
+            snapshot = try store.loadTranscriptSummary(id)
         } catch {
             return finishDiarization(id, token: token, createdAt: nil, result: .failure(error))
         }

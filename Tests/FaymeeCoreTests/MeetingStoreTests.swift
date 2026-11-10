@@ -265,6 +265,27 @@ private func date(_ iso: String) -> Date {
         #expect(items[3]["originalSpeaker"] == nil)
     }
 
+    /// 管线在主线程上只读生成时间和有没有说话人，生成时间与完整读出的相等（据此判断期间有没有被重新转写）
+    @Test func 只读转写稿摘要() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        #expect(!store.hasTranscript(m.id))
+        #expect(try store.loadTranscriptSummary(m.id) == nil)
+
+        var transcript = Transcript(engine: "fake/1", createdAt: date("2026-11-10T03:00:00Z"), hotwords: [],
+                                    items: [.sentence(.init(id: "s1", start: 0, end: 2, text: "你好"))])
+        try store.saveTranscript(transcript, for: m.id)
+        #expect(store.hasTranscript(m.id))
+        #expect(try store.loadTranscriptSummary(m.id)
+            == TranscriptSummary(createdAt: try #require(try store.loadTranscript(m.id)).createdAt, hasSpeakers: false))
+
+        transcript.diarization = Diarization(engine: "fake-diarizer/1", voiceprintModel: "fake-embedding/1",
+                                             speakersCreatedAt: date("2026-11-10T03:01:00Z"), speakers: [])
+        try store.saveTranscript(transcript, for: m.id)
+        #expect(try store.loadTranscriptSummary(m.id)?.hasSpeakers == true)
+    }
+
     @Test func 声纹不是合法的float32base64时读取失败() throws {
         let store = makeStore()
         defer { try? FileManager.default.removeItem(at: store.root) }
