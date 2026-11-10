@@ -32,11 +32,10 @@ extension VoiceprintLibrary {
     /// 声纹库改名不回写会议，按关联找会出现“说加进去、实际新建”
     public func enrollmentOption(speaker id: String, in transcript: Transcript, meetingID: String,
                                  currentVoiceprintModel: String?) -> VoiceprintEnrollmentOption {
-        // 在副本上试登记一次：菜单的判断与真正登记同一套规则
-        var trial = self
+        // 与真正登记同一套校验，不修改（也不复制）声纹库：SpeakerChip 每次渲染都会问
         var reason: String?
         do {
-            try trial.enroll(speaker: id, from: transcript, meetingID: meetingID, newID: { "" })
+            _ = try Self.enrollable(speaker: id, in: transcript)
         } catch {
             reason = error.localizedDescription
         }

@@ -61,19 +61,9 @@ extension VoiceprintLibrary {
     @discardableResult
     public mutating func enroll(speaker id: String, from transcript: Transcript, meetingID: String,
                                 now: Date = Date(), newID: () -> String = { UUID().uuidString }) throws -> String {
-        guard let diarization = transcript.diarization, let speaker = transcript.speaker(id) else {
-            throw VoiceprintEnrollmentError.speakerNotFound
-        }
-        guard let name = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
-            throw VoiceprintEnrollmentError.unnamed
-        }
-        guard !speaker.voiceprint.vector.isEmpty else { throw VoiceprintEnrollmentError.noVoiceprint(name: name) }
-        guard speaker.speechDuration >= Self.minimumEnrollmentDuration else {
-            throw VoiceprintEnrollmentError.tooShort(name: name, speechDuration: speaker.speechDuration)
-        }
+        let (speaker, name, model) = try Self.enrollable(speaker: id, in: transcript)
         let sample = VoiceprintSample(voiceprint: speaker.voiceprint, meetingID: meetingID,
                                       speechDuration: speaker.speechDuration, addedAt: now)
-        let model = diarization.voiceprintModel
         guard let i = people.firstIndex(where: { $0.name == name }) else {
             let person = VoiceprintPerson(id: newID(), name: name, voiceprintModel: model, samples: [sample])
             people.append(person)
@@ -87,6 +77,25 @@ extension VoiceprintLibrary {
         people[i].samples.append(sample)
         people[i].samples = Array(people[i].samples.suffix(Self.maxSamplesPerPerson))
         return people[i].id
+    }
+}
+
+extension VoiceprintLibrary {
+    /// 登记前的校验，不看声纹库：说话人存在、已命名、有声纹、有效发言够长，不满足时抛出原因。
+    /// 通过时返回说话人、去首尾空白的名字和这场的声纹模型。`enroll` 和菜单项共用，判断一致
+    static func enrollable(speaker id: String, in transcript: Transcript) throws
+        -> (speaker: Speaker, name: String, voiceprintModel: String) {
+        guard let diarization = transcript.diarization, let speaker = transcript.speaker(id) else {
+            throw VoiceprintEnrollmentError.speakerNotFound
+        }
+        guard let name = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            throw VoiceprintEnrollmentError.unnamed
+        }
+        guard !speaker.voiceprint.vector.isEmpty else { throw VoiceprintEnrollmentError.noVoiceprint(name: name) }
+        guard speaker.speechDuration >= minimumEnrollmentDuration else {
+            throw VoiceprintEnrollmentError.tooShort(name: name, speechDuration: speaker.speechDuration)
+        }
+        return (speaker, name, diarization.voiceprintModel)
     }
 }
 
