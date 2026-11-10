@@ -23,7 +23,8 @@ struct FaymeeApp: App {
                 .environment(model)
                 .onAppear(perform: AppDelegate.windowAppeared)
         }
-        .defaultSize(width: 760, height: 480)
+        // 详情页并排显示纪要和转写稿，要宽一些
+        .defaultSize(width: 1100, height: 680)
         .defaultLaunchBehavior(.suppressed)
         .commands {
             CommandGroup(replacing: .newItem) {
