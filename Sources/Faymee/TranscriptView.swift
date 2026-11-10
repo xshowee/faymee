@@ -17,6 +17,8 @@ struct TranscriptSection: View {
     var meeting: Meeting
     var playback: Playback?
     @Binding var transcript: Transcript?
+    /// 和纪要部分共用的纪要：读姓名建议，点“忽略”时写回
+    @Binding var minutes: Minutes?
     /// 转写稿读取失败的原因
     var loadError: String?
     /// 纪要点出处时的定位请求，处理完置空
@@ -32,6 +34,8 @@ struct TranscriptSection: View {
     @State private var pendingRediarize: Rediarize?
     /// 记住声音成功后的短暂提示，和哪次登记设的（连点两次时，第一次的计时不清掉第二次的提示）
     @State private var voiceprintNotice: VoiceprintNotice?
+    /// 采纳姓名建议后，顺便问一句要不要记住这个声音（只给按钮，用户点了才登记）
+    @State private var enrollOffer: EnrollOffer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -56,11 +60,17 @@ struct TranscriptSection: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let enrollOffer {
+                enrollOfferView(enrollOffer)
+            }
+
+            let suggestions = nameSuggestionActions
             if let transcript, transcript.diarization != nil, !transcript.items.isEmpty {
                 SpeakerBar(transcript: transcript, canEdit: canEditSpeakers, canRediarize: canRediarize,
                            onRename: beginRename,
                            onMerge: { source, target in update { $0.mergeSpeaker(source, into: target) } },
                            voiceprintActions: voiceprintActions(transcript),
+                           suggestions: suggestions,
                            onRediarize: rediarize)
             }
 
@@ -72,7 +82,7 @@ struct TranscriptSection: View {
                                    reveal: $reveal,
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
                                    onRestore: { id in update { $0.restore(sentence: id) } },
-                                   speakerActions: speakerActions)
+                                   speakerActions: speakerActions, suggestions: suggestions)
                 }
             } else if let loadError {
                 placeholder(loadError)
@@ -82,12 +92,18 @@ struct TranscriptSection: View {
         // 转写稿由 MeetingDetail 在转写、说话人状态变化时重读，之前的保存错误随之作废
         .onChange(of: meeting.transcription) { saveError = nil }
         .onChange(of: meeting.diarization) { saveError = nil }
-        .onChange(of: meeting.id) { voiceprintNotice = nil }
+        .onChange(of: meeting.id) {
+            voiceprintNotice = nil
+            enrollOffer = nil
+        }
+        // 重新区分、重新转写后编号已重排，问的那个 spk2 不再是同一个人
+        .onChange(of: transcript?.speakersCreatedAt) { enrollOffer = nil }
         // 开始区分说话人时关掉还没确认的改名、合并：结束时说话人整体替换
         .onChange(of: canEditSpeakers) { _, editable in
             if !editable {
                 renaming = nil
                 pendingMerge = nil
+                enrollOffer = nil
             }
         }
         .confirmationDialog("重新转写会丢弃 \(transcript?.editCount ?? 0) 处修改",
@@ -105,7 +121,12 @@ struct TranscriptSection: View {
         }
         .confirmationDialog(pendingMerge.map { "“\($0.name)”已是本场的另一个说话人，合并为同一人？" } ?? "",
                             isPresented: isPresent($pendingMerge), presenting: pendingMerge) { merge in
-            Button("合并") { update { $0.mergeSpeaker(merge.source, into: merge.target) } }
+            Button("合并") {
+                guard var edited = transcript, edited.mergeSpeaker(merge.source, into: merge.target),
+                      save(edited) else { return }
+                // 采纳姓名建议引起的合并：问的是合并后的那个人
+                if merge.offersEnroll { offerEnroll(merge.target, in: edited) }
+            }
         } message: { _ in
             Text("两人的句子会归到同一个说话人下。")
         }
@@ -156,6 +177,68 @@ struct TranscriptSection: View {
             onReject: { speaker in update { $0.rejectRecognizedPerson(speaker.id) } })
     }
 
+    /// 姓名建议：采纳走改名（同名时照常确认合并），忽略写纪要。转写稿和纪要不可用时为空
+    private var nameSuggestionActions: NameSuggestionActions {
+        let prompts = minutes?.nameSuggestionPrompts(transcript: transcript) ?? [:]
+        guard !prompts.isEmpty else { return NameSuggestionActions() }
+        return NameSuggestionActions(
+            prompts: prompts, canAdopt: canEditSpeakers,
+            onAdopt: { prompt in rename(prompt.speaker, to: prompt.name, offeringEnroll: true) },
+            onIgnore: ignore,
+            onJump: { target in
+                playback?.play(from: target.time)
+                reveal = TranscriptReveal(sentenceID: target.sentenceID, time: target.time)
+            })
+    }
+
+    /// 忽略建议：从磁盘重读纪要再改，免得把刚生成好、界面还没换上的新纪要用旧的覆盖。
+    /// 不算人工修改，生成纪要期间也可以点（管线写盘前会继承）
+    private func ignore(_ prompt: NameSuggestionPrompt) {
+        do {
+            guard var current = try model.store.loadMinutes(meeting.id) else { return }
+            if current.ignoreNameSuggestion(speaker: prompt.speaker, name: prompt.name) {
+                try model.store.saveMinutes(current, for: meeting.id)
+            }
+            minutes = current
+            saveError = nil
+        } catch {
+            saveError = "没能忽略建议：\(error.localizedDescription)"
+        }
+    }
+
+    /// 采纳建议改名成功后：这个人能登记声纹时，给一个“记住这个声音”按钮。不自动登记
+    private func offerEnroll(_ id: String, in edited: Transcript) {
+        guard let speaker = edited.speaker(id) else { return }
+        let option = model.voiceprints.library.enrollmentOption(
+            speaker: id, in: edited, meetingID: meeting.id,
+            currentVoiceprintModel: model.transcription.voiceprintModel)
+        enrollOffer = option.isEnabled
+            ? EnrollOffer(speakerID: id, name: speaker.displayName, title: option.title) : nil
+    }
+
+    private func enrollOfferView(_ offer: EnrollOffer) -> some View {
+        HStack(spacing: 8) {
+            Label("已改名为\(offer.name)", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+            Button(offer.title) {
+                enrollOffer = nil
+                if let transcript, let speaker = transcript.speaker(offer.speakerID) {
+                    enroll(speaker, from: transcript)
+                }
+            }
+            .help("以后的会议自动认出\(offer.name)；声纹只存在这台 Mac 上")
+            Button {
+                enrollOffer = nil
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("不用了")
+        }
+        .font(.caption)
+        .controlSize(.small)
+    }
+
     /// 记住这个声音：只写声纹库，不改转写稿。之后的会议才会认出此人
     private func enroll(_ speaker: Speaker, from transcript: Transcript) {
         do {
@@ -177,17 +260,19 @@ struct TranscriptSection: View {
         renaming = speaker
     }
 
-    /// 改成本场另一个人的名字时不直接改，先确认合并
-    private func rename(_ id: String, to name: String) {
+    /// 改成本场另一个人的名字时不直接改，先确认合并。
+    /// `offeringEnroll`：采纳姓名建议，改好后问要不要记住这个声音
+    private func rename(_ id: String, to name: String, offeringEnroll: Bool = false) {
         guard var edited = transcript else { return }
         switch edited.renameSpeaker(id, to: name) {
         case .unchanged:
             break
         case .renamed:
-            save(edited)
+            if save(edited), offeringEnroll { offerEnroll(id, in: edited) }
         case let .needsMerge(target):
             let merge = SpeakerMerge(source: id, target: target,
-                                     name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+                                     name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                     offersEnroll: offeringEnroll)
             // 等改名框关掉再弹合并确认，同一刻弹出可能被吞掉
             Task { pendingMerge = merge }
         }
@@ -226,13 +311,16 @@ struct TranscriptSection: View {
         save(edited)
     }
 
-    private func save(_ edited: Transcript) {
+    @discardableResult
+    private func save(_ edited: Transcript) -> Bool {
         do {
             try model.store.saveTranscript(edited, for: meeting.id)
             transcript = edited
             saveError = nil
+            return true
         } catch {
             saveError = "修改没能保存：\(error.localizedDescription)"
+            return false
         }
     }
 
@@ -334,6 +422,15 @@ private struct SpeakerMerge {
     var target: String
     /// 用户输入的名字，确认提示里显示
     var name: String
+    /// 采纳姓名建议引起的合并：合并后问要不要记住这个声音
+    var offersEnroll = false
+}
+
+/// 采纳建议后“记住这个声音”的按钮：对哪个说话人，标题同说话人菜单里那一项
+private struct EnrollOffer {
+    var speakerID: String
+    var name: String
+    var title: String
 }
 
 private struct Rediarize {
@@ -372,6 +469,8 @@ private struct TranscriptList: View {
     var onRestore: (_ id: String) -> Void
     /// 区分过说话人时才有
     var speakerActions: SpeakerActions?
+    /// 姓名建议挂在这个人第一次开口的段首
+    var suggestions = NameSuggestionActions()
     @State private var following = true
     /// 纪要点出处后短暂高亮的条目，和哪次请求高亮的（连点两次时，第一次的计时不清掉第二次的高亮）
     @State private var revealed: Int?
@@ -471,9 +570,14 @@ private struct TranscriptList: View {
                                   isCurrent: Bool, isRevealed: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let turn {
-                SpeakerTurnHeader(turn: turn, canEdit: speakerActions?.canEdit ?? false) { id in
-                    commitEdit()
-                    speakerActions?.onRename(id)
+                HStack(spacing: 8) {
+                    SpeakerTurnHeader(turn: turn, canEdit: speakerActions?.canEdit ?? false) { id in
+                        commitEdit()
+                        speakerActions?.onRename(id)
+                    }
+                    if turn.isFirstOfSpeaker, let id = turn.speakerID, let prompt = suggestions.prompts[id] {
+                        NameSuggestionView(prompt: prompt, actions: suggestions)
+                    }
                 }
                 // 与句子文字左对齐：行的外边距 4 + 内边距 8 + 时间列 + 间距 10
                 .padding(.leading, 12 + timeWidth + 10)

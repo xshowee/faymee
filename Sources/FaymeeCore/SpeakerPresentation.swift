@@ -9,6 +9,8 @@ public struct SpeakerTurn: Hashable, Sendable {
     public var colorIndex: Int?
     /// 名字是声纹自动认出的，段首带一个不显眼的“自动认出”标记
     public var isRecognized = false
+    /// 这个说话人第一次开口的一段（未知不算）。姓名建议只挂在这里，不在每一段都重复
+    public var isFirstOfSpeaker = false
 }
 
 extension Transcript {
@@ -19,6 +21,7 @@ extension Transcript {
         guard showsSpeakers else { return Array(repeating: nil, count: items.count) }
         let byID = Dictionary(speakers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var previous: String??
+        var seen = Set<String>()
         return items.map { item in
             guard case let .sentence(s) = item else {
                 previous = nil
@@ -28,7 +31,8 @@ extension Transcript {
             defer { previous = .some(speaker?.id) }
             if let previous, previous == speaker?.id { return nil }
             return SpeakerTurn(speakerID: speaker?.id, name: speaker?.displayName ?? Speaker.unknownName,
-                               colorIndex: speaker?.colorIndex, isRecognized: speaker?.isRecognized ?? false)
+                               colorIndex: speaker?.colorIndex, isRecognized: speaker?.isRecognized ?? false,
+                               isFirstOfSpeaker: speaker.map { seen.insert($0.id).inserted } ?? false)
         }
     }
 }

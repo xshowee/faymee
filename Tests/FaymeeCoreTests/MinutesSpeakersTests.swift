@@ -326,6 +326,28 @@ private func current(spk2 name: String?, at: Date = speakersCreatedAt) -> Transc
     }
 }
 
+/// 说话人列表、段首上的姓名建议：按说话人查，出处解析成可点的时间（同纪要条目的出处）
+@Suite struct NameSuggestionPromptTests {
+    @Test func 按说话人给出要显示的建议_出处是当前的原句() {
+        var t = current(spk2: nil)
+        t.edit(sentence: "s1", to: "王总，你怎么看这个方案")
+
+        let prompts = generatedMinutes().nameSuggestionPrompts(transcript: t)
+
+        #expect(prompts == ["spk2": NameSuggestionPrompt(speaker: "spk2", name: "王总", refs: [
+            MinutesRefChip(label: "00:00", hint: "王总，你怎么看这个方案",
+                           target: MinutesRefTarget(time: 0, sentenceID: "s1", quote: "王总，你怎么看这个方案")),
+        ])])
+    }
+
+    @Test func 不显示的建议不给() {
+        let m = generatedMinutes()
+        #expect(m.nameSuggestionPrompts(transcript: current(spk2: "李四")).isEmpty)
+        #expect(m.nameSuggestionPrompts(transcript: nil).isEmpty)
+        #expect(m.nameSuggestionPrompts(transcript: current(spk2: nil, at: speakersCreatedAt + 60)).isEmpty)
+    }
+}
+
 /// 重新生成时继承忽略：旧纪要里被忽略的建议，新纪要里同一说话人同一名字也是忽略
 @Suite struct NameSuggestionInheritanceTests {
     private func regenerated(_ suggestions: [NameSuggestion], at: Date? = speakersCreatedAt) -> Minutes {
@@ -444,6 +466,18 @@ private extension NameSuggestion {
 
         #expect(m == generatedMinutes())
         #expect(m.editCount == 0)
+    }
+
+    /// 已修改标记里的“原文负责人”：和恢复原文后显示的一样
+    @Test func 原文的负责人关联有效时显示说话人当前的名字() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把报价单发给客户", owner: "李四", transcript: renamed)
+        let original = try! #require(a1(m).original)
+
+        #expect(m.displayedOwner(of: original, transcript: renamed) == "王总")
+        #expect(m.displayedOwner(of: original, transcript: nil) == "说话人 2")
+        #expect(m.displayedOwner(of: original, transcript: current(spk2: "王总", at: speakersCreatedAt + 60))
+            == "说话人 2")
     }
 
     /// 不给转写稿时只认存下的文字

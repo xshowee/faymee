@@ -56,6 +56,13 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
         #expect(t.speakerTurns.map { $0?.isRecognized } == [false, true, false, false])
     }
 
+    /// 姓名建议只挂在这个人第一次开口的段首，不在每一段都重复；未知不算
+    @Test func 段首标出说话人第一次开口的一段() {
+        let t = transcript([nil, "spk1", "spk2", "gap", "spk2", "spk1", nil],
+                           speakers: [speaker("spk1"), speaker("spk2")])
+        #expect(t.speakerTurns.map { $0?.isFirstOfSpeaker } == [false, true, true, nil, false, false, false])
+    }
+
     @Test func 只有一个说话人或没区分过时没有段首() {
         #expect(transcript(["spk1", nil, "spk1"], speakers: [speaker("spk1")]).speakerTurns == [nil, nil, nil])
         #expect(transcript([nil, nil], speakers: nil).speakerTurns == [nil, nil])

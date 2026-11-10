@@ -192,7 +192,7 @@ private struct MeetingDetail: View {
                              onJump: jump)
                     .modifier(PaneVisibility(isVisible: isWide || pane == .minutes))
                 TranscriptSection(meeting: meeting, playback: playback, transcript: $transcript,
-                                  loadError: transcriptError, reveal: $reveal)
+                                  minutes: $minutes, loadError: transcriptError, reveal: $reveal)
                     .modifier(PaneVisibility(isVisible: isWide || pane == .transcript))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

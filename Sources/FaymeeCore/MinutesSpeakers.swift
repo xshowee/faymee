@@ -144,6 +144,11 @@ extension Minutes {
         displayedOwner(item.owner, speaker: item.ownerSpeaker, transcript: transcript)
     }
 
+    /// 改过的条目里模型原文的负责人，按同样的规则显示：已修改标记里的“原文负责人”与恢复原文后显示的一致
+    public func displayedOwner(of original: MinutesItem.Original, transcript: Transcript?) -> String? {
+        displayedOwner(original.owner, speaker: original.ownerSpeaker, transcript: transcript)
+    }
+
     func displayedOwner(_ owner: String?, speaker id: String?, transcript: Transcript?) -> String? {
         if let id, hasSameSpeakers(as: transcript), let speaker = transcript?.speaker(id) {
             return speaker.displayName
@@ -156,6 +161,21 @@ extension Minutes {
     public func visibleNameSuggestions(transcript: Transcript?) -> [NameSuggestion] {
         guard let transcript, hasSameSpeakers(as: transcript) else { return [] }
         return nameSuggestions.filter { !$0.ignored && transcript.speaker($0.speaker)?.isUnnamed == true }
+    }
+
+    /// 说话人列表、段首上要显示的姓名建议，按说话人 id 查（同 `visibleNameSuggestions`，每人最多一条）。
+    /// 出处解析成可点的时间，规则同纪要条目的出处；只判断是否重新转写过，不算整份转写稿的 `textHash`
+    /// （没有要显示的建议时什么都不建，界面每次渲染都会调）
+    public func nameSuggestionPrompts(transcript: Transcript?) -> [String: NameSuggestionPrompt] {
+        let visible = visibleNameSuggestions(transcript: transcript)
+        guard let transcript, !visible.isEmpty else { return [:] }
+        let retranscribed = abs(source.transcriptCreatedAt.timeIntervalSince(transcript.createdAt)) >= 1
+        let locator = TranscriptRefLocator(transcript)
+        let sync: MinutesSync = retranscribed ? .retranscribed : .edited
+        return Dictionary(visible.map { suggestion in
+            (suggestion.speaker, NameSuggestionPrompt(speaker: suggestion.speaker, name: suggestion.name,
+                                                      refs: suggestion.refs.map { $0.chip(locator: locator, sync: sync) }))
+        }, uniquingKeysWith: { a, _ in a })
     }
 
     /// 忽略一条姓名建议：标记后不再显示，重新生成时同一说话人同一名字也不再出现
@@ -184,6 +204,15 @@ extension Minutes {
             }
         }
     }
+}
+
+/// 说话人旁边的一条姓名建议：“说话人 2 可能是王总？”，带出处时间，可以采纳（= 改名）或忽略
+public struct NameSuggestionPrompt: Hashable, Sendable {
+    /// 说话人 id
+    public var speaker: String
+    public var name: String
+    /// 出处，点击跳到那句称呼并播放
+    public var refs: [MinutesRefChip]
 }
 
 extension Speaker {

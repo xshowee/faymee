@@ -57,7 +57,7 @@ struct MinutesPanel: View {
             }
 
             if let minutes {
-                MinutesContent(minutes: minutes, meeting: meeting, refs: resolver,
+                MinutesContent(minutes: minutes, meeting: meeting, transcript: transcript, refs: resolver,
                                isEditable: !status.isBusy, onJump: onJump, onChange: update)
             } else {
                 placeholder(status)
@@ -226,6 +226,8 @@ private struct SyncBanner: View {
 private struct MinutesContent: View {
     var minutes: Minutes
     var meeting: Meeting
+    /// 当前转写稿：待办负责人关联了说话人时显示他现在的名字，编辑时按显示的名字预填、比较
+    var transcript: Transcript?
     /// 在当前转写稿里解析出处
     var refs: MinutesRefResolver
     /// 排队或生成中不能编辑：成功后整份替换，这期间的修改会被悄悄丢掉。失败时旧纪要保留，可以继续编辑
@@ -272,18 +274,23 @@ private struct MinutesContent: View {
                         DeletedItemRow(item: item) { onChange { $0.undoDelete(item: item.id) } }
                     }
                 } else {
-                    MinutesItemRow(item: item, isAction: isAction, meeting: meeting,
+                    let owner = isAction ? minutes.displayedOwner(of: item, transcript: transcript) : nil
+                    MinutesItemRow(item: item, isAction: isAction, meeting: meeting, owner: owner,
+                                   originalOwner: item.original.flatMap {
+                                       minutes.displayedOwner(of: $0, transcript: transcript)
+                                   },
                                    chips: item.refs.map(refs.chip),
                                    isEditable: isEditable, onJump: onJump,
                                    onEdit: { editing = .item(item.id) },
                                    onRestore: { onChange { $0.restore(item: item.id) } },
                                    onDelete: { onChange { $0.delete(item: item.id) } })
                         .popover(isPresented: presenting(.item(item.id)), arrowEdge: .bottom) {
-                            MinutesItemEditor(title: "编辑条目", isAction: isAction, item: item,
+                            // 负责人按显示出来的名字预填，保存时带上转写稿按同样的名字比较：原样保存不清掉说话人关联
+                            MinutesItemEditor(title: "编辑条目", isAction: isAction, item: item, owner: owner,
                                               meetingStartedAt: meeting.startedAt) { draft in
                                 editing = nil
                                 onChange { $0.edit(item: item.id, text: draft.text, owner: draft.owner,
-                                                   due: draft.due, dueDate: draft.dueDate) }
+                                                   due: draft.due, dueDate: draft.dueDate, transcript: transcript) }
                             } onCancel: { editing = nil }
                         }
                 }
@@ -298,7 +305,7 @@ private struct MinutesContent: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .popover(isPresented: presenting(.add(section.kind)), arrowEdge: .bottom) {
-                    MinutesItemEditor(title: "添加到“\(section.title)”", isAction: isAction, item: nil,
+                    MinutesItemEditor(title: "添加到“\(section.title)”", isAction: isAction, item: nil, owner: nil,
                                       meetingStartedAt: meeting.startedAt) { draft in
                         editing = nil
                         onChange { $0.addItem(to: section.kind, text: draft.text, owner: draft.owner,
@@ -320,6 +327,10 @@ private struct MinutesItemRow: View {
     var item: MinutesItem
     var isAction: Bool
     var meeting: Meeting
+    /// 显示出来的负责人（`Minutes.displayedOwner`）；不是待办时为 nil
+    var owner: String?
+    /// 改过的条目里模型原文的负责人，同样按显示规则
+    var originalOwner: String?
     var chips: [MinutesRefChip]
     var isEditable: Bool
     var onJump: (MinutesRefTarget) -> Void
@@ -340,13 +351,14 @@ private struct MinutesItemRow: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     if let original = item.original {
-                        MinutesEditedMarker(original: original, isAction: isAction, meeting: meeting,
+                        MinutesEditedMarker(original: original, owner: originalOwner, isAction: isAction,
+                                            meeting: meeting,
                                             canRestore: isEditable, onRestore: onRestore)
                     }
                 }
                 if hasMeta {
                     FlowLayout(spacing: 6) {
-                        if isAction, let owner = item.owner, !owner.isEmpty {
+                        if isAction, let owner, !owner.isEmpty {
                             Label(owner, systemImage: "person")
                                 .foregroundStyle(.secondary)
                         }
@@ -405,7 +417,7 @@ private struct MinutesItemRow: View {
 
     private var hasMeta: Bool {
         !chips.isEmpty || item.isUnsourced || item.origin == .manual
-            || (isAction && (item.owner != nil || item.due != nil || item.dueDate != nil))
+            || (isAction && (owner != nil || item.due != nil || item.dueDate != nil))
     }
 }
 
@@ -437,6 +449,8 @@ private struct DeletedItemRow: View {
 /// 改过的条目：不显眼的铅笔图标，点开显示模型原文和“恢复原文”
 private struct MinutesEditedMarker: View {
     var original: MinutesItem.Original
+    /// 原文的负责人，按显示规则（关联的说话人改名后是新名字）
+    var owner: String?
     var isAction: Bool
     var meeting: Meeting
     var canRestore: Bool
@@ -446,7 +460,7 @@ private struct MinutesEditedMarker: View {
         Menu {
             Text("原文：\(original.text)")
             if isAction {
-                Text("负责人：\(original.owner ?? "无")")
+                Text("负责人：\(owner ?? "无")")
                 let due = MinutesItem(id: "", text: "", due: original.due, dueDate: original.dueDate, refs: [])
                     .dueText(meetingStartedAt: meeting.startedAt)
                 Text("截止：\(due ?? "无")")
@@ -489,8 +503,8 @@ private struct MinutesItemEditor: View {
     @State private var draft: Draft
     @FocusState private var textFocused: Bool
 
-    /// item 为 nil 时是新增
-    init(title: String, isAction: Bool, item: MinutesItem?, meetingStartedAt: Date,
+    /// item 为 nil 时是新增。owner 是显示出来的负责人（关联的说话人现在的名字），按它预填
+    init(title: String, isAction: Bool, item: MinutesItem?, owner: String?, meetingStartedAt: Date,
          onSave: @escaping (Draft) -> Void, onCancel: @escaping () -> Void) {
         self.title = title
         self.isAction = isAction
@@ -499,7 +513,7 @@ private struct MinutesItemEditor: View {
         let date = item?.dueDate.flatMap {
             Calendar.current.date(from: DateComponents(year: $0.year, month: $0.month, day: $0.day))
         }
-        _draft = State(initialValue: Draft(text: item?.text ?? "", owner: item?.owner ?? "", due: item?.due ?? "",
+        _draft = State(initialValue: Draft(text: item?.text ?? "", owner: owner ?? "", due: item?.due ?? "",
                                            hasDate: date != nil, date: date ?? meetingStartedAt))
     }
 
@@ -537,8 +551,8 @@ private struct MinutesItemEditor: View {
     }
 }
 
-/// 出处时间：悬停显示原句，点击跳到转写稿该句并从那里播放
-private struct RefChip: View {
+/// 出处时间：悬停显示原句，点击跳到转写稿该句并从那里播放。姓名建议的出处也用它
+struct RefChip: View {
     var chip: MinutesRefChip
     var action: () -> Void
     @State private var hovering = false

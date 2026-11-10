@@ -67,10 +67,10 @@ extension MinutesRef {
     /// 转写稿不存在或读不出来时只认生成时记下的 `start`，不定位句子。
     /// 要解析一份纪要的所有出处时用 `MinutesRefResolver`
     public func chip(in transcript: Transcript?, sync: MinutesSync) -> MinutesRefChip {
-        chip(in: transcript.map(TranscriptRefLocator.init), sync: sync)
+        chip(locator: transcript.map(TranscriptRefLocator.init), sync: sync)
     }
 
-    fileprivate func chip(in locator: TranscriptRefLocator?, sync: MinutesSync) -> MinutesRefChip {
+    func chip(locator: TranscriptRefLocator?, sync: MinutesSync) -> MinutesRefChip {
         guard let locator else {
             return MinutesRefChip(label: formatDuration(start), hint: "转写稿不可用，原句无法显示",
                                   target: MinutesRefTarget(time: start, sentenceID: nil, quote: nil))
@@ -116,7 +116,7 @@ public struct MinutesRefResolver: Sendable {
 
     /// 同 `MinutesRef.chip(in:sync:)`
     public func chip(_ ref: MinutesRef) -> MinutesRefChip {
-        ref.chip(in: locator, sync: sync)
+        ref.chip(locator: locator, sync: sync)
     }
 }
 
