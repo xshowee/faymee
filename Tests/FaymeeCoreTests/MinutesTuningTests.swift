@@ -106,6 +106,21 @@ struct MinutesTuningTests {
         }
     }
 
+    /// 带说话人的短会（三人都没命名，会上有人被叫名字）：看姓名建议和负责人关联。
+    /// 期望：说话人 2 是王总，说话人 3 是小李；报价单的负责人是说话人 2，测试报告的是说话人 3
+    @Test func 带说话人的短会_姓名建议与负责人() async throws {
+        let transcript = speakerMeetingTranscript()
+        print("| seed | 秒 | 姓名建议 | 待办（负责人 → 关联） |")
+        for seed in seeds {
+            let run = try await measure(transcript, startedAt: "2026-12-03T02:00:00Z", presence: presences[0], seed: seed)
+            let suggestions = run.minutes.nameSuggestions
+                .map { "\($0.speaker)=\($0.name)(\($0.refs.map(\.id).joined(separator: ",")))" }
+            let actions = (run.minutes.sections.first { $0.kind == .actions }?.items ?? [])
+                .map { "\($0.text)：\($0.owner ?? "nil") → \($0.ownerSpeaker ?? "nil")" }
+            print("| \(seed) | \(Int(run.seconds)) | \(suggestions.joined(separator: "；")) | \(actions.joined(separator: "；")) |")
+        }
+    }
+
     struct Run {
         var minutes: Minutes
         var calls: Int
@@ -165,6 +180,32 @@ struct MinutesTuningTests {
                    maxTokens: recorder.maxTokens, allEOG: recorder.stats.allSatisfy(\.endedByEOG), seconds: seconds,
                    missingKeys: missing, duplicates: duplicates, maxRawRefs: maxRawRefs)
     }
+}
+
+/// 三人短会：说话人 1 主持，说话人 2 是被叫作“王总”的客户方，说话人 3 是被叫作“小李”的同事
+private func speakerMeetingTranscript() -> Transcript {
+    let lines: [(String, String)] = [
+        ("spk1", "今天主要对一下报价和上线时间"),
+        ("spk1", "王总，您那边对上次的报价有什么意见"),
+        ("spk2", "整体可以接受，但是实施费用还想再谈一谈"),
+        ("spk2", "这样吧，下周三之前我把我们的预算范围发给你们"),
+        ("spk1", "好的，那上线时间呢"),
+        ("spk2", "我们希望一月底之前能上线"),
+        ("spk1", "小李，测试那边来得及吗"),
+        ("spk3", "来得及，我这周五之前把测试报告整理出来"),
+        ("spk1", "那就先按一月底上线来准备"),
+        ("spk2", "可以，培训的事情以后再说"),
+    ]
+    return Transcript(
+        engine: "apple/speechanalyzer", createdAt: try! Date("2026-12-03T03:01:00Z", strategy: .iso8601), hotwords: [],
+        items: lines.enumerated().map { i, line in
+            .sentence(TranscriptSentence(id: "s\(i + 1)", start: Double(i * 8), end: Double(i * 8 + 6), text: line.1,
+                                         speaker: line.0))
+        },
+        diarization: Diarization(engine: "fake", voiceprintModel: "fake", speakersCreatedAt: Date(timeIntervalSince1970: 0),
+                                 speakers: ["spk1", "spk2", "spk3"].map {
+                                     Speaker(id: $0, voiceprint: Voiceprint([1]), speechDuration: 20)
+                                 }))
 }
 
 private func footprintMB() -> Int {
