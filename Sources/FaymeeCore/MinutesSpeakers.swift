@@ -130,6 +130,62 @@ func parseNameGuesses(_ output: String) -> [RawNameGuess] {
 /// 提取输出里说话人身份的键。模板自定义节的 key 不能用它
 let speakersKey = "speakers"
 
+extension Minutes {
+    /// 生成时依据的说话人是否就是当前转写稿的说话人：两边都区分过，`speakersCreatedAt` 相差不到 1 秒
+    /// （写盘丢掉小数秒，同 `sync(with:)` 的做法）。不同说明重新区分过，说话人编号已重排
+    func hasSameSpeakers(as transcript: Transcript?) -> Bool {
+        guard let generated = source.speakersCreatedAt, let now = transcript?.speakersCreatedAt else { return false }
+        return abs(generated.timeIntervalSince(now)) < 1
+    }
+
+    /// 待办显示出来的负责人（界面、复制、导出都用它）：关联了说话人、仍是同一次区分、说话人还在时，
+    /// 用该说话人当前的显示名；否则（重新区分过、转写稿不可用、说话人被合并掉、没有关联）用 `owner`
+    public func displayedOwner(of item: MinutesItem, transcript: Transcript?) -> String? {
+        displayedOwner(item.owner, speaker: item.ownerSpeaker, transcript: transcript)
+    }
+
+    func displayedOwner(_ owner: String?, speaker id: String?, transcript: Transcript?) -> String? {
+        if let id, hasSameSpeakers(as: transcript), let speaker = transcript?.speaker(id) {
+            return speaker.displayName
+        }
+        return owner
+    }
+
+    /// 要显示的姓名建议：仍是同一次区分（见 `hasSameSpeakers`）、没被忽略、说话人还在且还没命名
+    /// （手动或声纹认出都算命名）。转写稿不可用时一条都不显示
+    public func visibleNameSuggestions(transcript: Transcript?) -> [NameSuggestion] {
+        guard let transcript, hasSameSpeakers(as: transcript) else { return [] }
+        return nameSuggestions.filter { !$0.ignored && transcript.speaker($0.speaker)?.isUnnamed == true }
+    }
+
+    /// 忽略一条姓名建议：标记后不再显示，重新生成时同一说话人同一名字也不再出现
+    /// （见 `inheritingIgnoredNameSuggestions(from:)`）。不算人工修改（不计入 `editCount`）。
+    /// 没有这条、或已经忽略过时返回 false
+    @discardableResult
+    public mutating func ignoreNameSuggestion(speaker: String, name: String) -> Bool {
+        guard let i = nameSuggestions.firstIndex(where: { $0.speaker == speaker && $0.name == name && !$0.ignored })
+        else { return false }
+        nameSuggestions[i].ignored = true
+        return true
+    }
+
+    /// 重新生成后、写盘前调用：继承旧纪要里被忽略的姓名建议。同一说话人同一名字这次又出现了就标为忽略，
+    /// 没出现的也作为忽略记录带过来（不然再下一次生成会重新冒出来）。
+    /// 只在两份纪要对应同一次区分（`speakersCreatedAt` 相差不到 1 秒）时继承：重新区分后编号已重排，
+    /// 旧的 spk2 不再是同一个人。被忽略的名字不参与投票前的剔除：这次胜出的就是它时，这个说话人没有新建议
+    public mutating func inheritIgnoredNameSuggestions(from previous: Minutes?) {
+        guard let previous, let generated = source.speakersCreatedAt, let old = previous.source.speakersCreatedAt,
+              abs(generated.timeIntervalSince(old)) < 1 else { return }
+        for old in previous.nameSuggestions where old.ignored {
+            if let i = nameSuggestions.firstIndex(where: { $0.speaker == old.speaker && $0.name == old.name }) {
+                nameSuggestions[i].ignored = true
+            } else {
+                nameSuggestions.append(old)
+            }
+        }
+    }
+}
+
 extension Speaker {
     /// 没有名字（或名字是空白），显示为“说话人 N”
     var isUnnamed: Bool { name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }

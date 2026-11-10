@@ -242,3 +242,218 @@ extension MinutesSpeakersTests {
         #expect(!generator.calls[0].system.contains("speakers"))
     }
 }
+
+/// 生成时的纪要：待办 a1 关联说话人 2，a2 只有文字；说话人 2 有姓名建议“王总”
+private func generatedMinutes(speakersCreatedAt: Date? = speakersCreatedAt) -> Minutes {
+    Minutes(model: "fake/scripted", template: "general", createdAt: date("2026-11-10T03:05:00Z"),
+            source: MinutesSource(transcriptCreatedAt: date("2026-11-10T03:01:00Z"), textHash: meeting.textHash,
+                                  speakersCreatedAt: speakersCreatedAt),
+            sections: [MinutesSection(kind: .actions, title: "待办", items: [
+                MinutesItem(id: "a1", text: "把报价单发给客户", owner: "说话人 2", ownerSpeaker: "spk2",
+                            refs: [MinutesRef(id: "s2", start: 10)]),
+                MinutesItem(id: "a2", text: "整理会议纪要", owner: "张三", refs: [MinutesRef(id: "s3", start: 20)]),
+            ])],
+            nameSuggestions: [NameSuggestion(speaker: "spk2", name: "王总", refs: [MinutesRef(id: "s1", start: 0)])])
+}
+
+/// 当前转写稿：说话人 2 改名为 `name`（nil 为没改），说话人完成时间为 `at`
+private func current(spk2 name: String?, at: Date = speakersCreatedAt) -> Transcript {
+    var t = meeting
+    t.diarization?.speakersCreatedAt = at
+    t.diarization?.speakers[1].name = name
+    return t
+}
+
+@Suite struct MinutesSpeakerDisplayTests {
+    private func owners(_ m: Minutes, _ t: Transcript?) -> [String?] {
+        m.sections[0].items.map { m.displayedOwner(of: $0, transcript: t) }
+    }
+
+    @Test func 关联有效时负责人显示说话人当前的名字() {
+        #expect(owners(generatedMinutes(), current(spk2: "王总")) == ["王总", "张三"])
+        #expect(owners(generatedMinutes(), current(spk2: nil)) == ["说话人 2", "张三"])
+    }
+
+    /// 写盘丢掉小数秒：内存里的转写稿与读回的差不到 1 秒仍算同一次区分
+    @Test func 说话人完成时间差不到1秒仍算同一次区分() {
+        let t = current(spk2: "王总", at: speakersCreatedAt.addingTimeInterval(0.6))
+        #expect(owners(generatedMinutes(), t) == ["王总", "张三"])
+    }
+
+    @Test func 重新区分过_转写稿不可用_说话人已不在时负责人显示生成时的文字() {
+        let later = current(spk2: "王总", at: speakersCreatedAt.addingTimeInterval(60))
+        #expect(owners(generatedMinutes(), later) == ["说话人 2", "张三"])
+        #expect(owners(generatedMinutes(), nil) == ["说话人 2", "张三"])
+        var merged = current(spk2: "王总")
+        merged.diarization?.speakers.remove(at: 1)
+        #expect(owners(generatedMinutes(), merged) == ["说话人 2", "张三"])
+    }
+
+    @Test func 生成时没区分过说话人_负责人显示生成时的文字() {
+        #expect(owners(generatedMinutes(speakersCreatedAt: nil), current(spk2: "王总")) == ["说话人 2", "张三"])
+    }
+
+    @Test func 姓名建议在说话人未命名且对应同一次区分时显示() {
+        let m = generatedMinutes()
+        #expect(m.visibleNameSuggestions(transcript: current(spk2: nil)).map(\.name) == ["王总"])
+        #expect(m.visibleNameSuggestions(transcript: current(spk2: "  ")).map(\.name) == ["王总"])
+    }
+
+    @Test func 姓名建议在重新区分过_说话人已命名_已忽略_说话人不在时不显示() {
+        let m = generatedMinutes()
+        #expect(m.visibleNameSuggestions(transcript: current(spk2: nil, at: speakersCreatedAt.addingTimeInterval(60))).isEmpty)
+        #expect(m.visibleNameSuggestions(transcript: current(spk2: "李四")).isEmpty)
+        #expect(m.visibleNameSuggestions(transcript: nil).isEmpty)
+        var merged = current(spk2: nil)
+        merged.diarization?.speakers.remove(at: 1)
+        #expect(m.visibleNameSuggestions(transcript: merged).isEmpty)
+
+        var ignored = m
+        let changed = ignored.ignoreNameSuggestion(speaker: "spk2", name: "王总")
+        #expect(changed)
+        #expect(ignored.nameSuggestions.map(\.ignored) == [true])
+        #expect(ignored.visibleNameSuggestions(transcript: current(spk2: nil)).isEmpty)
+    }
+
+    @Test func 忽略不存在或已忽略的建议没有变化_不算人工修改() {
+        var m = generatedMinutes()
+        let results = [m.ignoreNameSuggestion(speaker: "spk2", name: "李总"),
+                       m.ignoreNameSuggestion(speaker: "spk1", name: "王总"),
+                       m.ignoreNameSuggestion(speaker: "spk2", name: "王总"),
+                       m.ignoreNameSuggestion(speaker: "spk2", name: "王总")]
+        #expect(results == [false, false, true, false])
+        #expect(m.editCount == 0)
+    }
+}
+
+/// 重新生成时继承忽略：旧纪要里被忽略的建议，新纪要里同一说话人同一名字也是忽略
+@Suite struct NameSuggestionInheritanceTests {
+    private func regenerated(_ suggestions: [NameSuggestion], at: Date? = speakersCreatedAt) -> Minutes {
+        var m = generatedMinutes(speakersCreatedAt: at)
+        m.nameSuggestions = suggestions
+        return m
+    }
+
+    private func ignored(_ speaker: String, _ name: String) -> NameSuggestion {
+        NameSuggestion(speaker: speaker, name: name, refs: [MinutesRef(id: "s1", start: 0)], ignored: true)
+    }
+
+    private func fresh(_ speaker: String, _ name: String) -> NameSuggestion {
+        NameSuggestion(speaker: speaker, name: name, refs: [MinutesRef(id: "s2", start: 10)])
+    }
+
+    @Test func 同一说话人同一名字再次出现时仍是忽略_其他照常() {
+        var m = regenerated([fresh("spk1", "李总"), fresh("spk2", "王总")])
+        m.inheritIgnoredNameSuggestions(from: regenerated([ignored("spk2", "王总"), fresh("spk1", "李总")]))
+
+        #expect(m.nameSuggestions.map(\.ignored) == [false, true])
+        #expect(m.visibleNameSuggestions(transcript: current(spk2: nil)).map(\.name) == ["李总"])
+    }
+
+    /// 这次模型没再给出的也留着，免得再下一次生成又冒出来
+    @Test func 这次没出现的忽略记录也带过来() {
+        var m = regenerated([fresh("spk2", "李总")])
+        m.inheritIgnoredNameSuggestions(from: regenerated([ignored("spk2", "王总")]))
+
+        #expect(m.nameSuggestions == [fresh("spk2", "李总"), ignored("spk2", "王总")])
+
+        var again = regenerated([fresh("spk2", "王总")])
+        again.inheritIgnoredNameSuggestions(from: m)
+        #expect(again.nameSuggestions == [ignored("spk2", "王总").with(refs: fresh("spk2", "王总").refs)])
+        #expect(again.visibleNameSuggestions(transcript: current(spk2: nil)).isEmpty)
+    }
+
+    /// 重新区分过：说话人编号已重排，旧的忽略不再对应同一个人
+    @Test func 重新区分过或旧纪要没区分过时不继承() {
+        var m = regenerated([fresh("spk2", "王总")])
+        m.inheritIgnoredNameSuggestions(from: regenerated([ignored("spk2", "王总")],
+                                                          at: speakersCreatedAt.addingTimeInterval(-600)))
+        #expect(m.nameSuggestions == [fresh("spk2", "王总")])
+
+        m.inheritIgnoredNameSuggestions(from: regenerated([ignored("spk2", "王总")], at: nil))
+        m.inheritIgnoredNameSuggestions(from: nil)
+        #expect(m.nameSuggestions == [fresh("spk2", "王总")])
+    }
+}
+
+private extension NameSuggestion {
+    func with(refs: [MinutesRef]) -> NameSuggestion {
+        var s = self
+        s.refs = refs
+        return s
+    }
+}
+
+/// 改纪要时负责人与说话人关联：界面按显示出来的负责人预填，原样保存不算改负责人
+@Suite struct MinutesOwnerEditingTests {
+    private let renamed = current(spk2: "王总")
+
+    private func a1(_ m: Minutes) -> MinutesItem { m.sections[0].items[0] }
+
+    @Test func 只改文字时保留关联() {
+        var m = generatedMinutes()
+        let changed = m.edit(item: "a1", text: "把新报价单发给客户", owner: "王总", transcript: renamed)
+
+        #expect(changed)
+        #expect(a1(m).owner == "说话人 2")
+        #expect(a1(m).ownerSpeaker == "spk2")
+        #expect(m.displayedOwner(of: a1(m), transcript: renamed) == "王总")
+        #expect(m.editCount == 1)
+    }
+
+    @Test func 原样保存显示出来的负责人不算修改() {
+        var m = generatedMinutes()
+        let changed = m.edit(item: "a1", text: "把报价单发给客户", owner: "王总", transcript: renamed)
+
+        #expect(!changed)
+        #expect(m == generatedMinutes())
+    }
+
+    @Test func 手动修改负责人后清掉关联_不再跟着改名() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把报价单发给客户", owner: "李四", transcript: renamed)
+
+        #expect(a1(m).owner == "李四")
+        #expect(a1(m).ownerSpeaker == nil)
+        #expect(m.displayedOwner(of: a1(m), transcript: current(spk2: "王五")) == "李四")
+        #expect(a1(m).original == MinutesItem.Original(text: "把报价单发给客户", owner: "说话人 2", ownerSpeaker: "spk2"))
+    }
+
+    @Test func 清空负责人也清掉关联() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把报价单发给客户", owner: nil, transcript: renamed)
+
+        #expect(a1(m).owner == nil)
+        #expect(a1(m).ownerSpeaker == nil)
+    }
+
+    @Test func 恢复原文时关联也恢复() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把报价单发给客户", owner: "李四", transcript: renamed)
+        m.restore(item: "a1")
+
+        #expect(m == generatedMinutes())
+        #expect(m.displayedOwner(of: a1(m), transcript: renamed) == "王总")
+    }
+
+    /// 改回模型原文等于恢复原文：负责人改回显示出来的名字时关联回来
+    @Test func 负责人改回原来显示的名字等于恢复原文() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把报价单发给客户", owner: "李四", transcript: renamed)
+        m.edit(item: "a1", text: "把报价单发给客户", owner: "王总", transcript: renamed)
+
+        #expect(m == generatedMinutes())
+        #expect(m.editCount == 0)
+    }
+
+    /// 不给转写稿时只认存下的文字
+    @Test func 不给转写稿时按生成时的文字比较() {
+        var m = generatedMinutes()
+        m.edit(item: "a1", text: "把新报价单发给客户", owner: "说话人 2")
+        #expect(a1(m).ownerSpeaker == "spk2")
+
+        m.edit(item: "a1", text: "把新报价单发给客户", owner: "王总")
+        #expect(a1(m).owner == "王总")
+        #expect(a1(m).ownerSpeaker == nil)
+    }
+}
