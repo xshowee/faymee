@@ -114,9 +114,11 @@ final class AppModel {
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
         let engine = TranscriptionEngine.make()
+        let diarization = DiarizationEngine.make()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, diarizer: DiarizationEngine.make(),
+                                             engine: engine.name, diarizer: diarization.diarizer,
                                              voiceprints: VoiceprintStore(), host: self)
+        pipeline.voiceprintThreshold = diarization.voiceprintThreshold
         pipeline.isSuspended = true
         pipeline.hotwords = hotwords
         pipeline.diarizes = diarizeSpeakers
