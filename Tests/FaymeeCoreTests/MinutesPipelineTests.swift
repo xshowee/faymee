@@ -57,10 +57,12 @@ private final class FakeGenerator: TextGenerator, @unchecked Sendable {
     func record(_ event: String) { events.append(event) }
 }
 
-/// 假转写引擎：返回一句话，记进 log 的时间线。block 为 true 时等到被取消或 block 改回 false
+/// 假转写引擎：返回一句话，记进 log 的时间线。block 为 true 时等到被取消或 block 改回 false；
+/// ignoresCancellation 为 true 时被取消也照样等到 block 改回 false（真实引擎可能取消得不及时）
 private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     let log: FakeGenerator
     var block = false
+    var ignoresCancellation = false
     /// 转写出来的那一句
     var text = "重新转写出来的一句话，内容足够长"
     private(set) var calls = 0
@@ -73,7 +75,9 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
                     progress: @escaping (Double) -> Void) async throws -> [TranscribedSentence] {
         calls += 1
         log.record("transcribe")
-        while block { try await Task.sleep(for: .milliseconds(5)) }
+        while block {
+            if ignoresCancellation { Thread.sleep(forTimeInterval: 0.005) } else { try await Task.sleep(for: .milliseconds(5)) }
+        }
         return [.init(start: 0, end: 5, text: text)]
     }
 }
@@ -387,6 +391,26 @@ private final class Fixture {
         #expect(engine.unloads == 1)
     }
 
+    /// 加载模型时可能不理会取消，删除会议后引擎仍在用模型文件，这时不能删模型
+    @Test func 取消后任务还没退出时引擎仍算占用() async throws {
+        let engine = SlowToCancelGenerator(hangsIn: .load)
+        let f = Fixture()
+        let pipeline = MinutesPipeline(store: f.store, generator: engine, model: "slow", host: f.host)
+        f.addMeeting("m1")
+        #expect(!pipeline.isEngineInUse)
+        pipeline.enqueue("m1")
+        try await f.until { engine.continuation != nil }
+        #expect(pipeline.isEngineInUse)
+
+        pipeline.remove("m1")
+        #expect(pipeline.activeID == nil)
+        #expect(pipeline.isEngineInUse)
+
+        engine.continuation?.resume(returning: "")
+        try await f.until { !pipeline.isEngineInUse }
+        #expect(engine.unloads == 1)
+    }
+
     @Test func 生成中删除会议时取消且不写任何文件() async throws {
         let engine = FakeGenerator()
         engine.block = true
@@ -579,6 +603,32 @@ private final class Fixture {
         #expect(f.host.meetings["m2"]?.transcription?.status == .done)
     }
 
+    /// 删除正在转写的会议：转写被取消，但引擎可能还没退出，这时纪要不能开始用引擎
+    @Test func 转写被取消但引擎还没退出时_纪要等它退出再开始() async throws {
+        let f = Fixture()
+        let (transcription, transcriber) = f.makeTranscription()
+        transcriber.block = true
+        transcriber.ignoresCancellation = true
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        transcription.enqueue("m2")
+        try await f.until { transcriber.calls == 1 }
+        f.pipeline.enqueue("m1")
+
+        transcription.remove("m2")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!transcription.isIdle)
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.waitReason(for: "m1") == .transcription)
+        #expect(f.engine.loads == 0)
+
+        transcriber.block = false
+        try await f.drain()
+        #expect(transcription.isIdle)
+        #expect(f.engine.events == ["transcribe", "load", "generate", "unload"])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
     @Test func 录音打断后恢复时转写先于纪要() async throws {
         let engine = FakeGenerator()
         engine.block = true
@@ -601,6 +651,49 @@ private final class Fixture {
         try await f.until { transcription.isIdle }
 
         #expect(f.engine.events == ["load", "generate", "unload", "transcribe", "load", "generate", "unload"])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    /// 停止录音后整理完成：解除暂停的瞬间新会议的转写还没入队，排队的纪要不能抢在它前面
+    @Test func 预定了转写时不算空闲_解除暂停时纪要不抢在新会议的转写前面() async throws {
+        let f = Fixture()
+        let (transcription, _) = f.makeTranscription()
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        transcription.isSuspended = true
+        f.pipeline.isSuspended = true
+        f.pipeline.enqueue("m1")
+        // 整理 m2：整理完就要排队转写
+        transcription.reserve("m2")
+
+        transcription.isSuspended = false
+        f.pipeline.isSuspended = false
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!transcription.isIdle)
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.waitReason(for: "m1") == .transcription)
+
+        transcription.enqueue("m2")
+        try await f.drain()
+        try await f.until { transcription.isIdle }
+        #expect(f.engine.events == ["transcribe", "load", "generate", "unload"])
+    }
+
+    /// 整理失败、会议被删除时预定作废，纪要照常开始
+    @Test func 取消预定或删除会议后转写回到空闲() async throws {
+        let f = Fixture()
+        let (transcription, _) = f.makeTranscription()
+        f.addMeeting("m1")
+        transcription.reserve("m2")
+        transcription.reserve("m3")
+        f.pipeline.enqueue("m1")
+        #expect(f.pipeline.waitReason(for: "m1") == .transcription)
+
+        transcription.unreserve("m2")
+        #expect(!transcription.isIdle)
+        transcription.remove("m3")
+        #expect(transcription.isIdle)
+        try await f.drain()
         #expect(f.host.meetings["m1"]?.minutes?.status == .done)
     }
 
@@ -702,6 +795,24 @@ private final class Fixture {
         try f.store.saveTranscript(makeTranscript(createdAt: at(7200)), for: "m1")
 
         #expect(f.pipeline.transcriptionFinished("m1"))
+    }
+
+    /// 用户“按周会重新生成”后排队等转写，转写完成自动排队（不带模板）时保留用户选的模板
+    @Test func 已排队时再次排队不带模板_保留排队时选的模板() async throws {
+        let f = Fixture()
+        f.addMeeting("m1")
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.template == "general")
+        f.pipeline.isSuspended = true
+
+        f.pipeline.enqueue("m1", template: MinutesTemplate(key: "weekly"), now: true)
+        try f.store.saveTranscript(makeTranscript(createdAt: at(7200)), for: "m1")
+        #expect(f.pipeline.transcriptionFinished("m1"))
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(try f.store.loadMinutes("m1")?.template == "weekly")
     }
 
     @Test func 进度只在内存里_完成和失败时回调() async throws {

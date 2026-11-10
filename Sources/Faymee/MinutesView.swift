@@ -13,6 +13,7 @@ struct MinutesPanel: View {
     var transcript: Transcript?
     var onJump: (MinutesRefTarget) -> Void
     @State private var saveError: String?
+    @State private var refs = RefResolverCache()
     /// 有人工修改时，重新生成（或切换模板）要先确认
     @State private var pendingRegenerate: Regenerate?
 
@@ -24,7 +25,8 @@ struct MinutesPanel: View {
     var body: some View {
         let status = MinutesStatus(state: meeting.minutes, activity: model.minutes.activity(for: meeting.id),
                                    waitReason: model.minutes.waitReason(for: meeting.id), transcript: transcript)
-        let sync = minutes.flatMap { m in transcript.map { m.sync(with: $0) } } ?? .inSync
+        let resolver = refs.resolver(minutes: minutes, transcript: transcript)
+        let sync = resolver.sync
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -55,7 +57,7 @@ struct MinutesPanel: View {
             }
 
             if let minutes {
-                MinutesContent(minutes: minutes, meeting: meeting, transcript: transcript, sync: sync,
+                MinutesContent(minutes: minutes, meeting: meeting, refs: resolver,
                                isEditable: !status.isBusy, onJump: onJump, onChange: update)
             } else {
                 placeholder(status)
@@ -121,6 +123,19 @@ struct MinutesPanel: View {
         Text(loadError ?? (status == .done ? "找不到纪要文件" : "还没有纪要"))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// body 每次渲染都要解析出处，生成中进度每秒变好几次。同步状态要对整份转写稿算 SHA-256，
+/// 所以纪要的 source 和转写稿没变时沿用上次的解析器。是普通的类而不是状态：在 body 里更新它不触发重绘
+@MainActor private final class RefResolverCache {
+    private var cached: MinutesRefResolver?
+
+    func resolver(minutes: Minutes?, transcript: Transcript?) -> MinutesRefResolver {
+        let resolver = cached?.updated(minutes: minutes, transcript: transcript)
+            ?? MinutesRefResolver(minutes: minutes, transcript: transcript)
+        cached = resolver
+        return resolver
     }
 }
 
@@ -211,8 +226,8 @@ private struct SyncBanner: View {
 private struct MinutesContent: View {
     var minutes: Minutes
     var meeting: Meeting
-    var transcript: Transcript?
-    var sync: MinutesSync
+    /// 在当前转写稿里解析出处
+    var refs: MinutesRefResolver
     /// 排队或生成中不能编辑：成功后整份替换，这期间的修改会被悄悄丢掉。失败时旧纪要保留，可以继续编辑
     var isEditable: Bool
     var onJump: (MinutesRefTarget) -> Void
@@ -258,7 +273,7 @@ private struct MinutesContent: View {
                     }
                 } else {
                     MinutesItemRow(item: item, isAction: isAction, meeting: meeting,
-                                   chips: item.refs.map { $0.chip(in: transcript, sync: sync) },
+                                   chips: item.refs.map(refs.chip),
                                    isEditable: isEditable, onJump: onJump,
                                    onEdit: { editing = .item(item.id) },
                                    onRestore: { onChange { $0.restore(item: item.id) } },

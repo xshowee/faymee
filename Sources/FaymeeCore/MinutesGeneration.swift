@@ -17,13 +17,12 @@ public func generateMinutes(
     let sentences = Dictionary(transcript.sentences.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     let sentenceIDs = Set(sentences.keys)
     let meeting = MeetingInfo(title: title, startedAt: startedAt, timeZone: timeZone)
-    let budget = Budget(generator, outputTokens: generator.contextTokens * 2 / 5)
     let system = extractionSystemPrompt(template)
+    let budget = Budget(generator, system: system, outputTokens: generator.contextTokens * 2 / 5)
 
-    let lineBudget = generator.contextTokens - budget.outputTokens - generator.countTokens(system)
-        - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
+    let lineBudget = budget.promptTokens - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
     let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens) {
-        budget.fits(system: system, prompt: extractionPrompt(meeting, lines: $0.map(inputLine), partial: true))
+        budget.fits(extractionPrompt(meeting, lines: $0.map(inputLine), partial: true))
     }
     var drafts: [Draft] = []
     for (n, items) in segments.enumerated() {
@@ -35,7 +34,7 @@ public func generateMinutes(
     }
     let draft = drafts.count > 1
         ? try await merge(drafts, meeting: meeting, template: template, generator: generator,
-                          budget: Budget(generator, outputTokens: generator.contextTokens / 2))
+                          outputTokens: generator.contextTokens / 2)
         : drafts.first ?? [:]
     progress(1)
 
@@ -54,22 +53,59 @@ struct Budget {
     let generator: TextGenerator
     /// 留给输出的 token 数，作为 generate 的 maxTokens
     let outputTokens: Int
+    /// 留给提示词的 token 数。同一种调用的系统提示不变，它的 token 数只算一次
+    let promptTokens: Int
 
-    init(_ generator: TextGenerator, outputTokens: Int) {
+    init(_ generator: TextGenerator, system: String, outputTokens: Int) {
         self.generator = generator
         self.outputTokens = outputTokens
+        promptTokens = generator.contextTokens - outputTokens - generator.countTokens(system)
     }
 
-    /// 按拼好的完整字符串计算，不靠逐行估算
-    func fits(system: String, prompt: String) -> Bool {
-        generator.countTokens(system) + generator.countTokens(prompt) + outputTokens <= generator.contextTokens
+    /// 按拼好的完整提示词计算，不靠逐行估算
+    func fits(_ prompt: String) -> Bool {
+        generator.countTokens(prompt) <= promptTokens
     }
 }
 
+/// `lower...upper` 里使 `fits` 成立的最大值，没有时为 nil。`fits` 须单调：对某个值不成立，对更大的也不成立。
+/// 先试 `upper`（通常都放得下，只算一次），不行再二分，不逐个递减：每试一次都要拼整份提示词再分词
+func largestFitting(_ lower: Int, _ upper: Int, _ fits: (Int) -> Bool) -> Int? {
+    guard lower <= upper else { return nil }
+    if fits(upper) { return upper }
+    var lo = lower, hi = upper - 1
+    var found: Int?
+    while lo <= hi {
+        let mid = (lo + hi) / 2
+        if fits(mid) {
+            found = mid
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    return found
+}
+
+/// 同 `largestFitting`，但从 `lower` 起倍增试探，第一次放不下后再在两次之间二分。
+/// 结果通常远小于 `upper` 时用（如分批合并，一批常常只凑得下几份）：不必先拼一遍剩下的全部
+func largestFittingGrowing(_ lower: Int, _ upper: Int, _ fits: (Int) -> Bool) -> Int? {
+    guard lower <= upper, fits(lower) else { return nil }
+    var good = lower
+    var step = 1
+    while good < upper {
+        let next = min(good + step, upper)
+        guard fits(next) else { return largestFitting(good + 1, next - 1, fits) ?? good }
+        good = next
+        step *= 2
+    }
+    return good
+}
+
 /// 把转写稿在条目（句子或合盖空白）边界切成若干段，每段都满足 `fits`。
-/// 先按逐行 token 数估算尽量装满，装不下时在后半段里找切点：优先在合盖空白之后，
-/// 其次在最长的停顿处（至少 `longPause` 秒），都没有就切在装满的位置；
-/// 最后用 `fits` 按完整提示词核对，超了就把末尾的条目挪到下一段
+/// 先按逐行 token 数估算尽量装满，再用 `fits` 按完整提示词核对，超了就把末尾的条目挪到下一段
+/// （二分找能放下的最多条目）；装不下时在后半段里找切点：优先在合盖空白之后，
+/// 其次在最长的停顿处（至少 `longPause` 秒），都没有就切在装满的位置
 func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: (String) -> Int,
              fits: (ArraySlice<TranscriptItem>) -> Bool) throws -> [[TranscriptItem]] {
     let longPause: TimeInterval = 5
@@ -84,7 +120,9 @@ func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: 
             used += costs[end]
             end += 1
         }
-        while end > start, !fits(items[start..<end]) { end -= 1 }
+        if end > start {
+            end = largestFitting(start + 1, end) { fits(items[start..<$0]) } ?? start
+        }
         guard end > start else { throw MinutesGenerationError.contextTooSmall }
         if end < items.count {
             let candidates = (start + (end - start + 1) / 2)...end
@@ -107,8 +145,9 @@ func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: 
 /// 再合并各批的结果，直到只剩一份。某一轮一批都凑不成、或某批合并重试后仍解析不出时，
 /// 不让整场失败，把这一轮的各份交给 `concatenate`
 private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTemplate,
-                   generator: TextGenerator, budget: Budget) async throws -> Draft {
+                   generator: TextGenerator, outputTokens: Int) async throws -> Draft {
     let system = mergeSystemPrompt(template)
+    let budget = Budget(generator, system: system, outputTokens: outputTokens)
     func prompt(_ group: ArraySlice<Draft>) -> String {
         mergePrompt(meeting, draft: combine(group), template: template)
     }
@@ -118,8 +157,8 @@ private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTem
         var next: [Draft] = []
         var start = 0
         while start < level.count {
-            var end = start + 1
-            while end < level.count, budget.fits(system: system, prompt: prompt(level[start...end])) { end += 1 }
+            let end = largestFittingGrowing(start + 2, level.count) { budget.fits(prompt(level[start..<$0])) }
+                ?? start + 1
             let group = level[start..<end]
             if group.count == 1 {
                 next.append(group[start])
@@ -131,14 +170,15 @@ private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTem
                 } catch MinutesGenerationError.unparseableOutput {
                     // 多半是输出到上限被截断，也是放不下；各段条目已经有了，不让整场失败
                     return try await concatenate(level, meeting: meeting, template: template,
-                                                 generator: generator, budget: budget)
+                                                 generator: generator, outputTokens: outputTokens)
                 }
                 next.append(merged.validated(against: allowedRefs(group)))
             }
             start = end
         }
         guard next.count < level.count else {
-            return try await concatenate(level, meeting: meeting, template: template, generator: generator, budget: budget)
+            return try await concatenate(level, meeting: meeting, template: template, generator: generator,
+                                         outputTokens: outputTokens)
         }
         level = next
     }
@@ -147,9 +187,10 @@ private func merge(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTem
 
 /// 合并的兜底：模型一次装不下时，各节直接按顺序拼接各份的条目，不让模型去重。
 /// 文字、负责人、截止时间都相同的才算重复，只留第一条，出处取并集（再截到 `maxRefs` 个）。
-/// 各段的概要拼起来太多太碎，单独做一次只有概要的小合并；放不下、或重试后仍解析不出，就用拼接的
+/// 各段的概要拼起来太多太碎，单独做一次只有概要的小合并；放不下、或重试后仍解析不出，就用拼接的。
+/// 两种情况概要都只留前 `maxFallbackOverviews` 条（拼接的就只剩前几段的概要）
 private func concatenate(_ drafts: [Draft], meeting: MeetingInfo, template: MinutesTemplate,
-                         generator: TextGenerator, budget: Budget) async throws -> Draft {
+                         generator: TextGenerator, outputTokens: Int) async throws -> Draft {
     var result = Draft()
     for (kind, _) in template.sections {
         let key = sectionKey(kind)
@@ -167,17 +208,24 @@ private func concatenate(_ drafts: [Draft], meeting: MeetingInfo, template: Minu
     let overviewKey = sectionKey(.overview)
     let overviews = drafts.map { [overviewKey: $0[overviewKey] ?? []] }
     let system = overviewMergeSystemPrompt(template)
+    let budget = Budget(generator, system: system, outputTokens: outputTokens)
     let prompt = mergePrompt(meeting, draft: combine(overviews[...]), template: template, sections: [.overview])
-    guard overviews.count(where: { !$0[overviewKey]!.isEmpty }) > 1, budget.fits(system: system, prompt: prompt)
-    else { return result }
-    do {
-        let merged = try await generateDraft(generator, system: system, prompt: prompt,
-                                             maxTokens: budget.outputTokens, template: template, sections: [.overview])
-            .validated(against: allowedRefs(overviews[...]))
-        if let items = merged[overviewKey], !items.isEmpty { result[overviewKey] = items }
-    } catch MinutesGenerationError.unparseableOutput {}
+    if overviews.count(where: { !$0[overviewKey]!.isEmpty }) > 1, budget.fits(prompt) {
+        do {
+            let merged = try await generateDraft(generator, system: system, prompt: prompt,
+                                                 maxTokens: budget.outputTokens, template: template,
+                                                 sections: [.overview])
+                .validated(against: allowedRefs(overviews[...]))
+            if let items = merged[overviewKey], !items.isEmpty { result[overviewKey] = items }
+        } catch MinutesGenerationError.unparseableOutput {}
+    }
+    if let items = result[overviewKey] { result[overviewKey] = Array(items.prefix(maxFallbackOverviews)) }
     return result
 }
+
+/// 合并兜底时概要最多留的条数（spec「输出格式与校验」）。小合并的提示词要求 3–6 条，
+/// 实测模型不守（ticket 11 给了 12 条）；各段概要直接拼接时也可能很多
+let maxFallbackOverviews = 6
 
 /// 一次合并的输出里允许出现的出处：该次输入里出现过的
 private func allowedRefs(_ drafts: ArraySlice<Draft>) -> Set<String> {

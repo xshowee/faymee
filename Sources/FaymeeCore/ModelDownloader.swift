@@ -56,7 +56,8 @@ public final class ModelDownloader {
     public private(set) var phase: ModelDownloadPhase = .notDownloaded
     /// 已下载到本地的字节数（含之前中断留下的）
     public private(set) var receivedBytes: Int64 = 0
-    /// 模型变得可用（下载完成）或不再可用（删除）时调用。App 在这里调 `MinutesPipeline.modelAvailabilityChanged()`
+    /// 模型变得可用（下载完成）或不再可用（删除）时调用。App 在这里调 `MinutesPipeline.modelAvailabilityChanged()`。
+    /// 按磁盘上的文件判断，变了就调用：取消时恰好下完、改名到位的也算
     @ObservationIgnored public var onAvailabilityChange: (() -> Void)?
 
     @ObservationIgnored private let transport: any ModelTransport
@@ -121,7 +122,6 @@ public final class ModelDownloader {
             do { try fm.removeItem(at: url) } catch { failure = error }
         }
         refreshFromDisk()
-        onAvailabilityChange?()
         if let failure { throw failure }
     }
 
@@ -138,7 +138,9 @@ public final class ModelDownloader {
         task = nil
     }
 
+    /// 按磁盘上的文件得出状态；模型是否可用变了就通知
     private func refreshFromDisk() {
+        let wasReady = isReady
         if model.isDownloaded(in: directory) {
             receivedBytes = model.size
             phase = .ready
@@ -146,6 +148,7 @@ public final class ModelDownloader {
             receivedBytes = min(fileSize(partialURL), model.size)
             phase = receivedBytes > 0 ? .paused : .notDownloaded
         }
+        if isReady != wasReady { onAvailabilityChange?() }
     }
 
     private func report(_ event: DownloadJob.Event, token: Int) {
@@ -162,7 +165,6 @@ public final class ModelDownloader {
         switch result {
         case .success:
             refreshFromDisk()
-            onAvailabilityChange?()
         case let .failure(error) where error is CancellationError:
             // 暂停
             refreshFromDisk()
@@ -189,18 +191,18 @@ public struct ModelDownloadStatus: Hashable, Sendable {
 
     public var text: String {
         switch phase {
-        case .notDownloaded: "未下载（约 \(gigabytes(totalBytes))）"
+        case .notDownloaded: "未下载（约 \(formatGigabytes(totalBytes))）"
         case .downloading: "下载中 \(percent)（\(amount)）"
         case .paused: "已暂停，已下载 \(percent)（\(amount)）"
         case .verifying: "正在校验模型…"
-        case .ready: "已就绪，占用 \(gigabytes(totalBytes))"
+        case .ready: "已就绪，占用 \(formatGigabytes(totalBytes))"
         case let .failed(reason): "下载失败：\(reason)"
         }
     }
 
     public var minutesText: String {
         switch phase {
-        case .notDownloaded: "生成纪要需要下载约 \(gigabytes(totalBytes)) 的模型"
+        case .notDownloaded: "生成纪要需要下载约 \(formatGigabytes(totalBytes)) 的模型"
         case .downloading: "正在下载模型 \(percent)"
         case .paused: "模型下载已暂停（\(percent)）"
         case .verifying: "正在校验模型…"
@@ -210,7 +212,7 @@ public struct ModelDownloadStatus: Hashable, Sendable {
     }
 
     private var percent: String { "\(Int((progress * 100).rounded(.down)))%" }
-    private var amount: String { "\(gigabytes(receivedBytes)) / \(gigabytes(totalBytes))" }
+    private var amount: String { "\(formatGigabytes(receivedBytes)) / \(formatGigabytes(totalBytes))" }
 }
 
 extension ModelDownloader {
@@ -219,8 +221,8 @@ extension ModelDownloader {
     }
 }
 
-/// 按十进制 GB 显示一位小数（和访达一致）
-private func gigabytes(_ bytes: Int64) -> String {
+/// 按十进制 GB 显示一位小数（和访达一致），如“2.5 GB”
+public func formatGigabytes(_ bytes: Int64) -> String {
     String(format: "%.1f GB", Double(bytes) / 1e9)
 }
 

@@ -87,14 +87,3 @@ extension Meeting {
         return (name.allSatisfy { $0 == "." } ? "会议纪要" : name) + ".md"
     }
 }
-
-private extension String {
-    /// 换行换成空格（一个条目、一句话要留在同一行或同一段里），去掉两边空白；空白串当作没有
-    var singleLine: String? {
-        let s = components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        return s.isEmpty ? nil : s
-    }
-}

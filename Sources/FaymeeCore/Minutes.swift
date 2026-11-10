@@ -259,3 +259,15 @@ public struct CalendarDate: Codable, Hashable, Sendable, CustomStringConvertible
         try c.encode(description)
     }
 }
+
+extension String {
+    /// 一条一行：每行去掉两边空白、丢掉空行，再用一个空格连起来（条目、一句话要留在同一行或同一段里）；
+    /// 什么都不剩时为 nil。人工修改纪要和导出 Markdown 共用
+    var singleLine: String? {
+        let s = components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return s.isEmpty ? nil : s
+    }
+}

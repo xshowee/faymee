@@ -524,6 +524,23 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         #expect(minutes.sections.flatMap(\.items).allSatisfy { $0.refs.count <= 3 })
     }
 
+    /// 兜底时概要的小合并不守“3–6 条”（ticket 11 实测给了 12 条）：代码里只留前 6 条。
+    /// 小合并失败、改用各段概要拼接时同样只留 6 条，见 `分批合并重试后仍解析不出时_退回拼接各段条目`
+    @Test func 兜底时概要小合并最多留6条() async throws {
+        let generator = ScriptedGenerator(contextTokens: 6000)
+        generator.respond = { system, prompt in
+            if let output = bulkyExtraction(prompt) { return output }
+            let id = prompt.matches(of: try! Regex(#""s\d+""#)).map { String(prompt[$0.range]) }[0]
+            let items = (1...8).map { #"{"text": "概要\#($0)", "refs": [\#(id)]}"# }
+            return #"{"overview": [\#(items.joined(separator: ", "))]}"#
+        }
+
+        let minutes = try await generate(generator, transcript: longTranscript(count: 200))
+
+        #expect(generator.mergeCalls.count == 1)
+        #expect(minutes.sections[0].items.map(\.text) == (1...6).map { "概要\($0)" })
+    }
+
     /// 兜底时概要的小合并重试后仍解析不出：也不让整场失败，概要用各段的拼起来
     @Test func 兜底时概要合并解析失败_用各段概要拼接() async throws {
         let generator = ScriptedGenerator(contextTokens: 6000)
@@ -557,7 +574,9 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         #expect(cited.count >= 3)
         // 第一批合并试两次，概要的小合并再试两次
         #expect(generator.mergeCalls.count == 4)
-        #expect(minutes.sections[0].items.map(\.text) == cited.map { "\($0) 开始的一段" })
+        // 概要用各段的拼接，最多留 6 条
+        #expect(cited.count > 6)
+        #expect(minutes.sections[0].items.map(\.text) == cited.prefix(6).map { "\($0) 开始的一段" })
         #expect(minutes.sections[1].items.map(\.text) == cited.map { "\($0) 定下的事" })
     }
 
@@ -575,6 +594,27 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
             let expected = transcriptLines(in: call.prompt).isEmpty ? ["overview"] : keys
             #expect(keys.filter { grammar.contains(#"\"\#($0)\""#) } == expected)
         }
+    }
+
+    @Test func 二分找放得下的最多条目_先试上限() {
+        var tried: [Int] = []
+        #expect(largestFitting(1, 100) { tried.append($0); return $0 <= 37 } == 37)
+        #expect(tried.first == 100)
+        #expect(tried.count <= 8)
+        #expect(largestFitting(1, 10) { _ in true } == 10)
+        #expect(largestFitting(1, 10) { _ in false } == nil)
+        #expect(largestFitting(5, 4) { _ in true } == nil)
+    }
+
+    @Test func 倍增试探再二分_结果小时不必先试上限() {
+        var tried: [Int] = []
+        #expect(largestFittingGrowing(2, 1000) { tried.append($0); return $0 <= 5 } == 5)
+        #expect(tried.max()! < 20)
+        for limit in [2, 3, 4, 7, 8, 9, 37, 99, 100] {
+            #expect(largestFittingGrowing(2, 100) { $0 <= limit } == limit)
+        }
+        #expect(largestFittingGrowing(2, 100) { _ in false } == nil)
+        #expect(largestFittingGrowing(3, 2) { _ in true } == nil)
     }
 
     @Test func 连一句都放不下时抛错() async throws {

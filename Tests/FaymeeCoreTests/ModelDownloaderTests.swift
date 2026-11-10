@@ -350,6 +350,33 @@ private final class Fixture {
         try await f.until { host.meetings["m1"]?.minutes?.status == .done }
     }
 
+    /// 取消时下载恰好完成、文件已改名到位：状态显示已就绪，排队的纪要也要知道模型可用了，
+    /// 不能一直卡在“等待下载模型”直到重启
+    @Test func 取消时恰好下完_排队的纪要照样开始() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        let file = serve(Data("abc".utf8))
+        let f = Fixture(FakeTransport { url, offset in
+            gate.wait()
+            return try file(url, offset)
+        })
+        let (pipeline, host) = f.makePipeline()
+        #expect(pipeline.enqueue("m1"))
+        f.downloader.start()
+        try await f.until { f.transport.requests.count == 1 }
+
+        // 不让出主线程：下载在后台完成、改名到位，完成的回调还轮不到执行，这时取消
+        gate.signal()
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: f.modelFile.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        try #require(FileManager.default.fileExists(atPath: f.modelFile.path))
+        await f.downloader.cancel()
+
+        #expect(f.downloader.phase == .ready)
+        try await f.until { host.meetings["m1"]?.minutes?.status == .done }
+    }
+
     @Test func 删除模型后状态回到未下载_排队的纪要显示等待下载模型() async throws {
         let f = Fixture(FakeTransport(serve(Data("abc".utf8))))
         await f.download()

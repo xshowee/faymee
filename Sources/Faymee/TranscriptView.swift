@@ -98,9 +98,9 @@ struct TranscriptSection: View {
         if let activity = model.transcription.activity(for: meeting.id) {
             switch activity {
             case let .preparing(p):
-                progress("正在准备转写引擎（\(percent(p))）", p)
+                progress("正在准备转写引擎（\(formatPercent(p))）", p)
             case let .transcribing(p):
-                progress("转写中 \(percent(p))", p)
+                progress("转写中 \(formatPercent(p))", p)
             }
         } else {
             switch meeting.transcription?.status {
@@ -144,10 +144,6 @@ struct TranscriptSection: View {
         Text(text)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func percent(_ p: Double) -> String {
-        "\(Int((min(max(p, 0), 1) * 100).rounded()))%"
     }
 
     private func copy(_ transcript: Transcript) {

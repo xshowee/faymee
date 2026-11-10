@@ -44,10 +44,11 @@ public final class MinutesPipeline {
     /// 排队中的会议，不含正在生成的
     public var queue: [String] { jobs.map(\.id) }
     /// 正在生成的会议
-    public private(set) var activeID: String? {
-        didSet { reportEngineUse() }
-    }
+    public var activeID: String? { activeJob?.id }
     public private(set) var activity: MinutesActivity?
+    /// 引擎是否在用：正在生成，或被取消的任务还没退出（加载模型时可能约 6 秒不理会取消）。
+    /// 在用时不能删模型文件；`coordinate(with:)` 也据此让转写等着
+    public private(set) var isEngineInUse = false
 
     /// 暂停时不开始新的生成；暂停的瞬间正在进行的生成被取消并放回队首，恢复后从头再生成。
     /// 录音、整理、启动恢复完成前暂停：录音可靠性优先
@@ -90,13 +91,16 @@ public final class MinutesPipeline {
     }
 
     private var jobs: [Job] = []
+    /// 正在生成的任务
+    private var activeJob: Job? {
+        didSet { reportEngineUse() }
+    }
 
     @ObservationIgnored private let store: MeetingStore
     @ObservationIgnored private let generator: any TextGenerator
     @ObservationIgnored private let model: String
     @ObservationIgnored private weak var host: MinutesHost?
     @ObservationIgnored private var task: Task<Void, Never>?
-    @ObservationIgnored private var activeJob: Job?
     /// 被取消、可能还没退出的任务。下一个任务等它退出再用引擎，不并发调用引擎；
     /// 它退出时如果没有别的任务在跑，才释放模型（不在它可能还在用模型时 unload）
     @ObservationIgnored private var cancelled: Task<Void, Never>? {
@@ -107,9 +111,8 @@ public final class MinutesPipeline {
     @ObservationIgnored private var generation = 0
     /// 调过 load、还没 unload。只在真加载过时释放
     @ObservationIgnored private var isLoaded = false
-    /// 引擎是否在用（正在生成，或被取消的任务还没退出），变化时调用。`coordinate(with:)` 用它让转写等着
+    /// `isEngineInUse` 变化时调用，见 `coordinate(with:)`
     @ObservationIgnored private var onEngineUseChange: ((Bool) -> Void)?
-    @ObservationIgnored private var reportedEngineUse = false
 
     /// - Parameter model: 写进纪要的引擎标识，如 "llama/qwen3-4b-q4km"
     public init(store: MeetingStore, generator: any TextGenerator, model: String, host: MinutesHost) {
@@ -152,7 +155,7 @@ public final class MinutesPipeline {
     public func coordinate(with transcription: TranscriptionPipeline) {
         transcription.onIdleChange = { [weak self] idle in self?.isTranscriptionBusy = !idle }
         onEngineUseChange = { [weak transcription] inUse in transcription?.isHeld = inUse }
-        transcription.isHeld = reportedEngineUse
+        transcription.isHeld = isEngineInUse
         isTranscriptionBusy = !transcription.isIdle
     }
 
@@ -163,20 +166,20 @@ public final class MinutesPipeline {
     }
 
     /// 排队生成（自动生成、“生成纪要”、“重试”、“重新生成”、“现在生成”都走这里）。
-    /// 只接受转写过的会议；正在生成时忽略。已在排队时不重复排，但会换成新的模板，`now` 只升不降。
+    /// 只接受转写过的会议；正在生成时忽略。已在排队时不重复排，给了模板就换成新的模板，`now` 只升不降。
     /// - Parameters:
-    ///   - template: nil 时沿用已有纪要的模板，没有纪要用“通用”
+    ///   - template: nil 时沿用排队时选的模板；不在排队时沿用已有纪要的模板，没有纪要用“通用”。
+    ///     如“按周会重新生成”后排队等转写，转写完成自动排队（不带模板）时仍按周会生成
     ///   - now: “现在生成”，不等接通电源
     /// - Returns: 是否在队列中
     @discardableResult
     public func enqueue(_ id: String, template: MinutesTemplate? = nil, now: Bool = false) -> Bool {
         guard let m = host?.meeting(id), m.transcription != nil, id != activeID else { return false }
-        let template = template ?? existingTemplate(id)
         if let i = jobs.firstIndex(where: { $0.id == id }) {
-            jobs[i].template = template
+            if let template { jobs[i].template = template }
             jobs[i].now = jobs[i].now || now
         } else {
-            jobs.append(Job(id: id, template: template, now: now))
+            jobs.append(Job(id: id, template: template ?? existingTemplate(id), now: now))
             host?.setMinutes(MinutesState(status: .queued), for: id)
         }
         startNext()
@@ -242,7 +245,6 @@ public final class MinutesPipeline {
         let generator = generator
         let model = model
         let previous = cancelled
-        activeID = job.id
         activeJob = job
         activity = .loading(0)
         isLoaded = true
@@ -281,7 +283,6 @@ public final class MinutesPipeline {
     private func finish(_ id: String, token: Int, result: Result<Minutes, Error>) {
         // 已被取消：结果作废，什么都不写
         guard token == generation, activeID == id else { return }
-        activeJob = nil
         task = nil
 
         var outcome: MinutesOutcome?
@@ -297,10 +298,10 @@ public final class MinutesPipeline {
                 outcome = .failed(error.localizedDescription)
             }
         }
-        // 下一场开始不了就先释放模型，再让给转写（清掉 activeID 会放开转写）
+        // 下一场开始不了就先释放模型，再让给转写（清掉 activeJob 会放开转写）
         if nextJob == nil { releaseModel() }
         activity = nil
-        activeID = nil
+        activeJob = nil
         startNext()
         if let outcome { onFinish?(id, outcome) }
     }
@@ -316,7 +317,6 @@ public final class MinutesPipeline {
         }
         self.task = nil
         generation += 1
-        activeID = nil
         activeJob = nil
         activity = nil
     }
@@ -333,8 +333,8 @@ public final class MinutesPipeline {
 
     private func reportEngineUse() {
         let inUse = activeID != nil || cancelled != nil
-        guard inUse != reportedEngineUse else { return }
-        reportedEngineUse = inUse
+        guard inUse != isEngineInUse else { return }
+        isEngineInUse = inUse
         onEngineUseChange?(inUse)
     }
 

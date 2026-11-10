@@ -74,6 +74,16 @@ public final class TranscriptionPipeline {
     @ObservationIgnored private let engine: String
     @ObservationIgnored private weak var host: TranscriptionHost?
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// 被取消、可能还没退出的任务。在它退出前不算空闲（纪要不开始用引擎），
+    /// 下一场转写也等它退出再调用引擎，一次只跑一个重任务
+    @ObservationIgnored private var cancelled: Task<Void, Never>? {
+        didSet { reportIdle() }
+    }
+    @ObservationIgnored private var cancelCount = 0
+    /// 预定了转写、还没入队的会议，见 `reserve(_:)`
+    @ObservationIgnored private var reserved: Set<String> = [] {
+        didSet { reportIdle() }
+    }
     /// 每开始或取消一次转写加一。取消后引擎可能不理会、照常返回，靠它丢弃过期的结果和进度
     @ObservationIgnored private var generation = 0
 
@@ -85,17 +95,32 @@ public final class TranscriptionPipeline {
         self.host = host
     }
 
-    public var isIdle: Bool { activeID == nil && queue.isEmpty }
+    /// 没有排队、正在转写、预定了转写的会议，被取消的转写也已退出
+    public var isIdle: Bool { activeID == nil && queue.isEmpty && cancelled == nil && reserved.isEmpty }
 
     /// 某场会议正在进行的步骤；不在转写中时为 nil
     public func activity(for id: String) -> TranscriptionActivity? {
         activeID == id ? activity : nil
     }
 
+    /// 预定转写：会议正在整理，整理好就要排队转写。到 `enqueue`、`unreserve`、`remove` 这场会议之前
+    /// 转写不算空闲，纪要不开始：整理完成时录音、整理的暂停先解除，转写稍后才入队，
+    /// 这中间排队的纪要不能抢先开始，否则新会议的转写稿要等一整场纪要生成完
+    public func reserve(_ id: String) {
+        reserved.insert(id)
+    }
+
+    /// 取消预定（整理失败等）。没预定过时什么都不做
+    public func unreserve(_ id: String) {
+        reserved.remove(id)
+    }
+
     /// 排队转写（自动转写、旧会议的“转写”、“重试”、“重新转写”都走这里）。
-    /// 只接受已整理好的会议；已在队列中或正在转写时忽略。返回是否入队
+    /// 只接受已整理好的会议；已在队列中或正在转写时忽略。返回是否入队。预定随之作废
     @discardableResult
     public func enqueue(_ id: String) -> Bool {
+        // 入队后才取消预定，中间不出现“空闲”的瞬间
+        defer { reserved.remove(id) }
         guard let m = host?.meeting(id), m.status == .done, m.recording != nil,
               id != activeID, !queue.contains(id) else { return false }
         queue.append(id)
@@ -117,6 +142,7 @@ public final class TranscriptionPipeline {
 
     /// 会议即将被删除：移出队列，正在转写的立即取消。不写任何文件，也不再更新这场会议的状态
     public func remove(_ id: String) {
+        reserved.remove(id)
         queue.removeAll { $0 == id }
         if activeID == id {
             cancelActive()
@@ -135,6 +161,7 @@ public final class TranscriptionPipeline {
         let token = generation
         let hotwords = hotwords
         let transcriber = transcriber
+        let previous = cancelled
         // 先设 activeID 再移出队列，中间不出现“空闲”的瞬间
         activeID = id
         queue.removeFirst()
@@ -149,8 +176,10 @@ public final class TranscriptionPipeline {
             }
         }
         task = Task(priority: .utility) { [weak self] in
+            await previous?.value
             let result: Result<[TranscribedSentence], Error>
             do {
+                try Task.checkCancellation()
                 try await transcriber.prepare { report(.preparing($0)) }
                 report(.transcribing(0))
                 result = .success(try await transcriber.transcribe(
@@ -195,12 +224,29 @@ public final class TranscriptionPipeline {
         onIdleChange?(isIdle)
     }
 
+    /// 先记下被取消的任务再清 activeID，中间不出现“空闲”的瞬间
     private func cancelActive() {
-        task?.cancel()
+        if let task {
+            task.cancel()
+            cancelCount += 1
+            let mine = cancelCount
+            cancelled = Task { [weak self] in
+                await task.value
+                self?.cancelledTaskExited(mine)
+            }
+        }
         task = nil
         generation += 1
         activeID = nil
         activity = nil
+    }
+
+    /// 被取消的任务退出了，不再用引擎
+    private func cancelledTaskExited(_ mine: Int) {
+        // 之后又取消过别的任务，等那个退出（它会先等这个退出）
+        guard mine == cancelCount else { return }
+        cancelled = nil
+        startNext()
     }
 }
 

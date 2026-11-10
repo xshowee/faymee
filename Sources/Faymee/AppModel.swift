@@ -87,10 +87,6 @@ final class AppModel {
     @ObservationIgnored private var launchRecovered = false {
         didSet { syncTranscriptionSuspension() }
     }
-    /// 为 true 时先不重新计算暂停，见 finalize
-    @ObservationIgnored private var deferSuspensionSync = false {
-        didSet { if !deferSuspensionSync { syncTranscriptionSuspension() } }
-    }
 
     /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
     @ObservationIgnored let modelDownloader = MinutesEngine.makeDownloader()
@@ -328,6 +324,10 @@ final class AppModel {
     /// 合并分片为 recording.m4a。成功后删除分片；失败则保留分片，可以重试
     func finalize(_ id: String) async {
         guard var m = meeting(id), m.id != current?.id else { return }
+        // 整理好就要排队转写：在那之前转写不算空闲。否则标记整理完成、解除暂停的瞬间转写队列是空的，
+        // 排队的纪要会抢先开始，新会议的转写稿要等一整场纪要生成完
+        transcription.reserve(id)
+        defer { transcription.unreserve(id) }
         m.status = .finalizing
         m.error = nil
         update(m)
@@ -345,13 +345,9 @@ final class AppModel {
         switch result {
         case let .success(finalized):
             latest.markFinalized(recording: output.lastPathComponent, finalized)
-            // 新会议的转写先入队再解除暂停：否则解除暂停的瞬间转写队列是空的，
-            // 排队的纪要会抢先开始，新会议的转写稿要等一整场纪要生成完
-            deferSuspensionSync = true
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
             transcription.enqueue(id)
-            deferSuspensionSync = false
         case let .failure(error):
             latest.status = .failed
             latest.error = error.localizedDescription
@@ -390,9 +386,10 @@ final class AppModel {
 
     func trash(_ id: String) {
         guard id != current?.id else { return }
-        // 先取消转写和纪要，免得完成时往已删除的目录里写文件
-        transcription.remove(id)
+        // 先取消纪要和转写，免得完成时往已删除的目录里写文件。先移出纪要队列：
+        // 转写让出引擎时排队的纪要会开始，不能是这场正要删除的会议
         minutes.remove(id)
+        transcription.remove(id)
         do {
             try store.trash(id)
             meetings.removeAll { $0.id == id }
@@ -458,7 +455,6 @@ final class AppModel {
     /// 也算在内，免得中间空档里转写刚开始就被取消。
     /// 先设转写再设纪要：同时解除时转写先开始（纪要管线另外也会等转写空闲）
     private func syncTranscriptionSuspension() {
-        guard !deferSuspensionSync else { return }
         let suspended = !launchRecovered || isRecording
             || meetings.contains { $0.status == .recording || $0.status == .finalizing }
         transcription.isSuspended = suspended
@@ -507,8 +503,9 @@ final class AppModel {
 
     // MARK: - 纪要模型
 
-    /// 正在加载模型或生成纪要时不能删除模型：引擎还在用这个文件
-    var canDeleteModel: Bool { minutes.activeID == nil }
+    /// 正在加载模型或生成纪要时不能删除模型：引擎还在用这个文件。
+    /// 被取消的生成退出前也算在用（加载模型时可能一时不理会取消）
+    var canDeleteModel: Bool { !minutes.isEngineInUse }
 
     func deleteModel() async throws {
         guard canDeleteModel else { return }

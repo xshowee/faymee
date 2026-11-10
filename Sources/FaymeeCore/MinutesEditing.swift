@@ -28,11 +28,11 @@ extension Minutes {
     @discardableResult
     public mutating func edit(item id: String, text: String, owner: String? = nil, due: String? = nil,
                               dueDate: CalendarDate? = nil) -> Bool {
-        guard let text = normalized(text), let (s, i) = itemIndex(id, deleted: false) else { return false }
+        guard let text = text.singleLine, let (s, i) = itemIndex(id, deleted: false) else { return false }
         var item = sections[s].items[i]
         let isAction = sections[s].kind == .actions
         let content = isAction
-            ? MinutesItem.Original(text: text, owner: owner.flatMap(normalized), due: due.flatMap(normalized),
+            ? MinutesItem.Original(text: text, owner: owner?.singleLine, due: due?.singleLine,
                                    dueDate: dueDate)
             : MinutesItem.Original(text: text)
         guard content != item.content else { return false }
@@ -51,7 +51,7 @@ extension Minutes {
     @discardableResult
     public mutating func addItem(to kind: MinutesSectionKind, text: String, owner: String? = nil,
                                  due: String? = nil, dueDate: CalendarDate? = nil) -> String? {
-        guard let text = normalized(text), let s = sections.firstIndex(where: { $0.kind == kind }) else { return nil }
+        guard let text = text.singleLine, let s = sections.firstIndex(where: { $0.kind == kind }) else { return nil }
         let used = sections.flatMap(\.items).compactMap { item -> Int? in
             let n = item.id.dropFirst()
             guard item.id.first == "m", !n.isEmpty, n.allSatisfy(\.isASCII), n.allSatisfy(\.isNumber) else { return nil }
@@ -60,8 +60,8 @@ extension Minutes {
         let id = "m\((used.max() ?? 0) + 1)"
         let isAction = kind == .actions
         sections[s].items.append(MinutesItem(
-            id: id, text: text, owner: isAction ? owner.flatMap(normalized) : nil,
-            due: isAction ? due.flatMap(normalized) : nil, dueDate: isAction ? dueDate : nil,
+            id: id, text: text, owner: isAction ? owner?.singleLine : nil,
+            due: isAction ? due?.singleLine : nil, dueDate: isAction ? dueDate : nil,
             refs: [], origin: .manual))
         return id
     }
@@ -109,10 +109,4 @@ extension Minutes {
 extension MinutesItem {
     /// 可以人工修改的部分，形状和 `original` 一样
     fileprivate var content: Original { Original(text: text, owner: owner, due: due, dueDate: dueDate) }
-}
-
-/// 一条一行：换行换成空格，去掉首尾空白；什么都不剩时为 nil
-private func normalized(_ s: String) -> String? {
-    let s = s.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-    return s.isEmpty ? nil : s
 }

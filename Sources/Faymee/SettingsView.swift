@@ -24,7 +24,7 @@ struct SettingsView: View {
                 LabeledContent("Qwen3 4B（Q4_K_M）") {
                     ModelDownloadControls(style: .settings)
                 }
-                Text("纪要在本机生成，不上传任何数据。模型约 \(gigabytes(downloader.model.size))，只在点“下载”后才开始下载，可以暂停，中断后能续传")
+                Text("纪要在本机生成，不上传任何数据。模型约 \(formatGigabytes(downloader.model.size))，只在点“下载”后才开始下载，可以暂停，中断后能续传")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -67,12 +67,8 @@ struct SettingsView: View {
                 }
             }
         } message: {
-            Text("释放约 \(gigabytes(downloader.model.size)) 空间。之后生成纪要需要重新下载，已生成的纪要不受影响。")
+            Text("释放约 \(formatGigabytes(downloader.model.size)) 空间。之后生成纪要需要重新下载，已生成的纪要不受影响。")
         }
-    }
-
-    private func gigabytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GB", Double(bytes) / 1e9)
     }
 }
 

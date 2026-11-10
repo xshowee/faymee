@@ -69,6 +69,11 @@ private func item(_ m: Minutes, _ id: String) -> MinutesItem? {
         #expect(item(m, "a1")?.text == "把报价单 发给客户")
         #expect(item(m, "a1")?.owner == nil)
         #expect(item(m, "a1")?.due == nil)
+
+        // 换行两边的空白和空行一起去掉，只留一个空格，和导出 Markdown 一致
+        m.edit(item: "a1", text: "把报价单  \r\n\n  发给客户", owner: "张\n三")
+        #expect(item(m, "a1")?.text == "把报价单 发给客户")
+        #expect(item(m, "a1")?.owner == "张 三")
     }
 
     /// 负责人、截止时间只有待办有，其他节写盘时也不写这几项，改了读回来就不一样了

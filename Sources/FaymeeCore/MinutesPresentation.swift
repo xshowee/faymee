@@ -64,15 +64,59 @@ public struct MinutesRefChip: Hashable, Sendable {
 
 extension MinutesRef {
     /// 在当前转写稿里解析出处（规则见 `Transcript.locate`）。
-    /// 转写稿不存在或读不出来时只认生成时记下的 `start`，不定位句子
+    /// 转写稿不存在或读不出来时只认生成时记下的 `start`，不定位句子。
+    /// 要解析一份纪要的所有出处时用 `MinutesRefResolver`
     public func chip(in transcript: Transcript?, sync: MinutesSync) -> MinutesRefChip {
-        guard let transcript else {
+        chip(in: transcript.map(TranscriptRefLocator.init), sync: sync)
+    }
+
+    fileprivate func chip(in locator: TranscriptRefLocator?, sync: MinutesSync) -> MinutesRefChip {
+        guard let locator else {
             return MinutesRefChip(label: formatDuration(start), hint: "转写稿不可用，原句无法显示",
                                   target: MinutesRefTarget(time: start, sentenceID: nil, quote: nil))
         }
-        let target = transcript.locate(self, sync: sync)
+        let target = locator.locate(self, sync: sync)
         return MinutesRefChip(label: formatDuration(target.time), hint: target.quote ?? "转写稿已更新，原句不可用",
                               target: target)
+    }
+}
+
+/// 一份纪要对当前转写稿的同步状态和出处解析，详情页每次渲染都要用。
+/// 同步状态要对整份转写稿算一次 SHA-256（`textHash`），句子索引也要遍历整份转写稿，
+/// 所以只在纪要的 `source` 或转写稿变了时重建（见 `updated`），不随每次渲染重算
+public struct MinutesRefResolver: Sendable {
+    /// 没有纪要或转写稿时为 `.inSync`
+    public let sync: MinutesSync
+    private let source: MinutesSource?
+    private var transcript: Transcript?
+    private let locator: TranscriptRefLocator?
+
+    public init(minutes: Minutes?, transcript: Transcript?) {
+        sync = minutes.flatMap { m in transcript.map { m.sync(with: $0) } } ?? .inSync
+        source = minutes?.source
+        self.transcript = transcript
+        locator = transcript.map(TranscriptRefLocator.init)
+    }
+
+    /// 是否仍对应这份纪要和转写稿：同步状态只取决于纪要的 `source`，改条目不用重建
+    public func isCurrent(minutes: Minutes?, transcript: Transcript?) -> Bool {
+        minutes?.source == source && transcript == self.transcript
+    }
+
+    /// 仍对应这份纪要和转写稿时沿用自己，否则重建。沿用时记下新传进来的转写稿：
+    /// 内容相同、存储不同（如从磁盘重读）的转写稿只逐句比这一次，之后比较走数组共用存储的快速路径
+    public func updated(minutes: Minutes?, transcript: Transcript?) -> MinutesRefResolver {
+        guard isCurrent(minutes: minutes, transcript: transcript) else {
+            return MinutesRefResolver(minutes: minutes, transcript: transcript)
+        }
+        var resolver = self
+        resolver.transcript = transcript
+        return resolver
+    }
+
+    /// 同 `MinutesRef.chip(in:sync:)`
+    public func chip(_ ref: MinutesRef) -> MinutesRefChip {
+        ref.chip(in: locator, sync: sync)
     }
 }
 
@@ -118,8 +162,8 @@ public enum MinutesStatus: Hashable, Sendable {
         case .queued(.model): "等待下载模型"
         case .queued(.power): "等待接通电源"
         case .queued(.transcription): "等待转写完成"
-        case let .loadingModel(p): "正在加载模型（\(percent(p))）"
-        case let .generating(p?): "生成中 \(percent(p))"
+        case let .loadingModel(p): "正在加载模型（\(formatPercent(p))）"
+        case let .generating(p?): "生成中 \(formatPercent(p))"
         case .generating(nil): "生成中…"
         case let .failed(error): error
         case .done: nil
@@ -153,7 +197,8 @@ public enum MinutesStatus: Hashable, Sendable {
     }
 }
 
-private func percent(_ p: Double) -> String {
+/// 进度百分比，四舍五入到整数，如“42%”。超出 0...1 的按边界算
+public func formatPercent(_ p: Double) -> String {
     "\(Int((min(max(p, 0), 1) * 100).rounded()))%"
 }
 

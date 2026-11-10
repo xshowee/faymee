@@ -36,16 +36,31 @@ public struct MinutesRefTarget: Hashable, Sendable {
 }
 
 extension Transcript {
-    /// 解析出处。没有重新转写时按 id 找到那句，显示当前文字；
+    /// 解析出处，规则见 `TranscriptRefLocator.locate`。要解析多个出处时建一个 `TranscriptRefLocator` 复用
+    public func locate(_ ref: MinutesRef, sync: MinutesSync) -> MinutesRefTarget {
+        TranscriptRefLocator(self).locate(ref, sync: sync)
+    }
+}
+
+/// 在一份转写稿里解析出处。句子列表和 id 索引建一次，之后每个出处按 id 直接查
+struct TranscriptRefLocator: Sendable {
+    private let sentences: [TranscriptSentence]
+    private let byID: [String: TranscriptSentence]
+
+    init(_ transcript: Transcript) {
+        sentences = transcript.sentences
+        byID = Dictionary(sentences.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// 没有重新转写时按 id 找到那句，显示当前文字；
     /// 重新转写后（或 id 找不到时）只认生成时的 `start`：跳到该时间，定位到包含它的句子，
     /// 落在停顿里就取开始时间最近的一句，不显示原句
-    public func locate(_ ref: MinutesRef, sync: MinutesSync) -> MinutesRefTarget {
-        if sync != .retranscribed, let s = sentences.first(where: { $0.id == ref.id }) {
+    func locate(_ ref: MinutesRef, sync: MinutesSync) -> MinutesRefTarget {
+        if sync != .retranscribed, let s = byID[ref.id] {
             return MinutesRefTarget(time: s.start, sentenceID: s.id, quote: s.text)
         }
-        let all = sentences
-        let nearest = all.last { $0.start <= ref.start && ref.start < $0.end }
-            ?? all.min { abs($0.start - ref.start) < abs($1.start - ref.start) }
+        let nearest = sentences.last { $0.start <= ref.start && ref.start < $0.end }
+            ?? sentences.min { abs($0.start - ref.start) < abs($1.start - ref.start) }
         return MinutesRefTarget(time: ref.start, sentenceID: nearest?.id, quote: nil)
     }
 }

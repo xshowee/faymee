@@ -91,6 +91,33 @@ private let transcript = Transcript(
         #expect(chip.target.sentenceID == "s2")
     }
 
+    /// 详情页用 MinutesRefResolver 一次解析整份纪要：同步状态按纪要的 source 算，
+    /// 改条目不用重建，转写稿或 source 变了才要重建
+    @Test func 解析器按纪要和转写稿算出同步状态_只在source或转写稿变了时过期() {
+        var minutes = Minutes(model: "fake", template: "general", createdAt: meetingStart,
+                              source: MinutesSource(transcriptCreatedAt: transcript.createdAt,
+                                                    textHash: transcript.textHash),
+                              sections: [])
+        let resolver = MinutesRefResolver(minutes: minutes, transcript: transcript)
+        #expect(resolver.sync == .inSync)
+        #expect(resolver.chip(MinutesRef(id: "s2", start: 3723)).hint == "那就推迟一周")
+
+        minutes.template = "weekly"
+        #expect(resolver.isCurrent(minutes: minutes, transcript: transcript))
+        var edited = transcript
+        edited.items[0] = .sentence(TranscriptSentence(id: "s1", start: 195.4, end: 199, text: "支付接口准备好了"))
+        #expect(!resolver.isCurrent(minutes: minutes, transcript: edited))
+        #expect(MinutesRefResolver(minutes: minutes, transcript: edited).sync == .edited)
+        #expect(!resolver.isCurrent(minutes: nil, transcript: transcript))
+        #expect(resolver.updated(minutes: minutes, transcript: edited).sync == .edited)
+        #expect(resolver.updated(minutes: minutes, transcript: transcript).isCurrent(minutes: minutes,
+                                                                                    transcript: transcript))
+
+        let empty = MinutesRefResolver(minutes: nil, transcript: nil)
+        #expect(empty.sync == .inSync)
+        #expect(empty.chip(MinutesRef(id: "s1", start: 195.4)).hint == "转写稿不可用，原句无法显示")
+    }
+
     @Test func 没有转写稿时按生成时的时间跳转_不定位句子() {
         let chip = MinutesRef(id: "s1", start: 195.4).chip(in: nil, sync: .inSync)
         #expect(chip.label == "03:15")
