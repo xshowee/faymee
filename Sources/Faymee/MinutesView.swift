@@ -109,7 +109,7 @@ struct MinutesPanel: View {
     @ViewBuilder private func actions(_ status: MinutesStatus) -> some View {
         // 排队、重新生成期间也能复制或导出正在显示的旧纪要
         if let minutes {
-            Button("复制纪要") { MinutesExport.copy(minutes, meeting: meeting) }
+            Button("复制纪要") { MinutesExport.copy(minutes, meeting: meeting, transcript: transcript) }
             Button("导出…") { MinutesExport.export(minutes, meeting: meeting, transcript: transcript) }
         }
         // 纪要文件缺失或读不出来时也要能重新生成

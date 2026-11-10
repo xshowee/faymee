@@ -143,7 +143,7 @@ private let example = minutes([
                 MinutesItem(id: "o1", text: "回顾了上周待办", refs: [MinutesRef(id: "s1", start: 5)]),
             ]),
         ])
-        #expect(m.markdown(meeting: meeting(), transcript: transcript, timeZone: shanghai) == """
+        #expect(m.markdown(meeting: meeting(), transcript: transcript, attachingTranscript: true, timeZone: shanghai) == """
         # 产品周会（2026-11-10 10:00，52 分钟）
 
         ## 概要
@@ -164,7 +164,7 @@ private let example = minutes([
 
     @Test func 转写稿为空时只写标题和说明() {
         let transcript = Transcript(engine: "fake", createdAt: start, hotwords: [], items: [])
-        #expect(minutes([]).markdown(meeting: meeting(duration: nil), transcript: transcript, timeZone: shanghai) == """
+        #expect(minutes([]).markdown(meeting: meeting(duration: nil), transcript: transcript, attachingTranscript: true, timeZone: shanghai) == """
         # 产品周会（2026-11-10 10:00）
 
         ## 转写稿
@@ -183,7 +183,7 @@ private let example = minutes([
                 MinutesItem(id: "a1", text: "发报价单\r\n 附上合同 ", owner: "张\n三", due: "下周\n三", refs: []),
             ]),
         ])
-        #expect(m.markdown(meeting: meeting(duration: nil), transcript: transcript, timeZone: shanghai) == """
+        #expect(m.markdown(meeting: meeting(duration: nil), transcript: transcript, attachingTranscript: true, timeZone: shanghai) == """
         # 产品周会（2026-11-10 10:00）
 
         ## 待办
@@ -192,6 +192,136 @@ private let example = minutes([
         ## 转写稿
 
         [00:05] 第一行 第二行
+
+        """)
+    }
+}
+
+/// 区分过说话人时的复制纪要与导出（spec 54–57、「待办负责人关联说话人」）
+@Suite struct MinutesMarkdownSpeakerTests {
+    /// 生成时说话人完成的时间（整秒，写盘不丢）
+    private static let speakersCreatedAt = try! Date("2026-11-10T02:55:00Z", strategy: .iso8601)
+
+    private static func said(_ id: String, _ start: TimeInterval, _ speaker: String?, _ text: String) -> TranscriptItem {
+        .sentence(TranscriptSentence(id: id, start: start, end: start + 5, text: text, speaker: speaker))
+    }
+
+    /// 当前转写稿：说话人 2 叫 `spk2`（nil 为没命名），说话人完成时间为 `at`
+    private static func current(spk2: String?, at: Date = speakersCreatedAt,
+                                items: [TranscriptItem]? = nil) -> Transcript {
+        let speakers = [
+            Speaker(id: "spk1", name: "张三", nameSource: .user, voiceprint: Voiceprint([1]), speechDuration: 30),
+            Speaker(id: "spk2", name: spk2, nameSource: spk2 == nil ? nil : .user, voiceprint: Voiceprint([1]),
+                    speechDuration: 30),
+        ]
+        return Transcript(engine: "fake", createdAt: start, hotwords: [], items: items ?? [
+            said("s1", 5, "spk1", "报价单谁来发"),
+            said("s2", 10, "spk2", "我周三前发给客户"),
+        ], diarization: Diarization(engine: "fake", voiceprintModel: "fake", speakersCreatedAt: at,
+                                    speakers: speakers))
+    }
+
+    /// 生成时：a1 的负责人关联到说话人 2，a2 是手动改过（没有关联）的
+    private static let generated = Minutes(
+        model: "fake", template: "general", createdAt: start,
+        source: MinutesSource(transcriptCreatedAt: start, textHash: "sha256:x", speakersCreatedAt: speakersCreatedAt),
+        sections: [MinutesSection(kind: .actions, title: "待办", items: [
+            MinutesItem(id: "a1", text: "把报价单发给客户", owner: "说话人 2", ownerSpeaker: "spk2",
+                        refs: [MinutesRef(id: "s2", start: 10)]),
+            MinutesItem(id: "a2", text: "整理会议纪要", owner: "李四", refs: []),
+        ])])
+
+    /// 复制纪要不附转写稿，也要用当前转写稿解析负责人
+    @Test func 不附转写稿时负责人也用说话人当前的名字() {
+        #expect(Self.generated.markdown(meeting: meeting(duration: nil), transcript: Self.current(spk2: "王总"),
+                                        timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 待办
+        - [ ] 王总：把报价单发给客户（00:10）
+        - [ ] 李四：整理会议纪要
+
+        """)
+    }
+
+    /// 重新区分过（编号已重排）或拿不到转写稿时，负责人退回生成时的文字
+    @Test func 重新区分过或没有转写稿时负责人用生成时的文字() {
+        let later = Self.current(spk2: "王总", at: Self.speakersCreatedAt.addingTimeInterval(60))
+        let expected = """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 待办
+        - [ ] 说话人 2：把报价单发给客户（00:10）
+        - [ ] 李四：整理会议纪要
+
+        """
+        #expect(Self.generated.markdown(meeting: meeting(duration: nil), transcript: later,
+                                        timeZone: shanghai) == expected)
+        #expect(Self.generated.markdown(meeting: meeting(duration: nil), timeZone: shanghai) == expected)
+    }
+
+    /// 附上的转写稿每段带说话人，格式同复制全文；没有说话人的句子写“未知”，合盖空白不带
+    @Test func 附上转写稿时每段带说话人() {
+        let t = Self.current(spk2: nil, items: [
+            Self.said("s1", 5, "spk1", "报价单谁来发"),
+            Self.said("s2", 10, "spk2", "我周三前发给客户"),
+            Self.said("s3", 16, nil, "嗯"),
+            .gap(TranscriptGap(start: 600, end: 780, reason: .lidClosed)),
+        ])
+        #expect(Self.generated.markdown(meeting: meeting(duration: nil), transcript: t, attachingTranscript: true,
+                                        timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 待办
+        - [ ] 说话人 2：把报价单发给客户（00:10）
+        - [ ] 李四：整理会议纪要
+
+        ## 转写稿
+
+        [00:05] 张三：报价单谁来发
+
+        [00:10] 说话人 2：我周三前发给客户
+
+        [00:16] 未知：嗯
+
+        [10:00] 合盖，未录到声音（10:00–13:00，03:00）
+
+        """)
+    }
+
+    @Test func 附上转写稿时只有一个说话人不带前缀() {
+        let t = Self.current(spk2: "王总", items: [
+            Self.said("s1", 5, "spk1", "报价单我来发"),
+            Self.said("s2", 10, nil, "嗯"),
+        ])
+        #expect(minutes([]).markdown(meeting: meeting(duration: nil), transcript: t, attachingTranscript: true,
+                                     timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 转写稿
+
+        [00:05] 报价单我来发
+
+        [00:10] 嗯
+
+        """)
+    }
+
+    /// 说话人名字里的换行（手动改名时粘贴进来的）换成空格，免得拆散段落
+    @Test func 附上转写稿时说话人名字里的换行换成空格() {
+        let t = Self.current(spk2: "王\n总", items: [
+            Self.said("s1", 5, "spk1", "报价单谁来发"),
+            Self.said("s2", 10, "spk2", "我来"),
+        ])
+        #expect(minutes([]).markdown(meeting: meeting(duration: nil), transcript: t, attachingTranscript: true,
+                                     timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 转写稿
+
+        [00:05] 张三：报价单谁来发
+
+        [00:10] 王 总：我来
 
         """)
     }

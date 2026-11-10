@@ -100,3 +100,51 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
         #expect(transcript([]).plainText == "")
     }
 }
+
+/// 区分过说话人时复制全文每行带上说话人（spec 55、57）
+@Suite struct 复制文本带说话人 {
+    private func said(_ id: String, _ start: TimeInterval, _ speaker: String?, _ text: String) -> TranscriptItem {
+        .sentence(TranscriptSentence(id: id, start: start, end: start + 5, text: text, speaker: speaker))
+    }
+
+    private func diarized(_ items: [TranscriptItem], _ speakers: [Speaker]) -> Transcript {
+        Transcript(engine: "test", createdAt: Date(timeIntervalSince1970: 0), hotwords: [], items: items,
+                   diarization: Diarization(engine: "fake", voiceprintModel: "fake",
+                                            speakersCreatedAt: Date(timeIntervalSince1970: 60), speakers: speakers))
+    }
+
+    private func speaker(_ id: String, _ name: String? = nil) -> Speaker {
+        Speaker(id: id, name: name, nameSource: name == nil ? nil : .user, voiceprint: Voiceprint([1]),
+                speechDuration: 30)
+    }
+
+    /// 没命名的按编号显示；找不到说话人的句子写“未知”；合盖空白不带说话人
+    @Test func 两个说话人时每句带上名字_未知写未知_合盖空白不带() {
+        let t = diarized([
+            said("s1", 195, "spk1", "我们先过一下上周的待办"),
+            said("s2", 201, "spk2", "报价单我周三前发"),
+            said("s3", 207, nil, "嗯"),
+            lidGap(600, 780),
+            said("s4", 3725, "spk1", "好，今天就到这里"),
+        ], [speaker("spk1", "张三"), speaker("spk2")])
+        #expect(t.plainText == """
+            [03:15] 张三：我们先过一下上周的待办
+            [03:21] 说话人 2：报价单我周三前发
+            [03:27] 未知：嗯
+            [10:00] 合盖，未录到声音（10:00–13:00，03:00）
+            [1:02:05] 张三：好，今天就到这里
+            """)
+    }
+
+    /// 一个人加几句未知也算只有一个说话人；列表里有但一句都没有的不算
+    @Test func 只有一个说话人时不带前缀() {
+        let t = diarized([
+            said("s1", 195, "spk1", "我们先过一下上周的待办"),
+            said("s2", 201, nil, "嗯"),
+        ], [speaker("spk1", "张三"), speaker("spk2")])
+        #expect(t.plainText == """
+            [03:15] 我们先过一下上周的待办
+            [03:21] 嗯
+            """)
+    }
+}

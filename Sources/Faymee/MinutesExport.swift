@@ -4,10 +4,11 @@ import UniformTypeIdentifiers
 
 /// “复制纪要”“导出…”。Markdown 由 `Minutes.markdown` 生成，这里只管剪贴板和保存面板
 @MainActor enum MinutesExport {
-    /// 以 Markdown 复制到剪贴板，粘贴到飞书、钉钉、Notion 时由它们识别格式
-    static func copy(_ minutes: Minutes, meeting: Meeting) {
+    /// 以 Markdown 复制到剪贴板，粘贴到飞书、钉钉、Notion 时由它们识别格式。
+    /// `transcript` 是当前转写稿，用来显示待办负责人（关联的说话人改名后用新名字），不附全文
+    static func copy(_ minutes: Minutes, meeting: Meeting, transcript: Transcript?) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(minutes.markdown(meeting: meeting), forType: .string)
+        NSPasteboard.general.setString(minutes.markdown(meeting: meeting, transcript: transcript), forType: .string)
     }
 
     /// 弹出保存面板存成 `.md`，面板下方可以勾选“附上转写稿全文”（没有转写稿时不能勾）。
@@ -35,9 +36,9 @@ import UniformTypeIdentifiers
 
         let save = { (response: NSApplication.ModalResponse) in
             guard response == .OK, let url = panel.url else { return }
-            let attached = hasTranscript && includeTranscript.state == .on ? transcript : nil
+            let attaching = hasTranscript && includeTranscript.state == .on
             do {
-                try minutes.markdown(meeting: meeting, transcript: attached)
+                try minutes.markdown(meeting: meeting, transcript: transcript, attachingTranscript: attaching)
                     .write(to: url, atomically: true, encoding: .utf8)
             } catch {
                 let alert = NSAlert()
