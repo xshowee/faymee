@@ -126,6 +126,9 @@ public final class TranscriptionPipeline {
         self.host = host
     }
 
+    /// 有没有区分说话人引擎。没有时 `enqueueDiarization` 总是返回 false，界面据此隐藏“区分说话人”等入口
+    public var canDiarize: Bool { diarizer != nil }
+
     /// 没有排队、正在转写、预定了转写的会议，被取消的转写也已退出
     public var isIdle: Bool { activeID == nil && queue.isEmpty && cancelled == nil && reserved.isEmpty }
 
