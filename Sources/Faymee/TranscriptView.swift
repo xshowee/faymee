@@ -60,7 +60,8 @@ struct TranscriptSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let enrollOffer {
+            // 之后又改了名（或清空、合并掉）就不再问：按钮会按新名字登记，提示里的名字已不对
+            if let enrollOffer, transcript?.speaker(enrollOffer.speakerID)?.displayName == enrollOffer.name {
                 enrollOfferView(enrollOffer)
             }
 
