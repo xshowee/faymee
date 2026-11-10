@@ -249,6 +249,7 @@ struct TranscriptSection: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
                 Button("重试") { retranscribe() }
+                    .disabled(isDiarizing)
             case .done:
                 EmptyView()
             }
