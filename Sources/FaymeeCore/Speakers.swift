@@ -12,12 +12,17 @@ public struct Diarization: Codable, Hashable, Sendable {
     public var speakersCreatedAt: Date
     /// 按 id 编号顺序（第一次开口的先后）
     public var speakers: [Speaker]
+    /// 被合并掉、已从 `speakers` 移除的说话人 id。新建说话人不复用这些编号：纪要负责人、姓名建议
+    /// 可能还记着它们。nil 表示没合并过（含更早的转写稿）。重新区分时整份说话人信息换掉，随之清空
+    public var mergedSpeakers: [String]?
 
-    public init(engine: String, voiceprintModel: String, speakersCreatedAt: Date, speakers: [Speaker]) {
+    public init(engine: String, voiceprintModel: String, speakersCreatedAt: Date, speakers: [Speaker],
+                mergedSpeakers: [String]? = nil) {
         self.engine = engine
         self.voiceprintModel = voiceprintModel
         self.speakersCreatedAt = speakersCreatedAt
         self.speakers = speakers
+        self.mergedSpeakers = mergedSpeakers
     }
 }
 

@@ -338,4 +338,22 @@ private func sentence(_ t: Transcript, _ id: String) -> TranscriptSentence? {
         #expect(sentence(t, "s4")?.speaker == "spk1")
         #expect(newID == "spk4")
     }
+
+    /// 合并掉、已经没有任何句子或原值引用的编号也不复用：纪要负责人、姓名建议可能还记着它，
+    /// 复用就会指到新的人身上。写盘再读回（退出再打开）后仍然记得
+    @Test func 不再被引用的合并掉的编号也不复用_写盘后仍然记得() throws {
+        var t = transcript()
+        #expect(t.setNewSpeaker(sentence: "s5") == "spk4")
+        // s5 原本是未知，并回 spk1 后 spk4 不再被任何句子或原值引用
+        t.mergeSpeaker("spk4", into: "spk1")
+        #expect(!t.sentences.contains { $0.speaker == "spk4" || $0.originalSpeaker?.speaker == "spk4" })
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var reopened = try decoder.decode(Transcript.self, from: encoder.encode(t))
+
+        #expect(reopened.setNewSpeaker(sentence: "s3") == "spk5")
+    }
 }
