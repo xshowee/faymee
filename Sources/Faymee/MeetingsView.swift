@@ -1,4 +1,5 @@
 import AVKit
+import FaymeeCore
 import SwiftUI
 
 struct MeetingsView: View {
@@ -65,7 +66,11 @@ private struct MeetingRow: View {
         case .finalizing:
             Text("整理中…")
         case .done:
-            Text(formatDuration(meeting.duration ?? 0)).monospacedDigit()
+            if model.transcription.activity(for: meeting.id) != nil {
+                Text("转写中…")
+            } else {
+                Text(formatDuration(meeting.duration ?? 0)).monospacedDigit()
+            }
         case .failed:
             Text("失败").foregroundStyle(.orange)
         }
@@ -76,6 +81,8 @@ private struct MeetingDetail: View {
     @Environment(AppModel.self) private var model
     var meeting: Meeting
     @State private var title = ""
+    /// 播放器和转写稿共用；整理完成（有录音文件）后才创建
+    @State private var playback: Playback?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -103,10 +110,11 @@ private struct MeetingDetail: View {
 
             switch meeting.status {
             case .done:
-                if let url = model.store.recordingURL(meeting) {
-                    AudioPlayer(url: url)
+                if let playback {
+                    AudioPlayer(player: playback.player)
                         .frame(height: 60)
                 }
+                TranscriptSection(meeting: meeting, playback: playback)
             case .recording:
                 Label("正在录音", systemImage: "record.circle").foregroundStyle(.red)
             case .finalizing:
@@ -119,7 +127,8 @@ private struct MeetingDetail: View {
                 }
             }
 
-            Spacer()
+            // 转写稿占满剩余高度；没有转写稿时把按钮推到底部
+            if meeting.status != .done { Spacer() }
 
             HStack {
                 Spacer()
@@ -129,7 +138,17 @@ private struct MeetingDetail: View {
             }
         }
         .padding(20)
-        .onDisappear { model.rename(meeting.id, to: title) }
+        // 正在看的会议整理完成时，录音文件才出现
+        .task(id: model.store.recordingURL(meeting)) {
+            guard playback == nil, let url = model.store.recordingURL(meeting) else { return }
+            playback = Playback(url: url)
+        }
+        .onDisappear {
+            model.rename(meeting.id, to: title)
+            // stop 后观察已移除，不能再用；置空后再次出现时由上面的 .task 重建
+            playback?.stop()
+            playback = nil
+        }
     }
 
     private var subtitle: String {
@@ -141,23 +160,18 @@ private struct MeetingDetail: View {
     }
 }
 
+/// 播放器由 Playback 持有，暂停和清理也由它负责
 private struct AudioPlayer: NSViewRepresentable {
-    var url: URL
+    var player: AVPlayer
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .inline
-        view.player = AVPlayer(url: url)
+        view.player = player
         return view
     }
 
     func updateNSView(_ view: AVPlayerView, context: Context) {
-        if (view.player?.currentItem?.asset as? AVURLAsset)?.url != url {
-            view.player = AVPlayer(url: url)
-        }
-    }
-
-    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) {
-        view.player?.pause()
+        if view.player !== player { view.player = player }
     }
 }

@@ -1,3 +1,4 @@
+import FaymeeCore
 import SwiftUI
 
 struct MenuBarLabel: View {
@@ -48,6 +49,12 @@ struct MenuContent: View {
 
             Button("会议记录…") {
                 openWindow(id: "meetings")
+                NSApp.activate()
+            }
+            .buttonStyle(.plain)
+
+            Button("热词表…") {
+                openWindow(id: "hotwords")
                 NSApp.activate()
             }
             .buttonStyle(.plain)

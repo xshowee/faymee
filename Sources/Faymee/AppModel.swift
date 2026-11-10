@@ -1,4 +1,5 @@
 import AVFoundation
+import FaymeeCore
 import Foundation
 import Observation
 
@@ -11,8 +12,13 @@ final class AppModel {
     /// 多久没收到音频数据视为采集停滞，重建引擎
     static let stallAfter: TimeInterval = 5
 
-    private(set) var meetings: [Meeting] = []
-    private(set) var current: Meeting?
+    // 转写是否暂停由这几项决定，变化时统一重新计算，不靠各处手动同步
+    private(set) var meetings: [Meeting] = [] {
+        didSet { syncTranscriptionSuspension() }
+    }
+    private(set) var current: Meeting? {
+        didSet { syncTranscriptionSuspension() }
+    }
     private(set) var elapsed: TimeInterval = 0
     private(set) var levelDB: Float = -160
     private(set) var isSilent = false
@@ -23,6 +29,22 @@ final class AppModel {
     var lastError: String?
     /// 系统级休眠是否已关闭（Caffy 开启）。熄屏录音依赖它，否则系统无操作一段时间后会休眠
     private(set) var sleepDisabled = true
+
+    /// 热词表原文，编辑框直接绑定。整理后立即交给转写管线，停止输入片刻后写盘；
+    /// 只影响之后开始的转写，已有会议不会自动重转
+    var hotwordsText = "" {
+        didSet {
+            guard hotwordsText != oldValue else { return }
+            hotwords = Hotwords.parse(hotwordsText)
+            if hotwordsText != savedHotwords { scheduleHotwordsSave() }
+        }
+    }
+    /// 整理后的热词，每次编辑只算一次
+    private(set) var hotwords: [String] = [] {
+        didSet { transcription.hotwords = hotwords }
+    }
+    /// 热词表读不出来或没能保存，显示在热词表窗口里
+    private(set) var hotwordsError: String?
 
     private(set) var inputDevices: [AudioInputDevice] = []
     private(set) var defaultInputUID: String?
@@ -52,16 +74,40 @@ final class AppModel {
     var isLidGapOpen: Bool { current?.openGap != nil }
 
     @ObservationIgnored let store = MeetingStore()
+    @ObservationIgnored private let hotwordStore = HotwordStore()
+    /// 热词表文件里现在的内容（上次读到或存下的），保存前用它核对文件没被别处改过
+    @ObservationIgnored private var savedHotwords = ""
+    @ObservationIgnored private var pendingHotwordsSave: Task<Void, Never>?
     @ObservationIgnored private let recorder = Recorder()
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var silentSince: Date?
     @ObservationIgnored private var silenceNotified = false
     @ObservationIgnored private var lastStallRestart = Date.distantPast
+    /// 启动时的中断恢复和转写恢复是否已完成，之前不开始转写
+    @ObservationIgnored private var launchRecovered = false {
+        didSet { syncTranscriptionSuspension() }
+    }
+
+    /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
+    /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
+    @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
+        let engine = TranscriptionEngine.make()
+        let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
+                                             engine: engine.name, host: self)
+        pipeline.isSuspended = true
+        pipeline.hotwords = hotwords
+        pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
+        return pipeline
+    }()
 
     init() {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         meetings = store.loadAll()
+        reloadHotwords()
+        if let hotwordsError { lastError = hotwordsError }
+        // 不依赖 init 里的赋值是否触发 hotwordsText 的 didSet，直接算一次
+        hotwords = Hotwords.parse(hotwordsText)
         refreshDevices()
         AudioDevices.observeChanges { [weak self] in self?.refreshDevices() }
         // startEngine 总在主线程调用（开始录音、设备变化通知、定时器）
@@ -74,7 +120,11 @@ final class AppModel {
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
         Notifier.setUp()
-        Task { await recoverInterrupted() }
+        Task {
+            await recoverInterrupted()
+            transcription.restore(meetings)
+            launchRecovered = true
+        }
     }
 
     // MARK: - 录音
@@ -90,6 +140,7 @@ final class AppModel {
         do {
             let m = try store.create(startedAt: Date())
             meetings.insert(m, at: 0)
+            // 录音可靠性优先：正在进行的转写立即取消（见 syncTranscriptionSuspension）
             current = m
             do {
                 try recorder.start(directory: store.segmentsDirectory(m.id))
@@ -242,7 +293,7 @@ final class AppModel {
         update(m)
 
         let output = store.directory(id).appendingPathComponent("recording.m4a")
-        let result: Result<TimeInterval, Error>
+        let result: Result<FinalizeResult, Error>
         do {
             result = .success(try await Finalizer.export(segments: store.segmentFiles(id), to: output))
         } catch {
@@ -252,12 +303,11 @@ final class AppModel {
         // 导出期间用户可能改了标题，重新取最新状态
         guard var latest = meeting(id) else { return }
         switch result {
-        case let .success(duration):
-            latest.recording = output.lastPathComponent
-            latest.duration = duration
-            latest.status = .done
+        case let .success(finalized):
+            latest.markFinalized(recording: output.lastPathComponent, finalized)
             update(latest)
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
+            transcription.enqueue(id)
         case let .failure(error):
             latest.status = .failed
             latest.error = error.localizedDescription
@@ -296,12 +346,79 @@ final class AppModel {
 
     func trash(_ id: String) {
         guard id != current?.id else { return }
+        // 先取消转写，免得转写完成时往已删除的目录里写文件
+        transcription.remove(id)
         do {
             try store.trash(id)
             meetings.removeAll { $0.id == id }
         } catch {
             lastError = "删除失败：\(error.localizedDescription)"
+            // 会议还在，把被取消的转写放回队列
+            if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
+                transcription.enqueue(id)
+            }
         }
+    }
+
+    // MARK: - 热词表
+
+    /// 从文件重新载入热词表（启动时、打开热词表窗口时），用户可能用文本编辑器改过。
+    /// 还有没写盘的修改时不载入，免得冲掉正在输入的内容
+    func reloadHotwords() {
+        guard pendingHotwordsSave == nil else { return }
+        do {
+            let text = try hotwordStore.load()
+            savedHotwords = text
+            hotwordsText = text
+            hotwordsError = nil
+        } catch {
+            hotwordsError = "读取热词表失败：\(error.localizedDescription)。在这里的修改不会保存，以免覆盖原文件"
+        }
+    }
+
+    /// 立即写盘还没保存的修改（关窗口、退出 App 时调用）
+    func saveHotwords() {
+        pendingHotwordsSave?.cancel()
+        pendingHotwordsSave = nil
+        guard hotwordsText != savedHotwords else { return }
+        do {
+            try hotwordStore.save(hotwordsText, replacing: savedHotwords)
+            savedHotwords = hotwordsText
+            hotwordsError = nil
+        } catch HotwordStoreError.changedOnDisk {
+            hotwordsError = "热词表文件在别处被修改过，这里的修改没有保存。关掉窗口再打开可载入文件里的内容"
+        } catch {
+            hotwordsError = "保存热词表失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 边输入边保存，但不必每个按键都写一次盘：停止输入片刻后再写
+    private func scheduleHotwordsSave() {
+        pendingHotwordsSave?.cancel()
+        pendingHotwordsSave = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.saveHotwords()
+        }
+    }
+
+    // MARK: - 转写
+
+    /// 录音和整理期间暂停转写，启动恢复完成前也不开始。
+    /// 由 meetings、current、launchRecovered 的 didSet 调用，别处不用手动同步。
+    /// 停止录音后到开始整理前，会议还是 .recording（整理在异步任务里才开始），
+    /// 也算在内，免得中间空档里转写刚开始就被取消
+    private func syncTranscriptionSuspension() {
+        transcription.isSuspended = !launchRecovered || isRecording
+            || meetings.contains { $0.status == .recording || $0.status == .finalizing }
+    }
+
+    /// 转写完成或失败时发静音通知，录音中不发
+    private func transcriptionFinished(_ id: String, _ outcome: TranscriptionOutcome) {
+        guard let m = meeting(id),
+              let notice = TranscriptionNotice.make(for: outcome, meetingTitle: m.title, isRecording: isRecording)
+        else { return }
+        Notifier.post(notice.title, notice.body, silent: true)
     }
 
     private func update(_ m: Meeting) {
@@ -316,5 +433,14 @@ final class AppModel {
         } catch {
             lastError = "保存会议信息失败：\(error.localizedDescription)"
         }
+    }
+}
+
+/// meeting.json 只由 AppModel 写入，转写管线经这里更新转写状态
+extension AppModel: TranscriptionHost {
+    func setTranscription(_ state: TranscriptionState, for id: String) {
+        guard var m = meeting(id) else { return }
+        m.transcription = state
+        update(m)
     }
 }
