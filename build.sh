@@ -81,8 +81,18 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Faymee" "$APP/Contents/MacOS/Faymee"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+# llama.cpp 是动态 framework：拷进 Contents/Frameworks（ditto 保留 Versions/Current 等符号链接，
+# 不拷 llama.dSYM），release 可执行文件的 rpath 只有 @loader_path，要补一条。
+# install_name_tool 会让签名失效，必须在签名之前
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$BIN_DIR/llama.framework" "$APP/Contents/Frameworks/llama.framework"
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Faymee"
 
 echo "==> 签名"
+# 从里往外签：framework 自带 ad-hoc 签名，hardened runtime 的 library validation 要求它和 App
+# 同一团队，否则 dyld 拒绝加载
+codesign --force --options runtime --timestamp=none --sign "$IDENTITY" \
+    "$APP/Contents/Frameworks/llama.framework"
 codesign --force --options runtime --timestamp=none \
     --entitlements Resources/Faymee.entitlements --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"

@@ -142,6 +142,78 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         #expect(prompt.contains("10:00"))
     }
 
+    @Test func 输入附上会议之后的相对日期对照表_供换算截止时间() async throws {
+        // 2026-11-10 是星期二
+        let generator = ScriptedGenerator(outputs: [emptyOutput])
+
+        _ = try await generate(generator)
+
+        let prompt = try #require(generator.calls.first?.prompt)
+        #expect(prompt.contains("""
+        - 今天：2026-11-10（星期二）
+        - 明天：2026-11-11（星期三）
+        - 后天：2026-11-12（星期四）
+        - 本周三：2026-11-11（星期三）
+        - 本周四：2026-11-12（星期四）
+        - 本周五：2026-11-13（星期五）
+        - 本周六：2026-11-14（星期六）
+        - 本周日：2026-11-15（星期日）
+        - 下周一：2026-11-16（星期一）
+        - 下周二：2026-11-17（星期二）
+        - 下周三：2026-11-18（星期三）
+        - 下周四：2026-11-19（星期四）
+        - 下周五：2026-11-20（星期五）
+        - 下周六：2026-11-21（星期六）
+        - 下周日：2026-11-22（星期日）
+        - 本月底：2026-11-30（星期一）
+        """))
+    }
+
+    @Test func 周日开会时本周只剩今天_下周从明天开始() async throws {
+        let generator = ScriptedGenerator(outputs: [emptyOutput])
+
+        _ = try await generateMinutes(
+            transcript: transcript, title: "周日加班", startedAt: date("2026-11-15T02:00:00Z"),
+            template: .general, generator: generator, model: "fake/scripted", timeZone: shanghai)
+
+        let prompt = try #require(generator.calls.first?.prompt)
+        #expect(prompt.contains("""
+        - 今天：2026-11-15（星期日）
+        - 明天：2026-11-16（星期一）
+        - 后天：2026-11-17（星期二）
+        - 下周一：2026-11-16（星期一）
+        """))
+        #expect(!prompt.contains("本周"))
+        #expect(prompt.contains("- 下周日：2026-11-22（星期日）\n- 本月底：2026-11-30（星期一）"))
+    }
+
+    /// 模型查表也会抄错行（实测把“周五”“后天”填晚一天），due 是常见说法时由代码按会议日期换算，
+    /// 不认识的说法才用模型给的 dueDate。2026-11-10 是星期二
+    @Test func 常见的相对日期由代码换算_不认识的说法用模型给的() async throws {
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"actions": [
+           {"text": "a", "due": "周五之前", "dueDate": "2026-11-14", "refs": ["s1"]},
+           {"text": "b", "due": "下周三", "dueDate": null, "refs": ["s1"]},
+           {"text": "c", "due": "今天下午", "dueDate": "2026-11-11", "refs": ["s1"]},
+           {"text": "d", "due": "这周内", "dueDate": null, "refs": ["s1"]},
+           {"text": "e", "due": "下星期一以前", "dueDate": "2026-11-10", "refs": ["s1"]},
+           {"text": "f", "due": "后天", "dueDate": "2026-11-13", "refs": ["s1"]},
+           {"text": "g", "due": "月底前", "dueDate": null, "refs": ["s1"]},
+           {"text": "h", "due": "周日", "dueDate": null, "refs": ["s1"]},
+           {"text": "i", "due": "客户确认以后", "dueDate": "2026-11-20", "refs": ["s1"]},
+           {"text": "j", "due": "周二", "dueDate": null, "refs": ["s1"]}
+         ]}
+        """#])
+
+        let minutes = try await generate(generator)
+
+        let dates = minutes.sections[2].items.map { $0.dueDate?.description }
+        #expect(dates == ["2026-11-13", "2026-11-18", "2026-11-10", "2026-11-13", "2026-11-16",
+                          "2026-11-12", "2026-11-30", "2026-11-15", "2026-11-20", "2026-11-17"])
+        #expect(minutes.sections[2].items.map(\.due) == ["周五之前", "下周三", "今天下午", "这周内", "下星期一以前",
+                                                         "后天", "月底前", "周日", "客户确认以后", "周二"])
+    }
+
     @Test func source记录快照的createdAt和哈希() async throws {
         let minutes = try await generate(ScriptedGenerator(outputs: [emptyOutput]))
 
@@ -158,7 +230,7 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
          "decisions": [],
          "actions": [
            {"text": "把报价单发给客户", "owner": "张三", "due": "下周三", "dueDate": "2026-11-18", "refs": ["s3"]},
-           {"text": "确认支付接口", "owner": null, "due": "月底", "dueDate": "2026-11-31", "refs": ["s2"]},
+           {"text": "确认支付接口", "owner": null, "due": "等支付那边回复以后", "dueDate": "2026-11-31", "refs": ["s2"]},
            {"text": "整理海外版预算", "owner": "", "due": "", "dueDate": "下周", "refs": ["s5"]},
            {"refs": ["s4"]},
            "坏条目"
@@ -177,7 +249,7 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
             MinutesItem(id: "a1", text: "把报价单发给客户", owner: "张三", due: "下周三",
                         dueDate: CalendarDate(year: 2026, month: 11, day: 18),
                         refs: [MinutesRef(id: "s3", start: 1880.2)]),
-            MinutesItem(id: "a2", text: "确认支付接口", due: "月底", refs: [MinutesRef(id: "s2", start: 760.4)]),
+            MinutesItem(id: "a2", text: "确认支付接口", due: "等支付那边回复以后", refs: [MinutesRef(id: "s2", start: 760.4)]),
             MinutesItem(id: "a3", text: "整理海外版预算", refs: [MinutesRef(id: "s5", start: 2645.5)]),
         ])
         #expect(minutes.sections[3].items.isEmpty)
@@ -329,9 +401,33 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
         #expect(second.first?.hasPrefix("[s\(cut + 1) ") == true)
     }
 
+    /// 合并的输出和输入的条目差不多长（去重之后也少不了多少），输出预算要装得下输入的全部条目，
+    /// 否则多轮合并时输出被截断，表现为“模型输出无法解析”
+    @Test func 合并时留给输出的token不少于输入的条目() async throws {
+        let generator = ScriptedGenerator(contextTokens: 6000)
+        generator.respond = { system, prompt in
+            if let first = transcriptLines(in: prompt).first(where: { $0.hasPrefix("[s") }) {
+                let id = first.dropFirst().prefix { $0 != " " }
+                let items = (0..<6).map { _ in #"{"text": "\#(id) 这一段里说定的一件事，要写得长一点", "refs": ["\#(id)"]}"# }
+                return #"{"decisions": [\#(items.joined(separator: ", "))]}"#
+            }
+            let ids = prompt.matches(of: try! Regex(#""s\d+""#)).map { String(prompt[$0.range]) }
+            return #"{"decisions": [{"text": "合并", "refs": [\#(ids.joined(separator: ", "))]}]}"#
+        }
+
+        _ = try await generate(generator, transcript: longTranscript(count: 300))
+
+        let merges = generator.calls.filter { transcriptLines(in: $0.prompt).isEmpty }
+        #expect(!merges.isEmpty)
+        for call in merges {
+            let entries = try #require(call.prompt.range(of: "各段提取的条目：\n"))
+            #expect(call.maxTokens >= generator.countTokens(String(call.prompt[entries.upperBound...])))
+        }
+    }
+
     /// 各段条目加起来一次放不下时，分批多轮合并，每次调用都在预算内，出处仍只来自提取时引用过的句子
     @Test func 合并输入超出预算时分批多轮合并() async throws {
-        let generator = ScriptedGenerator(contextTokens: 4000)
+        let generator = ScriptedGenerator(contextTokens: 6000)
         generator.respond = { system, prompt in
             let lines = transcriptLines(in: prompt)
             if !lines.isEmpty {
@@ -350,7 +446,7 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
 
         #expect(generator.mergeCalls.count >= 2)
         for call in generator.calls {
-            #expect(call.system.count + call.prompt.count + call.maxTokens <= 4000)
+            #expect(call.system.count + call.prompt.count + call.maxTokens <= 6000)
         }
         let cited = Set(generator.extractionCalls.flatMap { transcriptLines(in: $0).prefix(8) }
             .map { String($0.dropFirst().prefix { $0 != " " }) })

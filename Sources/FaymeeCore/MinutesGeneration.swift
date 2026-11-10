@@ -17,7 +17,7 @@ public func generateMinutes(
     let sentences = Dictionary(transcript.sentences.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     let sentenceIDs = Set(sentences.keys)
     let meeting = MeetingInfo(title: title, startedAt: startedAt, timeZone: timeZone)
-    let budget = Budget(generator)
+    let budget = Budget(generator, outputTokens: generator.contextTokens * 2 / 5)
     let system = extractionSystemPrompt(template)
 
     let lineBudget = generator.contextTokens - budget.outputTokens - generator.countTokens(system)
@@ -34,25 +34,30 @@ public func generateMinutes(
         if segments.count > 1 { progress(Double(n + 1) / Double(segments.count + 1)) }
     }
     let draft = drafts.count > 1
-        ? try await merge(drafts, meeting: meeting, template: template, generator: generator, budget: budget)
+        ? try await merge(drafts, meeting: meeting, template: template, generator: generator,
+                          budget: Budget(generator, outputTokens: generator.contextTokens / 2))
         : drafts.first ?? [:]
     progress(1)
 
-    let sections = makeSections(draft, template: template, sentences: sentences)
+    let sections = makeSections(draft, template: template, sentences: sentences, meeting: meeting)
     return Minutes(model: model, template: template.key, createdAt: createdAt,
                    source: MinutesSource(transcriptCreatedAt: transcript.createdAt, textHash: transcript.textHash),
                    sections: sections)
 }
 
-/// 一次调用的 token 预算：系统提示 + 提示词 + 输出 ≤ contextTokens
+/// 一次调用的 token 预算：系统提示 + 提示词 + 输出 ≤ contextTokens。
+/// 留给输出的比例按 Qwen3 4B 实测定（ticket 04）：
+/// - 提取 2/5：内容密集的转写稿，输出可达转写稿行的 0.6–0.7 倍（37 句周会 970 token 出约 650；
+///   合成的密集转写稿 4.1k 出 2.5k–2.7k+），原来的 1/4、试过的 1/3 都会截断
+/// - 合并 1/2：输出和输入的条目差不多长，留一半才装得下
 struct Budget {
     let generator: TextGenerator
     /// 留给输出的 token 数，作为 generate 的 maxTokens
     let outputTokens: Int
 
-    init(_ generator: TextGenerator) {
+    init(_ generator: TextGenerator, outputTokens: Int) {
         self.generator = generator
-        outputTokens = generator.contextTokens / 4
+        self.outputTokens = outputTokens
     }
 
     /// 按拼好的完整字符串计算，不靠逐行估算
@@ -169,13 +174,14 @@ extension Dictionary where Key == String, Value == [DraftItem] {
 }
 
 /// 按模板的节排好，给条目编号（概要 o1、决议 d1、待办 a1、未决问题 q1、额外的节 <key>-1），
-/// 出处记上快照里该句的 start。模型漏掉的节保留为空
+/// 出处记上快照里该句的 start。截止时间是常见说法时由代码按会议日期换算，否则用模型给的 dueDate。
+/// 模型漏掉的节保留为空
 private func makeSections(_ draft: Draft, template: MinutesTemplate,
-                          sentences: [String: TranscriptSentence]) -> [MinutesSection] {
+                          sentences: [String: TranscriptSentence], meeting: MeetingInfo) -> [MinutesSection] {
     template.sections.map { kind, title in
         let items = (draft[sectionKey(kind)] ?? []).enumerated().map { n, item in
             MinutesItem(id: itemIDPrefix(kind) + String(n + 1), text: item.text, owner: item.owner, due: item.due,
-                        dueDate: item.dueDate.flatMap { CalendarDate($0) },
+                        dueDate: item.due.flatMap(meeting.dueDate(for:)) ?? item.dueDate.flatMap { CalendarDate($0) },
                         refs: item.refs.compactMap { id in sentences[id].map { MinutesRef(id: id, start: $0.start) } })
         }
         return MinutesSection(kind: kind, title: title, items: items)
