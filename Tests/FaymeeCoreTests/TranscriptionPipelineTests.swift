@@ -1129,4 +1129,26 @@ private final class Library {
         // 坏文件原样留着，不被覆盖
         #expect(try Data(contentsOf: library.store.url) == Data("不是 JSON".utf8))
     }
+
+    @Test func 沿用来的声纹名字与这次认出的人同名时也清掉() async throws {
+        // 张三删掉后重新登记过，人员 id 变了；旧稿里 spk1 还关联着旧 id
+        let old = diarizedTranscript([
+            Speaker(id: "spk1", name: "张三", nameSource: .voiceprint, personID: "p-old", voiceprint: vp2, speechDuration: 5),
+            Speaker(id: "spk2", voiceprint: vp1, speechDuration: 8),
+        ])
+        let library = Library([person("p-new", "张三", [1, 0, 0])])
+        let f = Fixture(diarizer: FakeDiarizer([
+            SpeakerSegment(start: 0, end: 5, speaker: 0),
+            SpeakerSegment(start: 6, end: 15, speaker: 1),
+        ], voiceprints: [0: vp2, 1: vp1]), voiceprints: library.store)
+        let m = f.addTranscribedMeeting(transcript: old)
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.name) == [nil, "张三"])
+        #expect(t.speakers.map(\.nameSource) == [nil, .voiceprint])
+        #expect(t.speakers.map(\.personID) == [nil, "p-new"])
+    }
 }
