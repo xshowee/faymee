@@ -61,6 +61,8 @@ private final class FakeGenerator: TextGenerator, @unchecked Sendable {
 private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     let log: FakeGenerator
     var block = false
+    /// 转写出来的那一句
+    var text = "重新转写出来的一句话，内容足够长"
     private(set) var calls = 0
 
     init(log: FakeGenerator) { self.log = log }
@@ -72,7 +74,7 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
         calls += 1
         log.record("transcribe")
         while block { try await Task.sleep(for: .milliseconds(5)) }
-        return [.init(start: 0, end: 5, text: "重新转写出来的一句话，内容足够长")]
+        return [.init(start: 0, end: 5, text: text)]
     }
 }
 
@@ -729,5 +731,70 @@ private final class Fixture {
         let transcript = try #require(try f.store.loadTranscript("m1"))
         #expect(transcript.sentences.map(\.text) == ["重新转写出来的一句话，内容足够长"])
         #expect(minutes.sync(with: transcript) == .inSync)
+    }
+
+    // MARK: - 转写完成后纪要的去向（决定转写通知）
+
+    /// 同 App 的接法：在转写管线的 onFinish 里自动排队，紧接着问纪要接下来会怎样
+    private func followUpAfterTranscription(modelDownloaded: Bool, onPower: Bool,
+                                            autoGenerate: Bool = true) async throws -> MinutesFollowUp? {
+        let engine = FakeGenerator()
+        engine.isDownloaded = modelDownloaded
+        let f = Fixture(engine)
+        f.pipeline.isOnPower = onPower
+        f.pipeline.autoGenerate = autoGenerate
+        let (transcription, transcriber) = f.makeTranscription()
+        transcriber.text = String(repeating: "张三下周三之前把报价单发给客户。", count: 4)
+        var followUp: MinutesFollowUp?
+        transcription.onFinish = { id, _ in
+            f.pipeline.transcriptionFinished(id)
+            followUp = f.pipeline.followUp(for: id)
+        }
+        f.addMeeting("m1", transcript: nil)
+        transcription.enqueue("m1")
+        try await f.until { followUp != nil }
+        // 能开始的纪要等它生成完再结束，免得测试结束时还在后台跑；在等电源、模型的排不空
+        try await f.until { transcription.isIdle }
+        if modelDownloaded && onPower && autoGenerate { try await f.drain() }
+        return followUp
+    }
+
+    /// 模型就绪且接着电源：只等这场转写收尾，马上就开始，不发转写通知
+    @Test func 转写完成时_模型就绪且接电_纪要马上开始() async throws {
+        #expect(try await followUpAfterTranscription(modelDownloaded: true, onPower: true)
+            == .queued(waitingFor: .transcription))
+    }
+
+    @Test func 转写完成时_用电池_纪要等接通电源() async throws {
+        #expect(try await followUpAfterTranscription(modelDownloaded: true, onPower: false)
+            == .queued(waitingFor: .power))
+    }
+
+    /// 两项都不满足时先说模型：要用户动手下载，接上电源也开始不了
+    @Test(arguments: [true, false])
+    func 转写完成时_模型未下载_纪要等下载模型(onPower: Bool) async throws {
+        #expect(try await followUpAfterTranscription(modelDownloaded: false, onPower: onPower)
+            == .queued(waitingFor: .model))
+    }
+
+    @Test func 转写完成时_自动生成关着_纪要不排队() async throws {
+        #expect(try await followUpAfterTranscription(modelDownloaded: false, onPower: false, autoGenerate: false)
+            == .notQueued)
+    }
+
+    @Test func 正在生成的会议算已排队且不用等() async throws {
+        let engine = FakeGenerator()
+        engine.block = true
+        let f = Fixture(engine)
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        f.pipeline.enqueue("m1")
+        var started = f.engine.started.makeAsyncIterator()
+        await started.next()
+
+        #expect(f.pipeline.followUp(for: "m1") == .queued(waitingFor: nil))
+        #expect(f.pipeline.followUp(for: "m2") == .notQueued)
+        f.engine.block = false
+        try await f.drain()
     }
 }

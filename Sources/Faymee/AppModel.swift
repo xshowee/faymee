@@ -121,6 +121,7 @@ final class AppModel {
         pipeline.isSuspended = true
         pipeline.isOnPower = SystemState.isOnPower
         pipeline.autoGenerate = autoGenerateMinutes
+        pipeline.onFinish = { [weak self] in self?.minutesFinished($0, $1) }
         pipeline.coordinate(with: transcription)
         return pipeline
     }()
@@ -151,6 +152,7 @@ final class AppModel {
             guard let self, self.minutes.isOnPower != onPower else { return }
             self.minutes.isOnPower = onPower
         }
+        Notifier.onAction = { [weak self] in self?.handleNoticeAction($0) }
         Notifier.setUp()
         Task {
             await recoverInterrupted()
@@ -458,13 +460,44 @@ final class AppModel {
         minutes.isSuspended = suspended
     }
 
-    /// 转写成功后按规则自动排队生成纪要；转写完成或失败时发静音通知，录音中不发
+    // MARK: - 转写、纪要通知
+
+    /// 用户点了“生成纪要需要先下载模型”的通知，等着打开设置里的模型下载。
+    /// 设置界面（05）观察它：为 true 时打开模型下载，再调 `modelDownloadRequestHandled()` 复位。
+    /// 用留存的状态而不是一次性回调：点通知可能冷启动 App，那时还没有视图在监听
+    private(set) var isModelDownloadRequested = false
+
+    func openModelDownload() { isModelDownloadRequested = true }
+
+    func modelDownloadRequestHandled() { isModelDownloadRequested = false }
+
+    private func handleNoticeAction(_ action: MeetingNotice.Action) {
+        switch action {
+        case .openModelDownload: openModelDownload()
+        }
+    }
+
+    /// 转写成功后按规则自动排队生成纪要；转写完成或失败时发静音通知，录音中不发。
+    /// 纪要马上能开始时不发，等纪要完成那一条；在等电源、模型时附说明
     private func transcriptionFinished(_ id: String, _ outcome: TranscriptionOutcome) {
-        if case .done = outcome { minutes.transcriptionFinished(id) }
+        var followUp = MinutesFollowUp.notQueued
+        if case .done = outcome {
+            minutes.transcriptionFinished(id)
+            followUp = minutes.followUp(for: id)
+        }
         guard let m = meeting(id),
-              let notice = TranscriptionNotice.make(for: outcome, meetingTitle: m.title, isRecording: isRecording)
+              let notice = MeetingNotice.transcription(outcome, meetingTitle: m.title, isRecording: isRecording,
+                                                       minutes: followUp)
         else { return }
-        Notifier.post(notice.title, notice.body, silent: true)
+        Notifier.post(notice)
+    }
+
+    /// 纪要生成完成或失败时发静音通知，录音中不发；取消（录音、删除）不回调
+    private func minutesFinished(_ id: String, _ outcome: MinutesOutcome) {
+        guard let m = meeting(id),
+              let notice = MeetingNotice.minutes(outcome, meetingTitle: m.title, isRecording: isRecording)
+        else { return }
+        Notifier.post(notice)
     }
 
     private func update(_ m: Meeting) {

@@ -137,6 +137,16 @@ public final class MinutesPipeline {
         return nil
     }
 
+    /// 这场会议的纪要接下来会怎样，用来决定转写通知（`MeetingNotice.transcription`）。
+    /// 在转写的 `onFinish` 里、`transcriptionFinished(_:)` 之后调用：此刻转写管线还没空闲，
+    /// 能马上开始的任务也还在排队，等的是 `.transcription`。
+    /// 看的是是否在队列里，不只是这次有没有自动排队：用户之前手动排过的也会生成并通知
+    public func followUp(for id: String) -> MinutesFollowUp {
+        if activeID == id { return .queued(waitingFor: nil) }
+        guard jobs.contains(where: { $0.id == id }) else { return .notQueued }
+        return .queued(waitingFor: waitReason(for: id))
+    }
+
     /// 和转写管线互相让行，两者一次只跑一个：转写不空闲时不开始新的纪要；
     /// 纪要生成中（含被取消、还没退出）时转写不开始，等这场生成完。都不取消对方正在进行的任务（录音的暂停另算）
     public func coordinate(with transcription: TranscriptionPipeline) {
