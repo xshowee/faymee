@@ -141,6 +141,9 @@ extension Speaker {
         return "说话人 \(id.hasPrefix("spk") ? String(id.dropFirst(3)) : id)"
     }
 
+    /// 编号 n 的说话人没有名字时的显示名
+    static func numberedName(_ n: Int) -> String { "说话人 \(n)" }
+
     /// 句子没有说话人（与任何说话片段都不重合）时显示的名字
     public static let unknownName = "未知"
 }

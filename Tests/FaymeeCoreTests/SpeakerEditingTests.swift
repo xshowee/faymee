@@ -103,6 +103,17 @@ private func sentence(_ t: Transcript, _ id: String) -> TranscriptSentence? {
         #expect(sentence(t, "s3")?.originalSpeaker == OriginalSpeaker(speaker: "spk1"))
     }
 
+    /// 有人被手动起名为“说话人 4”时，新说话人跳过 4：每个说话人的显示名在一场里唯一
+    /// （改名查重、按显示名找说话人都靠它）
+    @Test func 新说话人的编号避开已被用作名字的说话人N() {
+        var t = transcript()
+        t.renameSpeaker("spk1", to: "说话人 4")
+        let id = t.setNewSpeaker(sentence: "s5")
+
+        #expect(id == "spk5")
+        #expect(Set(t.speakers.map(\.displayName)).count == t.speakers.count)
+    }
+
     @Test func 没区分过或句子不存在时不新建说话人() {
         var t = transcript()
         let missing = t.setNewSpeaker(sentence: "s9")
@@ -169,6 +180,18 @@ private func sentence(_ t: Transcript, _ id: String) -> TranscriptSentence? {
 
         #expect(cleared == .renamed && again == .unchanged)
         #expect(t == transcript())
+    }
+
+    /// 清空名字会退回“说话人 N”，而本场另一个人正叫“说话人 N”时，同改成已有名字一样交给界面确认合并
+    @Test func 清空名字后的编号与别人的名字相同时返回需要合并() {
+        var t = transcript()
+        t.renameSpeaker("spk1", to: "李四")
+        t.renameSpeaker("spk3", to: "说话人 1")
+        let edited = t
+        let cleared = t.renameSpeaker("spk1", to: "")
+
+        #expect(cleared == .needsMerge(into: "spk3"))
+        #expect(t == edited)
     }
 }
 

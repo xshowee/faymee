@@ -275,8 +275,9 @@ struct TranscriptSection: View {
         case .renamed:
             if save(edited), offeringEnroll { offerEnroll(id, in: edited) }
         case let .needsMerge(target):
+            // 清空名字退回的“说话人 N”与别人相同时 name 为空，提示里显示对方的名字
             let merge = SpeakerMerge(source: id, target: target,
-                                     name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                     name: edited.speaker(target)?.displayName ?? name,
                                      offersEnroll: offeringEnroll)
             // 等改名框关掉再弹合并确认，同一刻弹出可能被吞掉
             Task { pendingMerge = merge }
@@ -430,7 +431,7 @@ struct TranscriptSection: View {
 private struct SpeakerMerge {
     var source: String
     var target: String
-    /// 用户输入的名字，确认提示里显示
+    /// 合并目标的显示名（即用户输入的名字），确认提示里显示
     var name: String
     /// 采纳姓名建议引起的合并：合并后问要不要记住这个声音
     var offersEnroll = false

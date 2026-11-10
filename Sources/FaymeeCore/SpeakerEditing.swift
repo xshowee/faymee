@@ -47,13 +47,16 @@ extension Transcript {
     /// 把某句改给一个新建的说话人，返回新 id；没区分过、句子不存在时返回 nil。
     /// 新说话人没有声纹（空向量，不能登记、不参与识别）、发言时长为 0（时长只来自区分结果），排在列表最后。
     /// 编号大于列表、合并掉的说话人、句子说话人和区分结果原值里出现过的所有编号，不复用合并掉的 id，
-    /// 免得原值或纪要负责人记的旧 id 指到新人身上
+    /// 免得原值或纪要负责人记的旧 id 指到新人身上。也跳过已被本场某人用作名字的“说话人 N”，
+    /// 保持每个说话人的显示名唯一
     @discardableResult
     public mutating func setNewSpeaker(sentence id: String) -> String? {
         guard let merged = diarization.map({ $0.mergedSpeakers ?? [] }), sentenceIndex(id) != nil else { return nil }
         let used = speakers.map(\.id) + merged
             + sentences.flatMap { [$0.speaker, $0.originalSpeaker?.speaker] }.compactMap { $0 }
-        let next = (used.compactMap(Self.speakerNumber).max() ?? 0) + 1
+        let taken = Set(speakers.map(\.displayName))
+        var next = (used.compactMap(Self.speakerNumber).max() ?? 0) + 1
+        while taken.contains(Speaker.numberedName(next)) { next += 1 }
         let newID = "spk\(next)"
         diarization?.speakers.append(Speaker(id: newID, voiceprint: Voiceprint([]), speechDuration: 0))
         setSpeaker(sentence: id, to: newID)
@@ -88,8 +91,8 @@ extension Transcript {
     }
 
     /// 给说话人改名。名字去首尾空白；清空等于退回“说话人 N”。
-    /// - 与本场另一个说话人的显示名（含“说话人 N”）相同时不改，返回 `.needsMerge(into:)`，
-    ///   界面确认后调 `mergeSpeaker(id, into:)`
+    /// - 改后的显示名（含清空后退回的“说话人 N”）与本场另一个说话人的显示名相同时不改，
+    ///   返回 `.needsMerge(into:)`，界面确认后调 `mergeSpeaker(id, into:)`
     /// - 改后名字来源记为 `user`，声纹库关联清掉（换了名字就不再是认出的那个人）
     /// - 与自己当前显示名相同、说话人不存在时返回 `.unchanged`
     public mutating func renameSpeaker(_ id: String, to name: String) -> SpeakerRenameResult {
@@ -101,11 +104,11 @@ extension Transcript {
             s.nameSource = nil
         } else {
             guard name != s.displayName else { return .unchanged }
-            if let other = speakers.first(where: { $0.id != id && $0.displayName == name }) {
-                return .needsMerge(into: other.id)
-            }
             s.name = name
             s.nameSource = .user
+        }
+        if let other = speakers.first(where: { $0.id != id && $0.displayName == s.displayName }) {
+            return .needsMerge(into: other.id)
         }
         s.personID = nil
         replaceSpeaker(s)
