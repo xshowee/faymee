@@ -100,7 +100,7 @@ final class AppModel {
     }
 
     /// “区分说话人”开关，记在 UserDefaults，默认打开。关闭时完整转写跳过区分说话人；
-    /// 只影响之后开始的转写。设置界面在 ticket 09
+    /// 只影响之后开始的转写。设置窗口里绑定它
     var diarizeSpeakers: Bool {
         didSet {
             UserDefaults.standard.set(diarizeSpeakers, forKey: "diarizeSpeakers")

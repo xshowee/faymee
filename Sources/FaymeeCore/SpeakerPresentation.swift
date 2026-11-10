@@ -52,10 +52,12 @@ extension Transcript {
 
 extension Transcript {
     /// 单句菜单里要不要给“恢复说话人”：改过说话人，且原值是未知或原说话人还在（没被合并掉）。
-    /// 与 `restoreSpeaker(sentence:)` 能不能成功同一个判断
+    /// 与 `restoreSpeaker(sentence:)` 能不能成功同一个判断。界面每行都会问，不复制转写稿
     public func canRestoreSpeaker(sentence id: String) -> Bool {
-        var copy = self
-        return copy.restoreSpeaker(sentence: id)
+        guard let i = sentenceIndex(id), case let .sentence(s) = items[i], let original = s.originalSpeaker else {
+            return false
+        }
+        return original.speaker.map { speaker($0) != nil } ?? true
     }
 }
 

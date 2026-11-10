@@ -559,7 +559,7 @@ private struct RefChip: View {
 }
 
 /// 从左到右排，一行放不下就换行
-private struct FlowLayout: Layout {
+struct FlowLayout: Layout {
     var spacing: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
