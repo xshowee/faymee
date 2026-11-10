@@ -138,7 +138,19 @@ extension Speaker {
     /// 没有名字（或名字是空白）时显示“说话人 N”，N 取自 id 的编号（spk3 → 3），不是列表位置，合并后不变
     public var displayName: String {
         if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
-        return "说话人 \(id.hasPrefix("spk") ? String(id.dropFirst(3)) : id)"
+        return number.map(Self.numberedName) ?? "说话人 \(id)"
+    }
+
+    /// 没有名字（或名字是空白），显示为“说话人 N”
+    var isUnnamed: Bool { name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
+
+    /// id 里的编号（spk3 → 3），不是 `spk` 加正整数时为 nil
+    public var number: Int? { Self.number(of: id) }
+
+    /// 说话人 id 里的编号。句子原值、合并掉的说话人只剩 id，也按它算
+    static func number(of id: String) -> Int? {
+        guard id.hasPrefix("spk"), let n = Int(id.dropFirst(3)), n > 0 else { return nil }
+        return n
     }
 
     /// 编号 n 的说话人没有名字时的显示名

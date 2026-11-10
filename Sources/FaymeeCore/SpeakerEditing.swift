@@ -55,7 +55,7 @@ extension Transcript {
         let used = speakers.map(\.id) + merged
             + sentences.flatMap { [$0.speaker, $0.originalSpeaker?.speaker] }.compactMap { $0 }
         let taken = Set(speakers.map(\.displayName))
-        var next = (used.compactMap(Self.speakerNumber).max() ?? 0) + 1
+        var next = (used.compactMap(Speaker.number(of:)).max() ?? 0) + 1
         while taken.contains(Speaker.numberedName(next)) { next += 1 }
         let newID = "spk\(next)"
         diarization?.speakers.append(Speaker(id: newID, voiceprint: Voiceprint([]), speechDuration: 0))
@@ -78,7 +78,7 @@ extension Transcript {
         into.voiceprint = Self.weightedAverage(into.voiceprint, into.speechDuration,
                                                from.voiceprint, from.speechDuration)
         into.speechDuration += from.speechDuration
-        if into.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+        if into.isUnnamed {
             into.name = from.name
             into.personID = from.personID
         }
@@ -128,10 +128,6 @@ extension Transcript {
         let total = wa + wb
         let (fa, fb) = total > 0 ? (Float(wa / total), Float(wb / total)) : (0.5, 0.5)
         return Voiceprint(zip(a.vector, b.vector).map { $0 * fa + $1 * fb })
-    }
-
-    private static func speakerNumber(_ id: String) -> Int? {
-        id.hasPrefix("spk") ? Int(id.dropFirst(3)) : nil
     }
 
     /// 恢复单句的说话人：写回区分结果原值（可能是未知），句子回到未修改状态。

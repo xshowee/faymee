@@ -147,8 +147,5 @@ extension Speaker {
 
     /// 调色板下标，取自 id 的编号（spk1 → 0、spk3 → 2），不随列表位置变：
     /// 合并、新建说话人后其他人的颜色不变。界面按调色板长度取模
-    public var colorIndex: Int {
-        guard id.hasPrefix("spk"), let n = Int(id.dropFirst(3)), n > 0 else { return 0 }
-        return n - 1
-    }
+    public var colorIndex: Int { (number ?? 1) - 1 }
 }

@@ -214,8 +214,3 @@ public struct NameSuggestionPrompt: Hashable, Sendable {
     /// 出处，点击跳到那句称呼并播放
     public var refs: [MinutesRefChip]
 }
-
-extension Speaker {
-    /// 没有名字（或名字是空白），显示为“说话人 N”
-    var isUnnamed: Bool { name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true }
-}
