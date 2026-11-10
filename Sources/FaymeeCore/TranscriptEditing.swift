@@ -3,9 +3,10 @@ import Foundation
 /// 人工修改转写稿：只改句子文字，不改时间，不合并、不拆分。
 /// 改完由调用方用 `MeetingStore.saveTranscript` 整份原子写盘
 extension Transcript {
-    /// 人工修改过的句子数，重新转写前提示“会丢弃 N 处修改”用
+    /// 重新转写会丢弃的人工修改处数，提示“会丢弃 N 处修改”用：改过文字的句子数加上改过说话人的句子数
+    /// （`speakerEditCount`），同一句两样都改过算两处
     public var editCount: Int {
-        sentences.count { $0.original != nil }
+        sentences.count { $0.original != nil } + speakerEditCount
     }
 
     /// 把某句改成 text，第一次修改时把引擎原文存进 original。
@@ -38,7 +39,7 @@ extension Transcript {
         return true
     }
 
-    private func sentenceIndex(_ id: String) -> Int? {
+    func sentenceIndex(_ id: String) -> Int? {
         items.firstIndex { if case let .sentence(s) = $0 { s.id == id } else { false } }
     }
 }
