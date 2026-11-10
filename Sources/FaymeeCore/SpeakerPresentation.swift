@@ -149,3 +149,32 @@ extension Speaker {
     /// 合并、新建说话人后其他人的颜色不变。界面按调色板长度取模
     public var colorIndex: Int { (number ?? 1) - 1 }
 }
+
+/// 详情页说话人栏：说话人多时（自动区分可能分出几十个）只在栏里显示发言最多的几位，
+/// 其余收进“其余 N 人”。栏的高度因此有界，不会把窗口撑高
+public struct SpeakerBarSplit: Hashable, Sendable {
+    /// 栏里显示的，按编号顺序（与转写稿段首的颜色、编号对得上）
+    public var shown: [SpeakerListEntry]
+    /// 收起来的，按发言时长从多到少
+    public var more: [SpeakerListEntry]
+
+    /// 已命名的（手动或声纹认出）也一定显示在栏里：改过名的人正是要找的。
+    ///
+    /// - Parameters:
+    ///   - pinned: 另外一定显示在栏里的说话人（有姓名建议的：建议要让人看见），可以超出 `limit`
+    ///   - limit: 栏里最多显示几位。只多出一位时全部显示，不出现“其余 1 人”
+    public init(_ list: [SpeakerListEntry], pinned: Set<String>, limit: Int) {
+        guard list.count > limit + 1 else {
+            shown = list
+            more = []
+            return
+        }
+        let byDuration = list.enumerated()
+            .sorted { ($1.element.speaker.speechDuration, $0.offset) < ($0.element.speaker.speechDuration, $1.offset) }
+            .map(\.element)
+        var keep = Set(list.filter { pinned.contains($0.speaker.id) || !$0.speaker.isUnnamed }.map(\.speaker.id))
+        for entry in byDuration where keep.count < limit { keep.insert(entry.speaker.id) }
+        shown = list.filter { keep.contains($0.speaker.id) }
+        more = byDuration.filter { !keep.contains($0.speaker.id) }
+    }
+}

@@ -12,25 +12,26 @@ enum SpeakerPalette {
 }
 
 /// 详情页转写稿上方的说话人列表：每人一个 chip（颜色、名字、发言时长），点开是改名、合并到……、
-/// 记住这个声音、不是此人（只对声纹认出的人）；
-/// 右侧是“重新区分说话人”。转写稿有说话人信息（区分过）时才显示，只有一个人时也显示，
-/// 这样自动判断成一个人时也能改名、指定人数重新区分
+/// 记住这个声音、不是此人（只对声纹认出的人）。“重新区分说话人”在转写稿标题行，和“区分说话人”“重试”同一个位置。
+/// 转写稿有说话人信息（区分过）时才显示，只有一个人时也显示，这样自动判断成一个人时也能改名
 struct SpeakerBar: View {
     var transcript: Transcript
     /// 排队、转写中、区分说话人中不能改
     var canEdit: Bool
-    var canRediarize: Bool
     var onRename: (Speaker) -> Void
     var onMerge: (_ source: String, _ target: String) -> Void
     var voiceprintActions: VoiceprintActions
     var suggestions: NameSuggestionActions
-    var onRediarize: (_ speakerCount: Int?) -> Void
 
-    /// “重新区分说话人”可选的人数上限
-    private static let maxSpeakerCount = 8
+    /// 栏里最多显示几位，其余收进“其余 N 人”。不限的话，说话人一多（自动区分可能分出几十个），
+    /// 折行后的高度会成为整个窗口的最小高度，把窗口撑得比屏幕还高
+    private static let shownLimit = 6
+
+    @State private var showingMore = false
 
     var body: some View {
         let list = transcript.speakerList
+        let split = SpeakerBarSplit(list, pinned: Set(suggestions.prompts.keys), limit: Self.shownLimit)
         HStack(alignment: .top, spacing: 8) {
             Text("说话人")
                 .foregroundStyle(.secondary)
@@ -41,35 +42,56 @@ struct SpeakerBar: View {
                     .padding(.vertical, 3)
             } else {
                 FlowLayout(spacing: 6) {
-                    ForEach(list, id: \.speaker.id) { entry in
-                        // chip 和它的姓名建议放在一起，折行时不分开
-                        HStack(spacing: 6) {
-                            SpeakerChip(entry: entry, others: list.filter { $0.speaker.id != entry.speaker.id },
-                                        canEdit: canEdit, onRename: onRename, onMerge: onMerge,
-                                        voiceprintActions: voiceprintActions)
-                            if let prompt = suggestions.prompts[entry.speaker.id] {
-                                NameSuggestionView(prompt: prompt, actions: suggestions)
+                    ForEach(split.shown, id: \.speaker.id) { entry in
+                        item(entry, in: list)
+                    }
+                    if !split.more.isEmpty {
+                        Button("其余 \(split.more.count) 人…") { showingMore = true }
+                            .buttonStyle(.borderless)
+                            .padding(.vertical, 3)
+                            .fixedSize()
+                            .help("发言较少的说话人，按发言时长排列")
+                            .popover(isPresented: $showingMore, arrowEdge: .bottom) {
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        ForEach(split.more, id: \.speaker.id) { entry in
+                                            item(entry, in: list, inPopover: true)
+                                        }
+                                    }
+                                    .padding(10)
+                                }
+                                .frame(minWidth: 220, maxHeight: 360)
+                                .font(.callout)
+                                .controlSize(.small)
                             }
-                        }
                     }
                 }
             }
             Spacer(minLength: 0)
-            if canRediarize {
-                Menu("重新区分说话人") {
-                    Button("自动判断人数") { onRediarize(nil) }
-                    Divider()
-                    ForEach(2...Self.maxSpeakerCount, id: \.self) { n in
-                        Button("\(n) 人") { onRediarize(n) }
-                    }
-                }
-                .fixedSize()
-                .disabled(!canEdit)
-                .help("人数不对时指定人数重新区分；名字会沿用到时间上重合最多的新说话人")
-            }
         }
         .font(.callout)
         .controlSize(.small)
+    }
+
+    /// 一位说话人：chip 和它的姓名建议放在一起，折行时不分开。“合并到”列出全部说话人，含收起来的。
+    /// 弹出列表里改名、合并时先关掉弹出列表，免得改名框、确认框叠在它上面
+    private func item(_ entry: SpeakerListEntry, in list: [SpeakerListEntry], inPopover: Bool = false) -> some View {
+        HStack(spacing: 6) {
+            SpeakerChip(entry: entry, others: list.filter { $0.speaker.id != entry.speaker.id },
+                        canEdit: canEdit,
+                        onRename: { speaker in
+                            if inPopover { showingMore = false }
+                            onRename(speaker)
+                        },
+                        onMerge: { source, target in
+                            if inPopover { showingMore = false }
+                            onMerge(source, target)
+                        },
+                        voiceprintActions: voiceprintActions)
+            if let prompt = suggestions.prompts[entry.speaker.id] {
+                NameSuggestionView(prompt: prompt, actions: suggestions)
+            }
+        }
     }
 }
 

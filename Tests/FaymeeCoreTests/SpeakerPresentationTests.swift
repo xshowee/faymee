@@ -191,3 +191,34 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
         #expect(status(diarization: .init(status: .failed), transcript: nil) == .hidden)
     }
 }
+
+@Suite struct SpeakerBarSplitTests {
+    private func entries(_ durations: [TimeInterval]) -> [SpeakerListEntry] {
+        durations.enumerated().map { i, d in SpeakerListEntry(speaker: speaker("spk\(i + 1)", duration: d), sentenceCount: 1) }
+    }
+
+    @Test func 人数不超过上限多一个时全部显示() {
+        let split = SpeakerBarSplit(entries([5, 4, 3, 2]), pinned: [], limit: 3)
+        #expect(split.shown.map(\.speaker.id) == ["spk1", "spk2", "spk3", "spk4"])
+        #expect(split.more.isEmpty)
+    }
+
+    @Test func 超出时显示发言最多的几位且保持编号顺序_其余按发言时长排() {
+        let split = SpeakerBarSplit(entries([10, 300, 5, 90, 1, 60]), pinned: [], limit: 3)
+        #expect(split.shown.map(\.speaker.id) == ["spk2", "spk4", "spk6"])
+        #expect(split.more.map(\.speaker.id) == ["spk1", "spk3", "spk5"])
+    }
+
+    @Test func 已命名的说话人总在外面显示() {
+        var list = entries([10, 300, 5, 90, 1, 60])
+        list[4].speaker.name = "张三"
+        let split = SpeakerBarSplit(list, pinned: [], limit: 3)
+        #expect(split.shown.map(\.speaker.id) == ["spk2", "spk4", "spk5"])
+    }
+
+    @Test func 有姓名建议的说话人总在外面显示() {
+        let split = SpeakerBarSplit(entries([10, 300, 5, 90, 1, 60]), pinned: ["spk5"], limit: 3)
+        #expect(split.shown.map(\.speaker.id) == ["spk2", "spk4", "spk5"])
+        #expect(split.more.map(\.speaker.id) == ["spk6", "spk1", "spk3"])
+    }
+}

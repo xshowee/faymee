@@ -577,7 +577,9 @@ struct FlowLayout: Layout {
     var spacing: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        // 宽度为 0 是 SwiftUI 在量最小尺寸：按一行算。按 0 宽算会每项一行，
+        // 这个高度会变成窗口的最小高度，项一多就把窗口撑得比屏幕还高
+        let rows = arrange(width: proposal.width.flatMap { $0 > 0 ? $0 : nil } ?? .infinity, subviews: subviews)
         let width = rows.map { $0.width }.max() ?? 0
         let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0))
         return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)

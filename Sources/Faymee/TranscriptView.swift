@@ -67,12 +67,11 @@ struct TranscriptSection: View {
 
             let suggestions = nameSuggestionActions
             if let transcript, transcript.diarization != nil, !transcript.items.isEmpty {
-                SpeakerBar(transcript: transcript, canEdit: canEditSpeakers, canRediarize: canRediarize,
+                SpeakerBar(transcript: transcript, canEdit: canEditSpeakers,
                            onRename: beginRename,
                            onMerge: { source, target in update { $0.mergeSpeaker(source, into: target) } },
                            voiceprintActions: voiceprintActions(transcript),
-                           suggestions: suggestions,
-                           onRediarize: rediarize)
+                           suggestions: suggestions)
             }
 
             if let transcript {
@@ -350,8 +349,28 @@ struct TranscriptSection: View {
                 Text(text).foregroundStyle(.secondary)
             }
         }
+        // 区分前后、失败时入口都在这一个位置：从未区分是“区分说话人”，失败是“重试”（点按钮自动判断人数，
+        // 箭头里可以指定人数），区分过是“重新区分说话人”菜单（只有菜单，免得误点就整份重新区分）
         if let title = status.actionTitle {
-            Button(title) { rediarize(nil) }
+            Menu(title) { rediarizeItems } primaryAction: { rediarize(nil) }
+                .fixedSize()
+                .disabled(!canEditSpeakers)
+        } else if status == .done, canRediarize {
+            Menu("重新区分说话人") { rediarizeItems }
+                .fixedSize()
+                .disabled(!canEditSpeakers)
+                .help("人数不对时指定人数重新区分；名字会沿用到时间上重合最多的新说话人")
+        }
+    }
+
+    /// “重新区分说话人”可选的人数上限
+    private static let maxSpeakerCount = 8
+
+    @ViewBuilder private var rediarizeItems: some View {
+        Button("自动判断人数") { rediarize(nil) }
+        Divider()
+        ForEach(2...Self.maxSpeakerCount, id: \.self) { n in
+            Button("\(n) 人") { rediarize(n) }
         }
     }
 
