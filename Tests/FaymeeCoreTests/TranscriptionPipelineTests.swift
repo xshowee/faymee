@@ -890,6 +890,31 @@ extension Fixture {
         #expect(f.host.meetings[m.id]?.diarization == nil)
     }
 
+    /// 只区分说话人中退出，再在没有区分引擎（模型缺失、校验失败）时启动：任务恢复不了，
+    /// 说话人状态按转写稿如实落定，不能一直停在排队、进行中（那样说话人编辑、重新转写、重试都被禁用）
+    @Test func 启动时恢复不了只区分说话人的任务_说话人状态按转写稿落定() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        let legacy = f.addTranscribedMeeting("legacy")
+        f.host.setDiarization(DiarizationState(status: .running), for: legacy.id)
+        var diarized = legacyTranscript()
+        diarized.items[0] = .sentence(.init(id: "s1", start: 0, end: 5, text: "我们开始吧", speaker: "spk1"))
+        diarized.diarization = Diarization(engine: "fake/diarizer", voiceprintModel: "fake/voiceprint",
+                                           speakersCreatedAt: at(800), speakers: [
+            Speaker(id: "spk1", name: "张三", nameSource: .user, voiceprint: vp1, speechDuration: 5),
+        ])
+        let rediarize = f.addTranscribedMeeting("rediarize", transcript: diarized)
+        f.host.setDiarization(DiarizationState(status: .queued), for: rediarize.id)
+
+        f.pipeline.restore([legacy, rediarize].map { f.host.meetings[$0.id]! })
+        try await f.drain()
+
+        // 旧会议从没区分成：退回没有说话人；重新区分没跑成：旧说话人还在
+        #expect(f.host.meetings[legacy.id]?.diarization == nil)
+        #expect(f.host.meetings[rediarize.id]?.diarization == DiarizationState(status: .done))
+        #expect(f.store.loadAll().first { $0.id == legacy.id }?.diarization == nil)
+        #expect(try f.store.loadTranscript(rediarize.id) == diarized)
+    }
+
     @Test func 启动时恢复只区分说话人的任务() async throws {
         let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments))
         f.pipeline.isSuspended = true

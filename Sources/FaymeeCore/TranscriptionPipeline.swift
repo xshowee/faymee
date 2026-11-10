@@ -189,10 +189,19 @@ public final class TranscriptionPipeline {
         return t != nil
     }
 
+    /// 说话人状态按磁盘上的转写稿如实落定：有说话人为完成，否则为 nil（从未区分）。
+    /// 用在排队、进行中的说话人状态不会再有任务来完成它的时候，免得一直停在“区分中”
+    private func settleDiarization(_ id: String) {
+        let diarized = ((try? store.loadTranscript(id)) ?? nil)?.diarization != nil
+        host?.setDiarization(diarized ? DiarizationState(status: .done) : nil, for: id)
+    }
+
     /// App 启动时调用：上次退出时排队中或转写中的会议重新排队，转写中的从头转。
     /// 队列顺序不落盘，上次正在转写的排最前，其余按结束时间近似整理完成的先后。
     /// 从未转写（含 v0.1 旧会议）、已完成、失败的不动
-    /// 只区分说话人的任务同理（转写不在排队或进行中、说话人状态是排队或进行中的），人数不落盘，恢复后由引擎判断
+    /// 只区分说话人的任务同理（转写不在排队或进行中、说话人状态是排队或进行中的），人数不落盘，恢复后由引擎判断。
+    /// 恢复不了的（没有区分引擎、转写稿不在或读不了）说话人状态按转写稿落定，不留在排队、进行中。
+    /// 删除会议失败、会议还在时也用它把被取消的任务放回队列
     public func restore(_ meetings: [Meeting]) {
         func pending(_ s: JobState?) -> Bool { s?.status == .queued || s?.status == .running }
         func job(_ m: Meeting) -> Job? {
@@ -205,7 +214,11 @@ public final class TranscriptionPipeline {
             .filter { job($0) != nil }
             .sorted { (rank($0), $0.endedAt ?? $0.startedAt) < (rank($1), $1.endedAt ?? $1.startedAt) }
             .forEach { m in
-                if job(m) == .transcription { enqueue(m.id) } else { enqueueDiarization(m.id) }
+                if job(m) == .transcription {
+                    enqueue(m.id)
+                } else if !enqueueDiarization(m.id) {
+                    settleDiarization(m.id)
+                }
             }
     }
 

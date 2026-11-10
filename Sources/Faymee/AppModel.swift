@@ -411,12 +411,8 @@ final class AppModel {
             meetings.removeAll { $0.id == id }
         } catch {
             lastError = "删除失败：\(error.localizedDescription)"
-            // 会议还在，把被取消的转写放回队列
-            if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
-                transcription.enqueue(id)
-            } else if let status = meeting(id)?.diarization?.status, status == .queued || status == .running {
-                transcription.enqueueDiarization(id)
-            }
+            // 会议还在，把被取消的转写（或只区分说话人）放回队列，规则同启动时恢复
+            if let m = meeting(id) { transcription.restore([m]) }
             if let status = meeting(id)?.minutes?.status, status == .queued || status == .running {
                 minutes.enqueue(id)
             }
