@@ -173,10 +173,11 @@ private struct TranscriptList: View {
     @State private var allSelected = false
     @State private var editingID: String?
     @State private var draft = ""
+    /// 当前播放到的条目，由 CurrentItemTracker 在条目切换时写入
+    @State private var current: Int?
     @FocusState private var focus: TranscriptFocus?
 
     var body: some View {
-        let current = playback.flatMap { transcript.itemIndex(at: $0.currentTime) }
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -188,6 +189,11 @@ private struct TranscriptList: View {
                 .padding(.vertical, 4)
             }
             .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+            .background {
+                if let playback {
+                    CurrentItemTracker(playback: playback, transcript: transcript, current: $current)
+                }
+            }
             .onScrollPhaseChange { _, phase in
                 // 程序滚动是 .animating，只有用户拖动、滚轮和惯性才暂停跟随
                 if phase == .tracking || phase == .interacting || phase == .decelerating {
@@ -304,6 +310,21 @@ private struct TranscriptList: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             proxy.scrollTo(i, anchor: UnitPoint(x: 0, y: 0.3))
         }
+    }
+}
+
+/// 只有它观察播放进度（每 0.25 秒变一次），算出的当前条目变了才写回。
+/// 列表本身因此只在条目切换时重算，而不是播放时每 0.25 秒整个重算
+private struct CurrentItemTracker: View {
+    var playback: Playback
+    var transcript: Transcript
+    @Binding var current: Int?
+
+    var body: some View {
+        let index = transcript.itemIndex(at: playback.currentTime)
+        Color.clear
+            .onChange(of: index, initial: true) { _, index in current = index }
+            .onDisappear { current = nil }
     }
 }
 
