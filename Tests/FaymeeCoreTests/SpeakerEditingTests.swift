@@ -112,6 +112,11 @@ private func sentence(_ t: Transcript, _ id: String) -> TranscriptSentence? {
 
         #expect(id == "spk5")
         #expect(Set(t.speakers.map(\.displayName)).count == t.speakers.count)
+
+        // 纪要按显示名对负责人时不看空白，“说话人4”也算占了 4
+        var u = transcript()
+        u.renameSpeaker("spk1", to: "说话人4")
+        #expect(u.setNewSpeaker(sentence: "s5") == "spk5")
     }
 
     @Test func 没区分过或句子不存在时不新建说话人() {

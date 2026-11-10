@@ -47,16 +47,18 @@ extension Transcript {
     /// 把某句改给一个新建的说话人，返回新 id；没区分过、句子不存在时返回 nil。
     /// 新说话人没有声纹（空向量，不能登记、不参与识别）、发言时长为 0（时长只来自区分结果），排在列表最后。
     /// 编号大于列表、合并掉的说话人、句子说话人和区分结果原值里出现过的所有编号，不复用合并掉的 id，
-    /// 免得原值或纪要负责人记的旧 id 指到新人身上。也跳过已被本场某人用作名字的“说话人 N”，
-    /// 保持每个说话人的显示名唯一
+    /// 免得原值或纪要负责人记的旧 id 指到新人身上。也跳过已被本场某人用作名字的“说话人 N”
+    /// （不看空白），保持每个说话人的显示名唯一
     @discardableResult
     public mutating func setNewSpeaker(sentence id: String) -> String? {
         guard let merged = diarization.map({ $0.mergedSpeakers ?? [] }), sentenceIndex(id) != nil else { return nil }
         let used = speakers.map(\.id) + merged
             + sentences.flatMap { [$0.speaker, $0.originalSpeaker?.speaker] }.compactMap { $0 }
-        let taken = Set(speakers.map(\.displayName))
+        // 不看空白：纪要按显示名对负责人时也不看（见 `SpeakerLabels.speakerID(owner:)`）
+        func key(_ name: String) -> String { name.filter { !$0.isWhitespace } }
+        let taken = Set(speakers.map { key($0.displayName) })
         var next = (used.compactMap(Speaker.number(of:)).max() ?? 0) + 1
-        while taken.contains(Speaker.numberedName(next)) { next += 1 }
+        while taken.contains(key(Speaker.numberedName(next))) { next += 1 }
         let newID = "spk\(next)"
         diarization?.speakers.append(Speaker(id: newID, voiceprint: Voiceprint([]), speechDuration: 0))
         setSpeaker(sentence: id, to: newID)
