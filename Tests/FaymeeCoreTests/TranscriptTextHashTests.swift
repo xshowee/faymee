@@ -50,4 +50,20 @@ private let base: [TranscriptItem] = [
                             .sentence(.init(id: "s2", start: 1, end: 2, text: "bc"))])
         #expect(a.textHash != b.textHash)
     }
+
+    /// 改说话人不让纪要变成“转写稿有修改”
+    @Test func 说话人变化时不变() {
+        let withSpeakers: [TranscriptItem] = [
+            .sentence(.init(id: "s1", start: 0.48, end: 3.2, text: "我们先过一下上周的待办。", speaker: "spk1")),
+            .gap(.init(start: 600, end: 780.5, reason: .lidClosed)),
+            .sentence(.init(id: "s2", start: 781, end: 783, text: "回来了", original: "灰来了",
+                            speaker: "spk2", originalSpeaker: .init(speaker: "spk1"))),
+        ]
+        var t = transcript(withSpeakers)
+        t.diarization = Diarization(engine: "fake-diarizer/1", voiceprintModel: "fake-embedding/1",
+                                    speakersCreatedAt: Date(timeIntervalSince1970: 0),
+                                    speakers: [Speaker(id: "spk1", name: "张三", voiceprint: Voiceprint([1]),
+                                                       speechDuration: 3)])
+        #expect(t.textHash == transcript(base).textHash)
+    }
 }

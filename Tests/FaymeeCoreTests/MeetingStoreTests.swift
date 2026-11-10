@@ -28,6 +28,7 @@ private func date(_ iso: String) -> Date {
         m.lidGaps = [Gap(start: date("2026-11-10T02:10:00Z"), end: date("2026-11-10T02:11:00Z"), reason: .lidClosed)]
         m.transcription = TranscriptionState(status: .failed, error: "录音无法读取")
         m.minutes = MinutesState(status: .failed, error: "模型输出无法解析")
+        m.diarization = DiarizationState(status: .failed, error: "区分说话人引擎无法加载")
         try store.save(m)
 
         #expect(store.loadAll() == [m])
@@ -97,6 +98,22 @@ private func date(_ iso: String) -> Date {
         let loaded = try #require(store.loadAll().first)
         #expect(loaded.transcription == TranscriptionState(status: .done))
         #expect(loaded.minutes == nil)
+        #expect(loaded.diarization == nil)
+    }
+
+    @Test func 说话人状态按约定字段写入() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        var m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        #expect(m.diarization == nil)
+        m.diarization = DiarizationState(status: .running)
+        try store.save(m)
+
+        let url = store.directory(m.id).appendingPathComponent("meeting.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let diarization = try #require(json["diarization"] as? [String: Any])
+        #expect(diarization["status"] as? String == "running")
+        #expect(store.loadAll().first?.diarization == DiarizationState(status: .running))
     }
 
     @Test func 纪要状态按约定字段写入() throws {
@@ -164,6 +181,107 @@ private func date(_ iso: String) -> Date {
         #expect(items[1]["end"] as? Double == 780.5)
         #expect(items[1]["reason"] as? String == "lidClosed")
         #expect(items[2]["original"] as? String == "灰来了")
+    }
+
+    /// v0.3 写出的 transcript.json：没有说话人信息，句子没有 speaker
+    @Test func 能读取没有说话人字段的v03转写稿() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        let legacy = """
+        {
+          "createdAt" : "2026-11-10T03:00:00Z",
+          "engine" : "apple/speechanalyzer",
+          "hotwords" : [],
+          "items" : [
+            { "end" : 3.2, "id" : "s1", "kind" : "sentence", "original" : null, "start" : 0.48, "text" : "开始吧" },
+            { "end" : 780.5, "kind" : "gap", "reason" : "lidClosed", "start" : 600 }
+          ],
+          "version" : 1
+        }
+        """
+        try Data(legacy.utf8).write(to: store.directory(m.id).appendingPathComponent("transcript.json"))
+
+        let loaded = try #require(try store.loadTranscript(m.id))
+        #expect(loaded.diarization == nil)
+        #expect(loaded.speakers.isEmpty)
+        #expect(loaded.speakersCreatedAt == nil)
+        #expect(loaded.sentences == [.init(id: "s1", start: 0.48, end: 3.2, text: "开始吧")])
+        #expect(loaded.sentences.first?.speaker == nil)
+        #expect(loaded.sentences.first?.originalSpeaker == nil)
+    }
+
+    @Test func 说话人按约定格式写入并能读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        let transcript = Transcript(
+            engine: "fake/1", createdAt: date("2026-11-10T03:00:00Z"), hotwords: [],
+            items: [.sentence(.init(id: "s1", start: 0, end: 2, text: "王总你怎么看", speaker: "spk1")),
+                    .sentence(.init(id: "s2", start: 2, end: 4, text: "我觉得可以", speaker: "spk1",
+                                    originalSpeaker: .init(speaker: "spk2"))),
+                    .sentence(.init(id: "s3", start: 4, end: 5, text: "嗯", originalSpeaker: .init(speaker: nil))),
+                    .sentence(.init(id: "s4", start: 5, end: 6, text: "（咳嗽）"))],
+            diarization: Diarization(
+                engine: "fake-diarizer/1", voiceprintModel: "fake-embedding/1",
+                speakersCreatedAt: date("2026-11-10T03:01:00Z"),
+                speakers: [Speaker(id: "spk1", name: "张三", nameSource: .voiceprint, personID: "p1",
+                                   voiceprint: Voiceprint([0.5, -1.25, 3.0]), speechDuration: 12.5),
+                           Speaker(id: "spk2", voiceprint: Voiceprint([1, 0, 0]), speechDuration: 3)]))
+        try store.saveTranscript(transcript, for: m.id)
+
+        #expect(try MeetingStore(root: store.root).loadTranscript(m.id) == transcript)
+
+        let url = store.directory(m.id).appendingPathComponent("transcript.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(json["version"] as? Int == 1)
+        let diarization = try #require(json["diarization"] as? [String: Any])
+        #expect(diarization["engine"] as? String == "fake-diarizer/1")
+        #expect(diarization["voiceprintModel"] as? String == "fake-embedding/1")
+        #expect(diarization["speakersCreatedAt"] as? String == "2026-11-10T03:01:00Z")
+        let speakers = try #require(diarization["speakers"] as? [[String: Any]])
+        #expect(speakers.count == 2)
+        #expect(speakers[0]["id"] as? String == "spk1")
+        #expect(speakers[0]["name"] as? String == "张三")
+        #expect(speakers[0]["nameSource"] as? String == "voiceprint")
+        #expect(speakers[0]["personId"] as? String == "p1")
+        // float32 小端的 base64，期望值用 python 独立算出：
+        // base64.b64encode(struct.pack('<3f', 0.5, -1.25, 3.0))
+        #expect(speakers[0]["voiceprint"] as? String == "AAAAPwAAoL8AAEBA")
+        #expect(speakers[0]["speechDuration"] as? Double == 12.5)
+        #expect(speakers[1]["name"] == nil)
+        #expect(speakers[1]["nameSource"] == nil)
+
+        let items = try #require(json["items"] as? [[String: Any]])
+        #expect(items[0]["speaker"] as? String == "spk1")
+        #expect(items[0]["originalSpeaker"] == nil)
+        #expect(items[1]["speaker"] as? String == "spk1")
+        #expect((items[1]["originalSpeaker"] as? [String: Any])?["speaker"] as? String == "spk2")
+        // 改过说话人、区分结果原本是“未知”：原值写成 null，与“没改过”（没有 originalSpeaker）区分开
+        #expect(items[2]["speaker"] == nil)
+        let unknown = try #require(items[2]["originalSpeaker"] as? [String: Any])
+        #expect(unknown.keys.contains("speaker") && unknown["speaker"] is NSNull)
+        #expect(items[3]["speaker"] == nil)
+        #expect(items[3]["originalSpeaker"] == nil)
+    }
+
+    @Test func 声纹不是合法的float32base64时读取失败() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        let broken = """
+        {
+          "createdAt" : "2026-11-10T03:00:00Z", "engine" : "fake/1", "hotwords" : [], "items" : [], "version" : 1,
+          "diarization" : {
+            "engine" : "fake-diarizer/1", "voiceprintModel" : "fake-embedding/1",
+            "speakersCreatedAt" : "2026-11-10T03:01:00Z",
+            "speakers" : [ { "id" : "spk1", "speechDuration" : 3, "voiceprint" : "AAAA" } ]
+          }
+        }
+        """
+        // "AAAA" 解出 3 个字节，不是 4 的倍数
+        try Data(broken.utf8).write(to: store.directory(m.id).appendingPathComponent("transcript.json"))
+        #expect(throws: (any Error).self) { try store.loadTranscript(m.id) }
     }
 
     /// 修改后退出 App 再打开（换一个 MeetingStore 实例读同一目录），修改仍在；恢复原文同样持久
