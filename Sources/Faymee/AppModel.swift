@@ -113,7 +113,8 @@ final class AppModel {
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
         let engine = TranscriptionEngine.make()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, diarizer: DiarizationEngine.make(), host: self)
+                                             engine: engine.name, diarizer: DiarizationEngine.make(),
+                                             voiceprints: VoiceprintStore(), host: self)
         pipeline.isSuspended = true
         pipeline.hotwords = hotwords
         pipeline.diarizes = diarizeSpeakers

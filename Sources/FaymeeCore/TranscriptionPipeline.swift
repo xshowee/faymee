@@ -51,6 +51,8 @@ public final class TranscriptionPipeline {
     /// “区分说话人”开关（App 存 UserDefaults，默认开）。关闭时完整转写跳过这一步，不调用区分引擎，
     /// 说话人状态不变。每场转写开始时取一次快照
     public var diarizes = true
+    /// 声纹识别的阈值（余弦相似度，超过才认）。引擎给出推荐值后由 App 设置
+    public var voiceprintThreshold = VoiceprintLibrary.defaultMatchThreshold
     /// 暂停时不开始新的转写；暂停的瞬间正在进行的转写被取消并放回队首，恢复后从头再转。
     /// 录音和整理期间暂停：录音可靠性优先于转写速度
     public var isSuspended = false {
@@ -84,6 +86,7 @@ public final class TranscriptionPipeline {
     @ObservationIgnored private let transcriber: any Transcriber
     @ObservationIgnored private let engine: String
     @ObservationIgnored private let diarizer: (any SpeakerDiarizer)?
+    @ObservationIgnored private let voiceprints: VoiceprintStore?
     @ObservationIgnored private weak var host: TranscriptionHost?
     @ObservationIgnored private var task: Task<Void, Never>?
     /// 被取消、可能还没退出的任务。在它退出前不算空闲（纪要不开始用引擎），
@@ -111,12 +114,15 @@ public final class TranscriptionPipeline {
     /// - Parameters:
     ///   - engine: 写进转写稿的引擎名，如 "apple/speechanalyzer"
     ///   - diarizer: 区分说话人引擎；nil 表示没有可用的引擎，完整转写跳过这一步（不算失败）
+    ///   - voiceprints: 声纹库。区分说话人之后用它认出登记过的人；nil 时不识别
     public init(store: MeetingStore, transcriber: any Transcriber, engine: String,
-                diarizer: (any SpeakerDiarizer)? = nil, host: TranscriptionHost) {
+                diarizer: (any SpeakerDiarizer)? = nil, voiceprints: VoiceprintStore? = nil,
+                host: TranscriptionHost) {
         self.store = store
         self.transcriber = transcriber
         self.engine = engine
         self.diarizer = diarizer
+        self.voiceprints = voiceprints
         self.host = host
     }
 
@@ -305,11 +311,17 @@ public final class TranscriptionPipeline {
             let updated = current.withSpeakers(r, engine: diarizer.engine, voiceprintModel: diarizer.voiceprintModel,
                                                createdAt: wholeSecondNow())
                 .carryingSpeakerNames(from: current)
-            try store.saveTranscript(updated, for: id)
+            try store.saveTranscript(recognizingSpeakers(updated), for: id)
             host.setDiarization(DiarizationState(status: .done), for: id)
         } catch {
             host.setDiarization(DiarizationState(status: .failed, error: error.localizedDescription), for: id)
         }
+    }
+
+    /// 区分说话人之后用声纹库认出登记过的人。声纹库读不出来（文件坏了）时不识别，不让区分失败
+    private func recognizingSpeakers(_ transcript: Transcript) -> Transcript {
+        guard let voiceprints, let library = try? voiceprints.load() else { return transcript }
+        return transcript.recognizingSpeakers(with: library, threshold: voiceprintThreshold)
     }
 
     /// 放回队首时把状态改回排队中：完整转写改转写状态，只区分说话人改说话人状态
@@ -365,6 +377,7 @@ public final class TranscriptionPipeline {
                     if let old = (try? store.loadTranscript(id)) ?? nil {
                         transcript = transcript.carryingSpeakerNames(from: old)
                     }
+                    transcript = recognizingSpeakers(transcript)
                     diarizationState = DiarizationState(status: .done)
                 case let .failure(error):
                     diarizationState = DiarizationState(status: .failed, error: error.localizedDescription)

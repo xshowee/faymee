@@ -147,12 +147,13 @@ private final class Fixture {
     let pipeline: TranscriptionPipeline
     private(set) var finished: [(id: String, outcome: TranscriptionOutcome)] = []
 
-    init(_ engine: FakeTranscriber = FakeTranscriber(), diarizer: FakeDiarizer? = nil) {
+    init(_ engine: FakeTranscriber = FakeTranscriber(), diarizer: FakeDiarizer? = nil,
+         voiceprints: VoiceprintStore? = nil) {
         host = FakeHost(store: store)
         self.engine = engine
         self.diarizer = diarizer
         pipeline = TranscriptionPipeline(store: store, transcriber: engine, engine: "fake/1", diarizer: diarizer,
-                                         host: host)
+                                         voiceprints: voiceprints, host: host)
         pipeline.onFinish = { [unowned self] in self.finished.append(($0, $1)) }
     }
 
@@ -924,3 +925,208 @@ extension Fixture {
     }
 }
 
+
+/// 声纹库里的一个人：一个样本，声纹模型默认与假引擎相同
+private func person(_ id: String, _ name: String, _ vector: [Float],
+                    model: String = "fake/voiceprint") -> VoiceprintPerson {
+    VoiceprintPerson(id: id, name: name, voiceprintModel: model, samples: [
+        VoiceprintSample(voiceprint: Voiceprint(vector), meetingID: "old", speechDuration: 30, addedAt: t0),
+    ])
+}
+
+/// 临时目录里的声纹库，与会议存储分开放
+@MainActor
+private final class Library {
+    let store = VoiceprintStore(url: FileManager.default.temporaryDirectory
+        .appendingPathComponent("FaymeeVoiceprints-\(UUID().uuidString)/voiceprints.json"))
+
+    init(_ people: [VoiceprintPerson]) {
+        try! store.save(VoiceprintLibrary(people: people))
+    }
+
+    deinit { try? FileManager.default.removeItem(at: store.url.deletingLastPathComponent()) }
+}
+
+@MainActor @Suite struct VoiceprintRecognitionTests {
+    @Test func 完整转写后认出声纹库里的人并写上名字() async throws {
+        let library = Library([person("p1", "张三", [0.9, 0.1, 0])])
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2]),
+                        voiceprints: library.store)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
+        #expect(t.speakers.map(\.name) == ["张三", nil])
+        #expect(t.speakers.map(\.nameSource) == [.voiceprint, nil])
+        #expect(t.speakers.map(\.personID) == ["p1", nil])
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+        // 识别只读声纹库，不加样本
+        #expect(try library.store.load() == VoiceprintLibrary(people: [person("p1", "张三", [0.9, 0.1, 0])]))
+    }
+
+    /// 区分过一次的转写稿：spk1 说 s1，spk2 说 s2、s3
+    private func diarizedTranscript(_ speakers: [Speaker]) -> Transcript {
+        Transcript(engine: "fake/1", createdAt: at(700), hotwords: [], items: [
+            .sentence(.init(id: "s1", start: 0, end: 5, text: "一", speaker: "spk1")),
+            .sentence(.init(id: "s2", start: 6, end: 10, text: "二", speaker: "spk2")),
+            .sentence(.init(id: "s3", start: 11, end: 15, text: "三", speaker: "spk2")),
+        ], diarization: Diarization(engine: "fake/diarizer", voiceprintModel: "fake/voiceprint",
+                                    speakersCreatedAt: at(800), speakers: speakers))
+    }
+
+    @Test func 只区分说话人后认出声纹库里的人() async throws {
+        let library = Library([person("p1", "张三", [0, 1, 0])])
+        let f = Fixture(diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2]),
+                        voiceprints: library.store)
+        let m = f.addTranscribedMeeting()
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2", "spk1"])
+        #expect(t.speakers.map(\.name) == [nil, "张三"])
+        #expect(t.speakers.map(\.nameSource) == [nil, .voiceprint])
+        #expect(t.speakers.map(\.personID) == [nil, "p1"])
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+    }
+
+    @Test func 沿用来的声纹名字被别的说话人认走时清掉_不出现两个同名的人() async throws {
+        // 原来 spk1（s1）是声纹认出的张三。重新区分后 s1 归新 spk1，沿用张三；
+        // 但声纹库认为新 spk2（s2、s3）才是张三
+        let old = diarizedTranscript([
+            Speaker(id: "spk1", name: "张三", nameSource: .voiceprint, personID: "p1", voiceprint: vp2, speechDuration: 5),
+            Speaker(id: "spk2", voiceprint: vp1, speechDuration: 8),
+        ])
+        let library = Library([person("p1", "张三", [1, 0, 0])])
+        let f = Fixture(diarizer: FakeDiarizer([
+            SpeakerSegment(start: 0, end: 5, speaker: 0),
+            SpeakerSegment(start: 6, end: 15, speaker: 1),
+        ], voiceprints: [0: vp2, 1: vp1]), voiceprints: library.store)
+        let m = f.addTranscribedMeeting(transcript: old)
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
+        #expect(t.speakers.map(\.name) == [nil, "张三"])
+        #expect(t.speakers.map(\.nameSource) == [nil, .voiceprint])
+        #expect(t.speakers.map(\.personID) == [nil, "p1"])
+    }
+
+    @Test func 沿用来的声纹名字没被别人认走时保留() async throws {
+        // 张三已从声纹库删除：重新区分不改写已经显示的名字
+        let old = diarizedTranscript([
+            Speaker(id: "spk1", name: "张三", nameSource: .voiceprint, personID: "p1", voiceprint: vp1, speechDuration: 5),
+            Speaker(id: "spk2", voiceprint: vp2, speechDuration: 8),
+        ])
+        let library = Library([])
+        let f = Fixture(diarizer: FakeDiarizer([
+            SpeakerSegment(start: 0, end: 5, speaker: 0),
+            SpeakerSegment(start: 6, end: 15, speaker: 1),
+        ], voiceprints: [0: vp1, 1: vp2]), voiceprints: library.store)
+        let m = f.addTranscribedMeeting(transcript: old)
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.name) == ["张三", nil])
+        #expect(t.speakers.map(\.nameSource) == [.voiceprint, nil])
+        #expect(t.speakers.map(\.personID) == ["p1", nil])
+    }
+
+    /// 完整转写一场两人对话，返回写盘的说话人
+    private func transcribe(voiceprints: [Int: Voiceprint], library: Library,
+                            threshold: Float? = nil) async throws -> [Speaker] {
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: voiceprints),
+                        voiceprints: library.store)
+        if let threshold { f.pipeline.voiceprintThreshold = threshold }
+        let m = f.addMeeting()
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+        return try #require(try f.store.loadTranscript(m.id)).speakers
+    }
+
+    @Test func 一个人只认给一个说话人_给最像的那个() async throws {
+        // 两个说话人都像张三，spk2 更像
+        let library = Library([person("p1", "张三", [0.9, 0.2, 0])])
+        let speakers = try await transcribe(voiceprints: [7: Voiceprint([1, 0, 0]), 3: Voiceprint([0.9, 0.2, 0])],
+                                            library: library)
+
+        #expect(speakers.map(\.name) == [nil, "张三"])
+        #expect(speakers.map(\.personID) == [nil, "p1"])
+    }
+
+    @Test func 相似度不超过阈值时不认() async throws {
+        // 与 [1, 0, 0] 的余弦相似度约 0.707，低于默认阈值 0.75
+        let library = Library([person("p1", "张三", [1, 1, 0])])
+        let speakers = try await transcribe(voiceprints: [7: vp1, 3: vp2], library: library)
+
+        #expect(speakers.map(\.name) == [nil, nil])
+        #expect(speakers.map(\.nameSource) == [nil, nil])
+        #expect(speakers.map(\.personID) == [nil, nil])
+    }
+
+    @Test func 阈值可以调低() async throws {
+        let library = Library([person("p1", "张三", [1, 1, 0])])
+        let speakers = try await transcribe(voiceprints: [7: vp1, 3: Voiceprint([0, 0, 1])], library: library,
+                                            threshold: 0.7)
+
+        #expect(speakers.map(\.name) == ["张三", nil])
+    }
+
+    @Test func 声纹模型不同的人不认() async throws {
+        let library = Library([person("p1", "张三", [1, 0, 0], model: "old/voiceprint")])
+        let speakers = try await transcribe(voiceprints: [7: vp1, 3: vp2], library: library)
+
+        #expect(speakers.map(\.name) == [nil, nil])
+        #expect(speakers.map(\.personID) == [nil, nil])
+    }
+
+    @Test func 不覆盖沿用来的手动名字() async throws {
+        // 原来 spk1（s1）被手动改名为李四；声纹库认为他是张三
+        let old = diarizedTranscript([
+            Speaker(id: "spk1", name: "李四", nameSource: .user, voiceprint: vp1, speechDuration: 5),
+            Speaker(id: "spk2", voiceprint: vp2, speechDuration: 8),
+        ])
+        let library = Library([person("p1", "张三", [1, 0, 0])])
+        let f = Fixture(diarizer: FakeDiarizer([
+            SpeakerSegment(start: 0, end: 5, speaker: 0),
+            SpeakerSegment(start: 6, end: 15, speaker: 1),
+        ], voiceprints: [0: vp1, 1: vp2]), voiceprints: library.store)
+        let m = f.addTranscribedMeeting(transcript: old)
+
+        f.pipeline.enqueueDiarization(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.name) == ["李四", nil])
+        #expect(t.speakers.map(\.nameSource) == [.user, nil])
+        #expect(t.speakers.map(\.personID) == [nil, nil])
+    }
+
+    @Test func 声纹库文件坏了时不识别_区分照常完成() async throws {
+        let library = Library([])
+        try Data("不是 JSON".utf8).write(to: library.store.url)
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2]),
+                        voiceprints: library.store)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
+        #expect(t.speakers.map(\.name) == [nil, nil])
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
+        // 坏文件原样留着，不被覆盖
+        #expect(try Data(contentsOf: library.store.url) == Data("不是 JSON".utf8))
+    }
+}
