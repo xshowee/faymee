@@ -9,7 +9,7 @@ private func date(_ iso: String) -> Date {
 private let shanghai = TimeZone(identifier: "Asia/Shanghai")!
 
 /// 假引擎：按脚本依次返回固定输出，记录每次调用。countTokens 按字数计
-private final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
+final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     let contextTokens: Int
     var outputs: [String]
     /// 设了就在 generate 里抛出
@@ -48,10 +48,10 @@ private final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     }
 }
 
-/// 提示词里的转写稿行：句子行 `[s12 …] …` 和合盖行 `[合盖，…]`
-private func transcriptLines(in prompt: String) -> [String] {
+/// 提示词里的转写稿行：句子行 `[s12 …] …`（可能带说话人 `[s12 03:15 说话人 2] …`）和合盖行 `[合盖，…]`
+func transcriptLines(in prompt: String) -> [String] {
     prompt.split(separator: "\n").map(String.init)
-        .filter { $0.hasPrefix("[合盖") || $0.wholeMatch(of: try! Regex(#"\[s\d+ [\d:]+\] .*"#)) != nil }
+        .filter { $0.hasPrefix("[合盖") || $0.wholeMatch(of: try! Regex(#"\[s\d+ [\d:]+( [^\]]+)?\] .*"#)) != nil }
 }
 
 /// 一份长转写稿：s1…sN 每句 30 来个字，句间隔 10 秒（停顿 2 秒）。

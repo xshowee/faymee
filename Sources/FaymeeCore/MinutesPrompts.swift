@@ -89,11 +89,18 @@ func inputLine(_ item: TranscriptItem) -> String {
     }
 }
 
-func extractionSystemPrompt(_ template: MinutesTemplate) -> String {
-    """
+/// `speakers` 不为空（转写稿显示说话人）时说明行里的说话人标签，负责人可以填说话人；
+/// 还有未命名的说话人时多要一项“说话人身份”。没有说话人时与 v0.3 逐字相同
+func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil) -> String {
+    let speakers = speakers?.isEmpty == false ? speakers : nil
+    let format = speakers == nil
+        ? "转写稿每行一句，格式为“[句子编号 时间] 内容”，例如“[s12 03:15] 我们下周发布”。"
+        : "转写稿每行一句，格式为“[句子编号 时间 说话人] 内容”，例如“[s12 03:15 说话人 2] 我们下周发布”。"
+            + "说话人由机器按声音区分，“说话人 N”是还不知道名字的人；没标说话人的句子不知道是谁说的。"
+    return """
     你是会议纪要助手。根据用户给出的会议转写稿，提取会议纪要。
 
-    转写稿每行一句，格式为“[句子编号 时间] 内容”，例如“[s12 03:15] 我们下周发布”。\
+    \(format)\
     转写稿由语音识别生成，可能有错别字和口语重复，请按意思理解。
     “[合盖，未录到声音 …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。
 
@@ -103,9 +110,9 @@ func extractionSystemPrompt(_ template: MinutesTemplate) -> String {
     - 用简体中文书写，语句简洁，一条只说一件事；同一件事只写一次，不要换个说法重复。
     - 某一节没有内容时给空数组。
 
-    \(sectionGuide(template))
+    \(sectionGuide(template, speakers: speakers))
 
-    \(outputFormat(template))
+    \(outputFormat(template, speakers: speakers))
     """
 }
 
@@ -185,13 +192,17 @@ func draftJSON(_ draft: Draft, sections kinds: [MinutesSectionKind]) -> String {
     return "{" + sections.joined(separator: ",\n") + "}"
 }
 
-/// 各节记什么，以及模板的侧重
-private func sectionGuide(_ template: MinutesTemplate) -> String {
+/// 各节记什么，以及模板的侧重。`speakers` 见 `extractionSystemPrompt`，合并时不给
+private func sectionGuide(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil) -> String {
+    let owner = speakers == nil
+        ? "owner 是负责人，只在转写稿里明确提到时填写，否则为 null；"
+        : "owner 是负责人，只在转写稿里明确提到、或某位说话人自己答应去做（如“我来跟进”）时填写，"
+            + "负责人是转写稿里的某位说话人时照抄他的说话人标签（如“说话人 2”或名字），否则为 null；"
     var guide = """
     纪要分以下几节（括号里是 JSON 的键）：
     - 概要（overview）：3–6 条，每条一句话，各说一个议题，合起来说清会议讨论了什么；不要把整场会写成一条。
     - 决议（decisions）：会上明确定下来的事。
-    - 待办（actions）：要做的事。owner 是负责人，只在转写稿里明确提到时填写，否则为 null；\
+    - 待办（actions）：要做的事。\(owner)\
     due 是截止时间的原话（如“下周三”），照抄转写稿里的说法，不要改写，没提到时为 null；\
     dueDate 是 due 对应的日期，格式 YYYY-MM-DD：到“日期对照”里找 due 的说法，抄那一行的日期\
     （“这周五”同“本周五”；只说“周五”时指今天以后最近的周五；“本周内”按本周五）；\
@@ -202,20 +213,29 @@ private func sectionGuide(_ template: MinutesTemplate) -> String {
     for section in template.customSections {
         guide += "\n- \(section.title)（\(section.key)）：\(section.hint)"
     }
+    if let speakers, speakers.wantsNames {
+        guide += "\n- 说话人身份（\(speakersKey)）：标为“说话人 N”的人如果被别人叫了名字或称呼"
+            + "（如有人问“王总你怎么看”，接着由说话人 2 回答），写出他是谁：speaker 是说话人标签（如“说话人 2”），"
+            + "name 照抄转写稿里的称呼（如“王总”），refs 是含这个称呼的句子编号。"
+            + "只写有把握的，每个说话人最多一条；已经写了名字的说话人不用写；没有时给空数组。"
+    }
     if let focus = template.focus {
         guide += "\n\n这是一场\(template.name)，请侧重：\(focus)"
     }
     return guide
 }
 
-/// 要求的 JSON 格式：以节的键为字段，每节是条目数组
-private func outputFormat(_ template: MinutesTemplate) -> String {
-    let fields = template.sections.map { kind, _ -> String in
+/// 要求的 JSON 格式：以节的键为字段，每节是条目数组；要推断说话人身份时最后再加一项
+private func outputFormat(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil) -> String {
+    var fields = template.sections.map { kind, _ -> String in
         let key = sectionKey(kind)
         if kind == .actions {
             return #""actions": [{"text": "把报价单发给客户", "owner": "张三", "due": "下周三", "dueDate": "2026-11-18", "refs": ["s412"]}]"#
         }
         return #""\#(key)": [{"text": "…", "refs": ["s12"]}, {"text": "…", "refs": ["s15", "s16"]}]"#
+    }
+    if let speakers, speakers.wantsNames {
+        fields.append(#""\#(speakersKey)": [{"speaker": "说话人 2", "name": "…", "refs": ["s30"]}]"#)
     }
     return "只输出一个 JSON 对象，不要输出其他文字。格式如下：\n{" + fields.joined(separator: ", ") + "}"
 }
@@ -226,10 +246,30 @@ private func outputFormat(_ template: MinutesTemplate) -> String {
 /// 提示词管不住，所以用文法硬性限制。字段间最多一个空白字符，免得模型一直输出空白。
 /// 最后允许再跟至多两个值为空数组的键：模型习惯在末尾多写一个 `"questions": []`、`"notes": []`，
 /// 不让写的话它会接着往最后一节里加条目，实测因此陷入重复直到输出上限。解析时多出的键被忽略，
-/// 重复的键取第一次出现的值
-func outputGrammar(_ kinds: [MinutesSectionKind]) -> String {
-    let fields = kinds.map { kind in
+/// 重复的键取第一次出现的值。
+///
+/// `speakers`（未命名说话人的标签）不为空时，各节之后再跟一项说话人身份：每条依次是 speaker、name、refs，
+/// speaker 只能是给出的标签之一，条数不超过标签数（每个说话人最多一条，也免得一直列下去）
+func outputGrammar(_ kinds: [MinutesSectionKind], speakers: [String] = []) -> String {
+    var fields = kinds.map { kind in
         #""\"\#(sectionKey(kind))\":" ws \#(kind == .actions ? "actions" : "items")"#
+    }
+    var speakerRules = ""
+    if !speakers.isEmpty {
+        fields.append(#""\"\#(speakersKey)\":" ws guesses"#)
+        // guess ( "," ws guess ( "," ws guess )? )?：最多 speakers.count 条
+        let list = speakers.dropFirst().reduce("guess") { inner, _ in #"guess ( "," ws \#(inner) )?"# }
+        // 标签写成 GBNF 字面量 "\"说话人 2\""：标签里的 \ 和 " 先按 JSON 转义，再按 GBNF 转义
+        func escaped(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let labels = speakers.map { "\"\\\"" + escaped(escaped($0)) + "\\\"\"" }
+        speakerRules = #"""
+
+        guesses ::= "[" ws ( \#(list) )? ws "]"
+        guess ::= "{" ws "\"speaker\":" ws label "," ws "\"name\":" ws string "," ws "\"refs\":" ws refs ws "}"
+        label ::= \#(labels.joined(separator: " | "))
+        """#
     }
     return #"""
     root ::= "{" ws \#(fields.joined(separator: #" "," ws "#)) ( "," ws extra ( "," ws extra )? )? ws "}"
@@ -243,5 +283,5 @@ func outputGrammar(_ kinds: [MinutesSectionKind]) -> String {
     nullable ::= string | "null"
     string ::= "\"" ( [^"\\\x00-\x1f] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) )* "\""
     ws ::= [ \n]?
-    """#
+    """# + speakerRules
 }

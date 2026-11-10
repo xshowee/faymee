@@ -137,6 +137,43 @@ private let sample = Minutes(
         #expect(original["dueDate"] as? String == "2026-11-11")
     }
 
+    /// v0.4 新增的字段都可选：没有时不写（上面逐字段核对的就是 v0.3 的形状），有时按约定写出并能读回
+    @Test func 说话人相关字段按约定写出并能读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        var minutes = sample
+        minutes.source.speakersCreatedAt = date("2026-11-10T03:02:00Z")
+        minutes.sections[2].items[0].ownerSpeaker = "spk2"
+        minutes.sections[2].items[0].original = MinutesItem.Original(text: "发报价单", owner: "说话人 3",
+                                                                       ownerSpeaker: "spk3")
+        minutes.nameSuggestions = [
+            NameSuggestion(speaker: "spk2", name: "王总", refs: [MinutesRef(id: "s30", start: 300.5)]),
+            NameSuggestion(speaker: "spk3", name: "李总", refs: [], ignored: true),
+        ]
+        try store.saveMinutes(minutes, for: m.id)
+
+        #expect(try store.loadMinutes(m.id) == minutes)
+        let url = store.directory(m.id).appendingPathComponent("minutes.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let source = try #require(json["source"] as? [String: Any])
+        #expect(source["speakersCreatedAt"] as? String == "2026-11-10T03:02:00Z")
+        let suggestions = try #require(json["nameSuggestions"] as? [[String: Any]])
+        #expect(suggestions.map { Set($0.keys) } == [["speaker", "name", "refs", "ignored"],
+                                                      ["speaker", "name", "refs", "ignored"]])
+        #expect(suggestions.map { $0["speaker"] as? String } == ["spk2", "spk3"])
+        #expect(suggestions.map { $0["name"] as? String } == ["王总", "李总"])
+        #expect(suggestions.map { $0["ignored"] as? Bool } == [false, true])
+        #expect((suggestions[0]["refs"] as? [[String: Any]])?.first?["id"] as? String == "s30")
+
+        let sections = try #require(json["sections"] as? [[String: Any]])
+        let actions = try #require(sections[2]["items"] as? [[String: Any]])
+        #expect(actions[0]["ownerSpeaker"] as? String == "spk2")
+        #expect((actions[0]["original"] as? [String: Any])?["ownerSpeaker"] as? String == "spk3")
+        // 没有关联的待办不写这个字段
+        #expect(!actions[1].keys.contains("ownerSpeaker"))
+    }
+
     @Test func 纪要文件损坏时抛错() throws {
         let store = makeStore()
         defer { try? FileManager.default.removeItem(at: store.root) }
