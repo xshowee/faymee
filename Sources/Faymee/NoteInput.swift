@@ -37,6 +37,9 @@ final class NoteInputController {
     /// stamp 是显示在输入框里的录音时间（如 12:03）
     func show(stamp: String) {
         if let panel {
+            // 开着期间用户切到了别的 App 再按 ⌃⌥N：关掉后回到那个 App，而不是最初弹出时的。
+            // 前台是 Faymee 自己（输入框本来就在前面、或从菜单栏面板点的）时沿用原来的
+            if let front = NSWorkspace.shared.frontmostApplication, front != .current { returnFocusTo = front }
             panel.makeKeyAndOrderFront(nil)
             NSApp.activate()
             return
