@@ -229,16 +229,55 @@ private final class Fixture {
         let first = try await f.run(at: 0)
         first.fail("识别中断")
         try await f.until { f.engine.prepareCalls == 2 }
+        f.advance(to: 5)
         let second = try await f.run(at: 5)
-        // 重试后正常出过字，再出错时又能自动重试一次
+        // 重试后正常跑了一阵、出过字，再出错时又能自动重试一次
+        f.advance(to: 5 + LiveCaptionSession.healthyAfter)
         second.sentence(0, 1, "恢复了。")
         try await f.until { !f.session.lines.isEmpty }
         second.fail("识别中断")
         try await f.until { f.engine.prepareCalls == 3 }
-        try await f.run(at: 9)
+        try await f.run(at: 40)
 
         #expect(f.engine.prepareCalls == 3)
         #expect(f.session.status == .running)
+    }
+
+    /// 一开始就出一个结果、紧接着出错的引擎：不能因为出过字就一直静默重试，再错就显示出错和“重试”
+    @Test(arguments: [false, true])
+    func 重试后出字就出错时不再自动重试(definite: Bool) async throws {
+        let f = Fixture()
+        let first = try await f.run(at: 0)
+        first.fail("识别中断")
+        try await f.until { f.engine.prepareCalls == 2 }
+        f.advance(to: 5)
+        let second = try await f.run(at: 5)
+        f.advance(to: 6)
+        if definite { second.sentence(0, 1, "好的。") } else { second.volatile("好", 0) }
+        try await f.until { definite ? !f.session.lines.isEmpty : f.session.volatile != nil }
+
+        second.fail("识别中断")
+
+        try await f.until { f.session.status == .failed("识别中断") }
+        #expect(f.engine.prepareCalls == 2)
+    }
+
+    /// 收尾中的旧转写吐出的句子、空的临时文字都不算当前转写正常出字
+    @Test func 旧转写的句子和空临时文字不重新允许自动重试() async throws {
+        let f = Fixture()
+        let builtIn = try await f.run(at: 0)
+        builtIn.fail("识别中断")
+        try await f.until { f.engine.prepareCalls == 2 }
+        let second = try await f.run(at: 0)
+        let usb = try await f.run(at: 1, format: usbMic)
+        f.advance(to: 1 + LiveCaptionSession.healthyAfter)
+        second.sentence(0, 1, "拔线前。")
+        usb.volatile("", 0)
+        try await f.until { !f.session.lines.isEmpty }
+
+        usb.fail("识别中断")
+
+        try await f.until { f.session.status == .failed("识别中断") }
     }
 
     @Test func 准备资源失败两次进入出错状态() async throws {

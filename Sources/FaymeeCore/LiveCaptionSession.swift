@@ -74,6 +74,9 @@ public final class LiveCaptionSession {
     /// 只保留最近这么多句，更早的丢弃
     public static let limit = 200
 
+    /// 自动重试过之后，当前转写开始这么久后还在出字，才算恢复正常、再给一次自动重试的机会
+    public static let healthyAfter: TimeInterval = 30
+
     private var failure: String?
     private var pausedAt: Date?
     private var isPrepared = false
@@ -94,8 +97,12 @@ public final class LiveCaptionSession {
     /// 每次开始准备加一，被取代的准备迟到的进度和结果丢弃
     @ObservationIgnored private var prepareToken = 0
     @ObservationIgnored private var nextID = 1
-    /// 出错时自动重试一次。重试后引擎正常出过字才再给一次机会，避免一直坏着时反复重试
+    /// 出错时自动重试一次，再错就显示出错和“重试”。重试后只有当前的转写开始 `healthyAfter` 之后
+    /// 还出了非空的结果，才算恢复正常、再给一次机会：引擎若每次刚出一个结果就出错，只看“出过字”
+    /// 会一直静默重试、永远不显示“重试”。收尾中的旧转写、空的临时文字都不算
     @ObservationIgnored private var canAutoRetry = true
+    /// 当前转写开始的时刻，判断它是否已经正常跑了 `healthyAfter`
+    @ObservationIgnored private var currentStartedAt: Date?
     @ObservationIgnored private var failedAt: Date?
     @ObservationIgnored private var stopped = false
 
@@ -158,6 +165,7 @@ public final class LiveCaptionSession {
         let token = nextToken
         let transcription = engine.start(format: format, hotwords: hotwords)
         current = (token, format, transcription)
+        currentStartedAt = now()
         live[token] = transcription
         // 引擎的时间从这次转写的第一块音频算起，换算到录音里
         let anchor = time.timeIntervalSince(recordingStartedAt)
@@ -175,11 +183,11 @@ public final class LiveCaptionSession {
         case .volatile(let text, let start):
             // 换格式后收尾中的旧转写：临时文字不再显示，只等它的定稿句子
             guard current?.token == token else { return }
-            canAutoRetry = true
             volatile = text.isEmpty ? nil : LiveCaptionVolatile(text: text, start: anchor + start)
             volatileOwner = volatile == nil ? nil : token
+            if !text.isEmpty { producedResult(token) }
         case .sentence(let s):
-            canAutoRetry = true
+            producedResult(token)
             if volatileOwner == token { clearVolatile() }
             lines.append(.sentence(LiveCaption(id: nextID, start: anchor + s.start, end: anchor + s.end, text: s.text)))
             nextID += 1
@@ -202,6 +210,13 @@ public final class LiveCaptionSession {
     private func clearVolatile() {
         volatile = nil
         volatileOwner = nil
+    }
+
+    /// 当前转写出了非空的结果。它已经跑了 `healthyAfter` 就重新允许自动重试
+    private func producedResult(_ token: Int) {
+        guard current?.token == token, let currentStartedAt,
+              now().timeIntervalSince(currentStartedAt) >= Self.healthyAfter else { return }
+        canAutoRetry = true
     }
 
     private func fail(_ reason: String) {
