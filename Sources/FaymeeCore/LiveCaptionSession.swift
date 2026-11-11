@@ -88,6 +88,9 @@ public final class LiveCaptionSession {
     /// 事件还要的转写：当前的，加上换格式时正在收尾的。取消的转写迟到的事件据此丢弃
     @ObservationIgnored private var live: [Int: any StreamingTranscription] = [:]
     @ObservationIgnored private var nextToken = 0
+    /// 浅色字是哪次转写的。只有当前的转写能改浅色字；它的主人定稿、结束时清掉，
+    /// 收尾中的旧转写的定稿句子不清别人的浅色字
+    @ObservationIgnored private var volatileOwner: Int?
     /// 每次开始准备加一，被取代的准备迟到的进度和结果丢弃
     @ObservationIgnored private var prepareToken = 0
     @ObservationIgnored private var nextID = 1
@@ -170,11 +173,14 @@ public final class LiveCaptionSession {
     private func handle(_ event: StreamingTranscriptionEvent, token: Int, anchor: TimeInterval) {
         switch event {
         case .volatile(let text, let start):
+            // 换格式后收尾中的旧转写：临时文字不再显示，只等它的定稿句子
+            guard current?.token == token else { return }
             canAutoRetry = true
             volatile = text.isEmpty ? nil : LiveCaptionVolatile(text: text, start: anchor + start)
+            volatileOwner = volatile == nil ? nil : token
         case .sentence(let s):
             canAutoRetry = true
-            volatile = nil
+            if volatileOwner == token { clearVolatile() }
             lines.append(.sentence(LiveCaption(id: nextID, start: anchor + s.start, end: anchor + s.end, text: s.text)))
             nextID += 1
             trim()
@@ -185,10 +191,17 @@ public final class LiveCaptionSession {
         }
     }
 
-    /// 事件流结束。当前的转写意外结束时，下一块音频开新的
+    /// 事件流结束。当前的转写意外结束时，下一块音频开新的。
+    /// 它留下的浅色字不会再定稿了（如分析器自己停了，没发 `.failed` 也没吐出句子），清掉
     private func ended(_ token: Int) {
         live[token] = nil
         if current?.token == token { current = nil }
+        if volatileOwner == token { clearVolatile() }
+    }
+
+    private func clearVolatile() {
+        volatile = nil
+        volatileOwner = nil
     }
 
     private func fail(_ reason: String) {
@@ -229,7 +242,7 @@ public final class LiveCaptionSession {
         for transcription in live.values { transcription.cancel() }
         live.removeAll()
         current = nil
-        volatile = nil
+        clearVolatile()
     }
 
     private func insertGap(from start: Date) {

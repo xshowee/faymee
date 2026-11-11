@@ -305,6 +305,52 @@ private final class Fixture {
         #expect(last.start == 31)
     }
 
+    /// 浅色字只归当前的转写：收尾中的旧转写发来的临时文字不理，它的定稿句子照常显示但不清掉新转写的浅色字
+    @Test func 换格式后旧转写的事件不动新转写的浅色字() async throws {
+        let f = Fixture()
+        let builtIn = try await f.run(at: 0)
+        builtIn.volatile("拔线前", 2)
+        try await f.until { f.session.volatile?.text == "拔线前" }
+        let usb = try await f.run(at: 30, format: usbMic)
+        usb.volatile("外接麦克风", 1)
+        try await f.until { f.session.volatile?.text == "外接麦克风" }
+
+        builtIn.volatile("拔线前最后", 3)
+        builtIn.volatile("", 0)
+        builtIn.sentence(2, 4, "拔线前最后一句。")
+        builtIn.end()
+        try await f.until { f.sentences.count == 1 }
+        // 等旧转写的事件流结束也处理完
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(f.session.volatile?.text == "外接麦克风")
+    }
+
+    /// 分析器自己停了（不发 .failed、也没吐出句子）：屏幕上不留下永远不会定稿的浅色字
+    @Test func 当前转写悄悄结束时清掉浅色字() async throws {
+        let f = Fixture()
+        let t = try await f.run(at: 0)
+        t.volatile("说到一半", 1)
+        try await f.until { f.session.volatile != nil }
+
+        t.end()
+
+        try await f.until { f.session.volatile == nil }
+    }
+
+    /// 换格式时旧转写的浅色字留到它收尾：吐出定稿句子或结束时清掉
+    @Test func 旧转写收尾结束时清掉它留下的浅色字() async throws {
+        let f = Fixture()
+        let builtIn = try await f.run(at: 0)
+        builtIn.volatile("拔线前", 2)
+        try await f.until { f.session.volatile != nil }
+        try await f.run(at: 30, format: usbMic)
+
+        builtIn.end()
+
+        try await f.until { f.session.volatile == nil }
+    }
+
     @Test func 收尾中的旧转写在暂停时一并取消() async throws {
         let f = Fixture()
         let builtIn = try await f.run(at: 0)
