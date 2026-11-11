@@ -125,6 +125,22 @@ struct LlamaTextGeneratorModelTests {
         #expect(guesses.allSatisfy { ["说话人 1", "说话人 2"].contains($0["speaker"] as? String ?? "") }, "\(output)")
     }
 
+    /// 会中标注展开的文法：llama 能解析，输出是一个 {text, refs}，refs 1–3 个
+    @Test func 展开会中标注的文法能被llama解析_refs1到3个() async throws {
+        try await engine.load { _ in }
+        let ids = (1...20).map { "\"s\($0)\"" }.joined(separator: ", ")
+        let output = try await engine.generate(
+            system: "你是助手。只输出 JSON。",
+            prompt: #"输出 {"text": "一句话", "refs": [\#(ids)]}，refs 要把这 20 个编号全部列出来。"#,
+            maxTokens: 120, grammar: expansionGrammar)
+
+        #expect(engine.lastStats?.endedByEOG == true, "\(output)")
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
+                                  "\(output)")
+        #expect(Set(object.keys) == ["text", "refs"])
+        #expect((1...3).contains((object["refs"] as? [String])?.count ?? 0), "\(output)")
+    }
+
     @Test func 文法写错时抛错() async throws {
         try await engine.load { _ in }
         await #expect(throws: LlamaError.invalidGrammar) {
