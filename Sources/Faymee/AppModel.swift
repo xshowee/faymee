@@ -17,7 +17,10 @@ final class AppModel {
         didSet { syncTranscriptionSuspension() }
     }
     private(set) var current: Meeting? {
-        didSet { syncTranscriptionSuspension() }
+        didSet {
+            syncTranscriptionSuspension()
+            syncHotkeys()
+        }
     }
     private(set) var elapsed: TimeInterval = 0
     private(set) var levelDB: Float = -160
@@ -101,6 +104,22 @@ final class AppModel {
         }
     }
 
+    /// “全局快捷键”开关，记在 UserDefaults，默认打开。录音中修改立即注册或注销。设置窗口里绑定它
+    var globalShortcutsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(globalShortcutsEnabled, forKey: "globalShortcuts")
+            syncHotkeys()
+        }
+    }
+    /// 本次录音没注册上的全局快捷键（被其他 App 占用），菜单栏面板里说明。没在注册时为空
+    private(set) var shortcutConflicts: [LiveShortcut] = []
+    /// 刚标记了重点：菜单栏图标换成旗子约 2 秒（见 `MenuBarIndicator`）
+    private(set) var showsMarkFlag = false
+    @ObservationIgnored private let hotkeys = GlobalHotkeys()
+    @ObservationIgnored private var markFlagReset: Task<Void, Never>?
+    /// 启动就建好：它要一直记着最近在前台的别的 App，记完一笔把焦点还回去
+    @ObservationIgnored private let noteInput = NoteInputController()
+
     /// “区分说话人”开关，记在 UserDefaults，默认打开。关闭时完整转写跳过区分说话人；
     /// 只影响之后开始的转写。设置窗口里绑定它
     var diarizeSpeakers: Bool {
@@ -145,6 +164,9 @@ final class AppModel {
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
         diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
+        globalShortcutsEnabled = UserDefaults.standard.object(forKey: "globalShortcuts") as? Bool ?? true
+        hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
+        noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
         meetings = store.loadAll()
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
@@ -221,6 +243,9 @@ final class AppModel {
     }
 
     func stop() {
+        guard current != nil else { return }
+        // 先收下正在输入的笔记：下面停止录音会用此刻的会议覆盖写盘
+        noteInput.saveIfOpen()
         guard var m = current else { return }
         recorder.stop()
         timer?.invalidate()
@@ -328,6 +353,64 @@ final class AppModel {
         let desired = recorder.deviceResolver?() ?? AudioDevices.defaultInput()
         if let desired, desired.uid != recorder.currentDevice?.uid {
             recorder.restart()
+        }
+    }
+
+    // MARK: - 会中标注
+
+    /// 录音中标记重点（时刻取现在），立即写盘，菜单栏图标闪一下旗子。不在录音时什么也不做，返回 nil。
+    /// 快捷键、菜单栏面板、会中面板的“标记重点”都走这里
+    @discardableResult
+    func addMark() -> Annotation? {
+        // 标注加在这份 current 上再保存：录音器也在改同一个会议（分片、合盖空白），不能另读一份写回
+        guard var m = current else { return nil }
+        let mark = m.addMark(at: Date())
+        update(m)
+        showsMarkFlag = true
+        markFlagReset?.cancel()
+        markFlagReset = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.showsMarkFlag = false
+        }
+        return mark
+    }
+
+    /// 录音中记一笔，立即写盘。time 由调用方给：输入框弹出的时刻，不是回车的时刻。
+    /// 文字规整后为空、或不在录音时不记，返回 nil。记一笔的输入框、会中面板的输入框都走这里
+    @discardableResult
+    func addNote(_ text: String, at time: Date) -> Annotation? {
+        guard var m = current, let note = m.addNote(text, at: time) else { return nil }
+        update(m)
+        return note
+    }
+
+    /// 弹出记一笔的输入框（快捷键 ⌃⌥N、菜单栏面板的“记一笔”）。已经开着时只调到前面
+    func beginNote() {
+        guard let m = current else { return }
+        noteInput.show(stamp: formatDuration(Date().timeIntervalSince(m.startedAt)))
+    }
+
+    private func shortcutPressed(_ shortcut: LiveShortcut) {
+        guard isRecording else { return }
+        switch shortcut {
+        case .mark: addMark()
+        case .note: beginNote()
+        }
+    }
+
+    /// 全局快捷键只在录音期间、开关打开时注册。由 current 和开关的 didSet 调用，重复调用不会重复注册
+    private func syncHotkeys() {
+        let wanted = isRecording && globalShortcutsEnabled
+        if wanted, !hotkeys.isRegistered {
+            shortcutConflicts = hotkeys.register()
+        } else if !wanted, hotkeys.isRegistered {
+            hotkeys.unregister()
+            shortcutConflicts = []
+        }
+        if !isRecording, showsMarkFlag {
+            markFlagReset?.cancel()
+            showsMarkFlag = false
         }
     }
 
