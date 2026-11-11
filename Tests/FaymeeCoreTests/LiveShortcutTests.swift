@@ -29,6 +29,36 @@ import Testing
     }
 }
 
+/// 组合键按键帽上的字母注册：非 QWERTY 布局（AZERTY、Dvorak）下 M、N 不在 ANSI 的位置上
+@Suite struct LiveShortcutKeyCodeTests {
+    /// ANSI 布局里 M、N 的键码
+    private let ansiM: UInt16 = 46, ansiN: UInt16 = 45
+
+    @Test func QWERTY下就是ANSI的位置() {
+        let qwerty: [UInt16: String] = [45: "n", 46: "m", 41: ";"]
+        #expect(LiveShortcut.mark.keyCode(preferring: ansiM) { qwerty[$0] } == ansiM)
+        #expect(LiveShortcut.note.keyCode(preferring: ansiN) { qwerty[$0] } == ansiN)
+    }
+
+    /// AZERTY 的 M 在 QWERTY 分号的位置，ANSI 的 M 位置是逗号；Dvorak 的 M 在 ANSI 的 M 位置，N 在 L 的位置
+    @Test func 别的布局下找输出这个字母的键() {
+        let azerty: [UInt16: String] = [45: "n", 46: ",", 41: "m"]
+        #expect(LiveShortcut.mark.keyCode(preferring: ansiM) { azerty[$0] } == 41)
+        let dvorak: [UInt16: String] = [45: "b", 46: "m", 37: "n"]
+        #expect(LiveShortcut.note.keyCode(preferring: ansiN) { dvorak[$0] } == 37)
+    }
+
+    @Test func 大小写都算() {
+        #expect(LiveShortcut.mark.keyCode(preferring: ansiM) { $0 == 7 ? "M" : nil } == 7)
+    }
+
+    /// 读不出布局、或布局里没有这个字母（如纯俄文布局）时为 nil，由调用方退回 ANSI 键码
+    @Test func 找不到时为nil() {
+        #expect(LiveShortcut.mark.keyCode(preferring: ansiM) { _ in nil } == nil)
+        #expect(LiveShortcut.mark.keyCode(preferring: ansiM) { _ in "ь" } == nil)
+    }
+}
+
 @Suite struct MenuBarIndicatorTests {
     @Test func 不在录音时是常态图标() {
         #expect(MenuBarIndicator(isRecording: false, hasWarning: false, showsMarkFlag: false) == .idle)

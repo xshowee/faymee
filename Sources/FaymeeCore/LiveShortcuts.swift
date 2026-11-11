@@ -14,6 +14,24 @@ public enum LiveShortcut: CaseIterable, Hashable, Sendable {
         }
     }
 
+    /// 组合键里的字母（键帽上的），小写
+    public var letter: Character {
+        switch self {
+        case .mark: "m"
+        case .note: "n"
+        }
+    }
+
+    /// 当前键盘布局下输出 `letter` 的键码。translate 给出一个键码不按修饰键时输出的文字（读不出为 nil）。
+    /// 先看 preferred（ANSI 布局里这个字母的位置），再从 0 往上找；都不是时为 nil，由调用方退回 ANSI 键码。
+    /// 标签写的是 ⌃⌥M、⌃⌥N，在 AZERTY、Dvorak 下也要按键帽上是 M、N 的那个键注册
+    public func keyCode(preferring preferred: UInt16, translate: (UInt16) -> String?) -> UInt16? {
+        func outputsLetter(_ code: UInt16) -> Bool { translate(code)?.lowercased() == String(letter) }
+        if outputsLetter(preferred) { return preferred }
+        // 虚拟键码都在 0..<128
+        return (0..<128).first(where: outputsLetter)
+    }
+
     /// 菜单栏面板里同一功能的按钮名
     public var buttonTitle: String {
         switch self {
