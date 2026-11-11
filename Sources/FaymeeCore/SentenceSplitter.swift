@@ -43,6 +43,17 @@ enum SentenceSplitter {
             if let s = sentence(current) { sentences.append(s) }
             current = []
         }
+        /// 在 token 前面断开。末尾的开引号、开括号属于后面的话，留给下一句：没有逐字时间的标点紧接在
+        /// 前一个字后面，停顿落在它后面。它们的时间挪到 token 开头，下一句不从静音里开始
+        func close(before token: TimedToken) {
+            var opening: [TimedToken] = []
+            while let last = current.last, isOpeningToken(last) {
+                opening.insert(TimedToken(text: last.text, start: token.start, end: token.start), at: 0)
+                current.removeLast()
+            }
+            close()
+            current = opening
+        }
         func characterCount() -> Int {
             current.reduce(0) { $0 + $1.text.filter { !$0.isWhitespace && !$0.isPunctuation }.count }
         }
@@ -65,10 +76,10 @@ enum SentenceSplitter {
                     close()
                     continue
                 }
-                close()
+                close(before: token)
             }
             // 停顿并在这个字里，停顿在它前面
-            if !closesBefore, isLong, characterCount() >= minCharacters { close() }
+            if !closesBefore, isLong, characterCount() >= minCharacters { close(before: token) }
 
             current.append(token)
 
@@ -80,6 +91,12 @@ enum SentenceSplitter {
             }
         }
         return (sentences, current)
+    }
+
+    /// 只有开引号、开括号的一小段
+    private static func isOpeningToken(_ token: TimedToken) -> Bool {
+        let trimmed = token.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed.allSatisfy(\.isPunctuation) && trimmed.contains(where: isOpening)
     }
 
     /// 一串字拼成的一句；全是空白时为 nil

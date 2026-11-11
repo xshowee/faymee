@@ -67,6 +67,35 @@ import Testing
         ])
     }
 
+    /// 没有逐字时间的开引号紧接在前一个字后面（见 `SpeechAnalyzerTranscriber.token`），停顿落在它后面：
+    /// 断开时开引号仍归后面的话，下一句从它后面那个字的时间开始
+    @Test func 停顿前没有时间的开引号也归下一句() {
+        let input = tokens([("他", 0, 0.2), ("说", 0.2, 0.4), ("“", 0.4, 0.4),
+                            ("我", 1.0, 1.2), ("们", 1.2, 1.4), ("下", 1.4, 1.6), ("周", 1.6, 1.8),
+                            ("发", 1.8, 2.0), ("布", 2.0, 2.2), ("”", 2.2, 2.2), ("。", 2.2, 2.3)])
+        let expected = [
+            TranscribedSentence(start: 0, end: 0.4, text: "他说"),
+            TranscribedSentence(start: 1.0, end: 2.3, text: "“我们下周发布”。"),
+        ]
+
+        #expect(SentenceSplitter.split(input) == expected)
+        // 实时字幕分两段断：开引号留在第一段末尾没断完的半句里
+        let first = SentenceSplitter.splitKeepingOpen(Array(input[..<3]))
+        let second = SentenceSplitter.splitKeepingOpen(first.open + input[3...])
+        #expect(first.closed + second.closed + (SentenceSplitter.sentence(second.open).map { [$0] } ?? []) == expected)
+    }
+
+    /// 同上，停顿并在后一个字的时间里（已有足够多的字，在这个字前面断）
+    @Test func 长字前没有时间的开括号也归下一句() {
+        let input = tokens([("我", 0, 0.2), ("们", 0.2, 0.4), ("先", 0.4, 0.6), ("过", 0.6, 0.8), ("一", 0.8, 1.0),
+                            ("下", 1.0, 1.2), ("（", 1.2, 1.2), ("草", 1.2, 1.8), ("案", 1.8, 2.0), ("）", 2.0, 2.0)])
+
+        #expect(SentenceSplitter.split(input) == [
+            TranscribedSentence(start: 0, end: 1.2, text: "我们先过一下"),
+            TranscribedSentence(start: 1.2, end: 2.0, text: "（草案）"),
+        ])
+    }
+
     /// 停顿并在开括号的时间里时，停顿在它前面（同普通的字），不在它后面断开
     @Test func 开括号占得久时在它前面断句() {
         let input = tokens([("我", 0, 0.2), ("们", 0.2, 0.4), ("先", 0.4, 0.6), ("过", 0.6, 0.8), ("一", 0.8, 1.0),
