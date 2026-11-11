@@ -513,6 +513,17 @@ struct AnnotationActions {
     var onDeleteMark: (TranscriptMark) -> Void
 }
 
+private extension TranscriptRow {
+    /// 列表里一行的身份，也是 `ScrollViewProxy.scrollTo` 的锚点：条目是 `items` 下标（播放跟随、出处定位按它滚），
+    /// 笔记是标注 id（改文字不换身份）
+    var scrollID: AnyHashable {
+        switch self {
+        case let .item(i): i
+        case let .note(note): note.id
+        }
+    }
+}
+
 /// 列表里谁有键盘焦点：列表本身（⌘A/⌘C）或正在编辑的句子
 private enum TranscriptFocus: Hashable {
     case list
@@ -560,7 +571,8 @@ private struct TranscriptList: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(rows, id: \.self) { r in
+                    // 身份和滚动锚点一致（条目是下标，笔记是标注 id），懒加载时没出现过的行也能滚到
+                    ForEach(rows, id: \.scrollID) { r in
                         switch r {
                         case let .item(i):
                             // 滚动锚点仍是条目下标：播放跟随、出处定位都按下标滚

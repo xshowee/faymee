@@ -392,7 +392,7 @@ private struct MinutesItemRow: View {
                         }
                         // 数据里分不出是附近没有转写稿还是扩写没成功，说明里两种都提
                         if item.origin == .note {
-                            Label("笔记原话，未扩写", systemImage: "text.quote")
+                            Label("未扩写", systemImage: "text.quote")
                                 .foregroundStyle(.secondary)
                                 .help("会上记的笔记原话，没有扩写：笔记附近没有转写稿，或扩写没有成功")
                         }
