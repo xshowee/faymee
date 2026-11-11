@@ -4,7 +4,8 @@ import Foundation
 
 extension Minutes {
     /// 渲染成 Markdown：标题行是会议标题、开始时间和时长，每节一个二级标题，条目后面带出处时间。
-    /// 不带“未找到出处”“手动添加”之类的内部标记；已删除的条目不导出；待办用 `- [ ]`
+    /// 不带“未找到出处”“手动添加”“未扩写”之类的内部标记；已删除的条目不导出；待办用 `- [ ]`。
+    /// 「会中标注」的笔记条目在出处时间之后附“（笔记：原话）”
     ///
     /// - Parameters:
     ///   - transcript: 会议当前的转写稿，用来显示待办负责人（`displayedOwner`：关联的说话人改名后用新名字）。
@@ -72,6 +73,10 @@ extension Minutes {
         }
         let refs = item.refs.map { formatDuration($0.start) }
         if !refs.isEmpty { text += "（\(refs.joined(separator: "、"))）" }
+        // 「会中标注」的笔记条目附上原话。未扩写的条目文字就是原话，不重复写；改过文字后照样附上
+        if let note = item.note?.singleLine, note != item.text.singleLine {
+            text += "（笔记：\(note)）"
+        }
         return (isAction ? "- [ ] " : "- ") + text
     }
 }
