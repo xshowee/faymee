@@ -29,15 +29,26 @@ private func roundTrip(_ t: Transcript) throws -> Transcript {
     return try #require(try store.loadTranscript("m1"))
 }
 
+private let plainMeeting = Meeting(id: "m1", title: "会议", startedAt: generatedAt.addingTimeInterval(-3600),
+                                   status: .done)
+
+/// 一个标记、一条笔记
+private func annotatedMeeting() -> Meeting {
+    var m = plainMeeting
+    m.addMark(at: generatedAt.addingTimeInterval(-3000))
+    m.addNote("预算 → 老王确认", at: generatedAt.addingTimeInterval(-2000))
+    return m
+}
+
 @Suite struct MinutesSyncTests {
     @Test func 同一份转写稿是同步的_写盘丢掉小数秒也不误判为重新转写() throws {
         let saved = try roundTrip(transcript)
         #expect(saved.createdAt != transcript.createdAt)
 
-        #expect(minutes(from: saved).sync(with: saved) == .inSync)
+        #expect(minutes(from: saved).sync(with: saved, meeting: nil) == .inSync)
         // 拿内存里的转写稿生成、和读回的比，或者反过来，都不算重新转写
-        #expect(minutes(from: transcript).sync(with: saved) == .inSync)
-        #expect(minutes(from: saved).sync(with: transcript) == .inSync)
+        #expect(minutes(from: transcript).sync(with: saved, meeting: nil) == .inSync)
+        #expect(minutes(from: saved).sync(with: transcript, meeting: nil) == .inSync)
     }
 
     @Test func 修改句子后派生出转写稿有修改() throws {
@@ -45,9 +56,9 @@ private func roundTrip(_ t: Transcript) throws -> Transcript {
         var edited = try roundTrip(transcript)
         edited.edit(sentence: "s2", to: "支付接口还没有准备好")
 
-        #expect(m.sync(with: edited) == .edited)
+        #expect(m.sync(with: edited, meeting: nil) == .edited)
         edited.restore(sentence: "s2")
-        #expect(m.sync(with: edited) == .inSync)
+        #expect(m.sync(with: edited, meeting: nil) == .inSync)
     }
 
     @Test func 重新转写后派生出已重新转写_哪怕文字没变() throws {
@@ -55,9 +66,87 @@ private func roundTrip(_ t: Transcript) throws -> Transcript {
         var retranscribed = transcript
         retranscribed.createdAt = generatedAt.addingTimeInterval(3600)
 
-        #expect(m.sync(with: retranscribed) == .retranscribed)
+        #expect(m.sync(with: retranscribed, meeting: nil) == .retranscribed)
         retranscribed.edit(sentence: "s1", to: "改过的一句")
-        #expect(m.sync(with: retranscribed) == .retranscribed)
+        #expect(m.sync(with: retranscribed, meeting: nil) == .retranscribed)
+    }
+
+    @Test func 会中标注改过后派生出会中标注有改动_改回去又同步() throws {
+        var meeting = annotatedMeeting()
+        var m = minutes(from: try roundTrip(transcript))
+        m.source.annotationsHash = meeting.annotationsHash
+        #expect(m.sync(with: transcript, meeting: meeting) == .inSync)
+
+        meeting.editNote("a2", to: "预算 → 老李确认")
+        #expect(m.sync(with: transcript, meeting: meeting) == .annotationsChanged)
+        meeting.editNote("a2", to: "预算 → 老王确认")
+        #expect(m.sync(with: transcript, meeting: meeting) == .inSync)
+
+        meeting.deleteAnnotation("a1")
+        #expect(m.sync(with: transcript, meeting: meeting) == .annotationsChanged)
+        // 删光了也算有改动：生成时有标注
+        meeting.deleteAnnotation("a2")
+        #expect(m.sync(with: transcript, meeting: meeting) == .annotationsChanged)
+    }
+
+    @Test func 生成时没有标注_会议也没有标注时同步() throws {
+        let m = minutes(from: try roundTrip(transcript))
+        #expect(m.sync(with: transcript, meeting: plainMeeting) == .inSync)
+        // 不知道会议（传 nil）时不判断标注
+        var annotated = m
+        annotated.source.annotationsHash = annotatedMeeting().annotationsHash
+        #expect(annotated.sync(with: transcript, meeting: nil) == .inSync)
+    }
+
+    /// 标注写盘读回不改变哈希，不误报
+    @Test func 会议写盘读回后标注哈希不变_仍同步() throws {
+        let meeting = annotatedMeeting()
+        var m = minutes(from: transcript)
+        m.source.annotationsHash = meeting.annotationsHash
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaymeeCoreTests-\(UUID().uuidString)", isDirectory: true))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        try FileManager.default.createDirectory(at: store.directory(meeting.id), withIntermediateDirectories: true)
+        try store.save(meeting)
+        let saved = try #require(store.loadAll().first { $0.id == meeting.id })
+
+        #expect(m.sync(with: transcript, meeting: saved) == .inSync)
+    }
+
+    /// 优先级：转写稿已重新生成 > 转写稿有修改 > 会中标注有改动
+    @Test func 会中标注有改动排在转写稿有修改和已重新转写之后() throws {
+        var meeting = annotatedMeeting()
+        var m = minutes(from: try roundTrip(transcript))
+        m.source.annotationsHash = meeting.annotationsHash
+        meeting.deleteAnnotation("a1")
+
+        var edited = transcript
+        edited.edit(sentence: "s2", to: "支付接口还没有准备好")
+        #expect(m.sync(with: edited, meeting: meeting) == .edited)
+        var retranscribed = transcript
+        retranscribed.createdAt = generatedAt.addingTimeInterval(3600)
+        #expect(m.sync(with: retranscribed, meeting: meeting) == .retranscribed)
+    }
+
+    @Test func 会中标注有改动的提示文字() {
+        #expect(MinutesSync.annotationsChanged.notice == "会中标注有改动，可以重新生成纪要")
+    }
+
+    @Test func 解析器把会议的标注算进同步状态_标注变了就过期() {
+        var meeting = annotatedMeeting()
+        var m = minutes(from: transcript)
+        m.source.annotationsHash = meeting.annotationsHash
+        let resolver = MinutesRefResolver(minutes: m, transcript: transcript, meeting: meeting)
+        #expect(resolver.sync == .inSync)
+
+        meeting.deleteAnnotation("a1")
+        #expect(!resolver.isCurrent(minutes: m, transcript: transcript, meeting: meeting))
+        #expect(resolver.updated(minutes: m, transcript: transcript, meeting: meeting).sync == .annotationsChanged)
+        // 会议的其他字段变了不用重建
+        var renamed = meeting
+        renamed.title = "改个标题"
+        let updated = resolver.updated(minutes: m, transcript: transcript, meeting: meeting)
+        #expect(updated.isCurrent(minutes: m, transcript: transcript, meeting: renamed))
     }
 
     @Test func 同步或只改了句子时按id定位出处并显示原句() {

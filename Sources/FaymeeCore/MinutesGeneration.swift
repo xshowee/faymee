@@ -3,14 +3,21 @@ import Foundation
 /// 由转写稿快照生成纪要。纯函数：不读写文件、不加载或释放模型（那是管线的事），只调用
 /// `generator` 的 `contextTokens`、`countTokens`、`generate`。
 ///
+/// 有会中标注时：落在区间里的句子在提取输入里带 `★`；提取、合并之后按时间顺序对每个区间展开一次
+/// （见 `expand`），放进概要之后的「会中标注」一节；`source` 记下标注哈希。没有标注时与 v0.4 逐字相同
+///
 /// - Parameters:
 ///   - transcript: 开始生成时读的快照，输入、出处校验、`source` 都用它
 ///   - title: 会议标题
 ///   - startedAt: 会议开始时间，按 `timeZone` 换算出日期和星期，供模型换算截止时间
+///   - annotations: 会中标注，见 `Meeting.minutesAnnotations(in:)`，用同一份转写稿快照算出。
+///     nil（会议没有标注）时没有「会中标注」一节
 ///   - model: 写进 `Minutes.model` 的引擎标识，如 "llama/qwen3-4b-q4km"
 ///   - createdAt: 写进 `Minutes.createdAt`
+///   - progress: 0...1，总步数是分段数、合并（分了段才有）、区间数之和，每完成一步报一次
 public func generateMinutes(
     transcript: Transcript, title: String, startedAt: Date, template: MinutesTemplate,
+    annotations: MinutesAnnotations? = nil,
     generator: TextGenerator, model: String, createdAt: Date = Date(), timeZone: TimeZone = .current,
     progress: (Double) -> Void = { _ in }
 ) async throws -> Minutes {
@@ -18,37 +25,65 @@ public func generateMinutes(
     let sentenceIDs = Set(sentences.keys)
     let meeting = MeetingInfo(title: title, startedAt: startedAt, timeZone: timeZone)
     let labels = SpeakerLabels(transcript)
-    let system = extractionSystemPrompt(template, speakers: labels)
+    let spans = annotations?.spans ?? []
+    let starred = Set(spans.flatMap(\.sentenceIDs))
+    let line = { (item: TranscriptItem) -> String in
+        guard case let .sentence(s) = item else { return labels.line(item) }
+        return labels.line(item, starred: starred.contains(s.id))
+    }
+    let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty)
     let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
     let budget = Budget(generator, system: system, outputTokens: generator.contextTokens * 2 / 5)
 
     let lineBudget = budget.promptTokens - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
     let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens,
-                               line: labels.line) {
-        budget.fits(extractionPrompt(meeting, lines: $0.map(labels.line), partial: true))
+                               line: line) {
+        budget.fits(extractionPrompt(meeting, lines: $0.map(line), partial: true))
     }
+    let steps = segments.count + (segments.count > 1 ? 1 : 0) + spans.count
+    var done = 0
+    func step() {
+        done += 1
+        progress(Double(done) / Double(steps))
+    }
+
     var drafts: [Draft] = []
     var guesses: [NameGuess] = []
-    for (n, items) in segments.enumerated() {
-        let prompt = extractionPrompt(meeting, lines: items.map(labels.line), partial: segments.count > 1)
+    for items in segments {
+        let prompt = extractionPrompt(meeting, lines: items.map(line), partial: segments.count > 1)
         let (draft, output) = try await generateOutput(generator, system: system, prompt: prompt,
                                                        maxTokens: budget.outputTokens, template: template,
                                                        grammar: grammar)
         drafts.append(draft.validated(against: sentenceIDs))
         // 说话人身份只在提取时要，各段的结果由代码投票，不交给合并
         if labels.wantsNames { guesses += labels.validated(parseNameGuesses(output), in: items) }
-        if segments.count > 1 { progress(Double(n + 1) / Double(segments.count + 1)) }
+        step()
     }
     let draft = drafts.count > 1
         ? try await merge(drafts, meeting: meeting, template: template, generator: generator,
                           outputTokens: generator.contextTokens / 2)
         : drafts.first ?? [:]
-    progress(1)
+    if segments.count > 1 { step() }
+    // 转写稿一句都没有、也没有区间：同 v0.4 直接到 1
+    if steps == 0 { progress(1) }
 
-    let sections = makeSections(draft, template: template, sentences: sentences, meeting: meeting, labels: labels)
+    var sections = makeSections(draft, template: template, sentences: sentences, meeting: meeting, labels: labels)
+    if annotations != nil {
+        var expanded: [(AnnotationSpan, ExpandedAnnotation)] = []
+        for span in spans {
+            if let item = try await expand(span, title: title, sentences: sentences, labels: labels,
+                                           generator: generator) {
+                expanded.append((span, item))
+            }
+            step()
+        }
+        let overview = sections.firstIndex { $0.kind == .overview }.map { $0 + 1 } ?? 0
+        sections.insert(annotationsSection(expanded, sentences: sentences), at: overview)
+    }
     return Minutes(model: model, template: template.key, createdAt: createdAt,
                    source: MinutesSource(transcriptCreatedAt: transcript.createdAt, textHash: transcript.textHash,
-                                         speakersCreatedAt: transcript.speakersCreatedAt),
+                                         speakersCreatedAt: transcript.speakersCreatedAt,
+                                         annotationsHash: annotations?.hash),
                    sections: sections, nameSuggestions: labels.suggestions(guesses, sentences: sentences))
 }
 
@@ -303,6 +338,7 @@ private func itemIDPrefix(_ kind: MinutesSectionKind) -> String {
     case .decisions: "d"
     case .actions: "a"
     case .questions: "q"
+    case .annotations: "n"
     case let .custom(key): key + "-"
     }
 }
@@ -313,6 +349,7 @@ func sectionKey(_ kind: MinutesSectionKind) -> String {
     case .decisions: "decisions"
     case .actions: "actions"
     case .questions: "questions"
+    case .annotations: "annotations"
     case let .custom(key): key
     }
 }

@@ -25,7 +25,7 @@ struct MinutesPanel: View {
     var body: some View {
         let status = MinutesStatus(state: meeting.minutes, activity: model.minutes.activity(for: meeting.id),
                                    waitReason: model.minutes.waitReason(for: meeting.id), transcript: transcript)
-        let resolver = refs.resolver(minutes: minutes, transcript: transcript)
+        let resolver = refs.resolver(minutes: minutes, transcript: transcript, meeting: meeting)
         let sync = resolver.sync
 
         VStack(alignment: .leading, spacing: 8) {
@@ -127,13 +127,13 @@ struct MinutesPanel: View {
 }
 
 /// body 每次渲染都要解析出处，生成中进度每秒变好几次。同步状态要对整份转写稿算 SHA-256，
-/// 所以纪要的 source 和转写稿没变时沿用上次的解析器。是普通的类而不是状态：在 body 里更新它不触发重绘
+/// 所以纪要的 source、转写稿和会中标注没变时沿用上次的解析器。是普通的类而不是状态：在 body 里更新它不触发重绘
 @MainActor private final class RefResolverCache {
     private var cached: MinutesRefResolver?
 
-    func resolver(minutes: Minutes?, transcript: Transcript?) -> MinutesRefResolver {
-        let resolver = cached?.updated(minutes: minutes, transcript: transcript)
-            ?? MinutesRefResolver(minutes: minutes, transcript: transcript)
+    func resolver(minutes: Minutes?, transcript: Transcript?, meeting: Meeting) -> MinutesRefResolver {
+        let resolver = cached?.updated(minutes: minutes, transcript: transcript, meeting: meeting)
+            ?? MinutesRefResolver(minutes: minutes, transcript: transcript, meeting: meeting)
         cached = resolver
         return resolver
     }
@@ -190,7 +190,7 @@ private struct StatusView: View {
     }
 }
 
-/// 纪要与转写稿不同步的提示条：重新转写的醒目，只是改了句子的不显眼
+/// 纪要与转写稿、会中标注不同步的提示条：重新转写的醒目，只是改了句子或标注的不显眼
 private struct SyncBanner: View {
     var sync: MinutesSync
     var notice: String

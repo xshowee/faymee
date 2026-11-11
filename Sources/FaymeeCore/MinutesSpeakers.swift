@@ -34,10 +34,12 @@ struct SpeakerLabels {
         sentence.speaker.flatMap { labels[$0] }
     }
 
-    /// 转写稿的一行，见 `inputLine(_:)`；句子有说话人时在时间后面带上标签
-    func line(_ item: TranscriptItem) -> String {
-        guard case let .sentence(s) = item, let label = label(for: s) else { return inputLine(item) }
-        return "[\(s.id) \(formatDuration(s.start)) \(label)] \(s.text)"
+    /// 转写稿的一行，见 `inputLine(_:)`；句子有说话人时在时间后面带上标签，
+    /// `starred`（落在会中标注的区间里）时标签末尾再带一个 `★`，如 `[s412 31:20 说话人 2 ★]`
+    func line(_ item: TranscriptItem, starred: Bool = false) -> String {
+        guard case let .sentence(s) = item else { return inputLine(item) }
+        let tags = [s.id, formatDuration(s.start), label(for: s), starred ? "★" : nil].compactMap { $0 }
+        return "[\(tags.joined(separator: " "))] \(s.text)"
     }
 
     /// 模型给的负责人对应哪个说话人：与某个标签完全相同（容忍模型丢掉“说话人 2”里的空格）。
@@ -132,7 +134,7 @@ let speakersKey = "speakers"
 
 extension Minutes {
     /// 生成时依据的说话人是否就是当前转写稿的说话人：两边都区分过，`speakersCreatedAt` 相差不到 1 秒
-    /// （写盘丢掉小数秒，同 `sync(with:)` 的做法）。不同说明重新区分过，说话人编号已重排
+    /// （写盘丢掉小数秒，同 `sync(with:meeting:)` 的做法）。不同说明重新区分过，说话人编号已重排
     func hasSameSpeakers(as transcript: Transcript?) -> Bool {
         guard let generated = source.speakersCreatedAt, let now = transcript?.speakersCreatedAt else { return false }
         return abs(generated.timeIntervalSince(now)) < 1

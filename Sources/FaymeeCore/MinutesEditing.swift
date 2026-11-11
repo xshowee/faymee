@@ -10,7 +10,7 @@ extension Minutes {
         sections.reduce(0) { n, section in
             n + section.items.count { item in
                 switch item.origin {
-                case .model: item.original != nil || item.deleted
+                case .model, .note: item.original != nil || item.deleted
                 case .manual: !item.deleted
                 }
             }
