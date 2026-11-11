@@ -90,12 +90,18 @@ private final class Fixture {
         #expect(f.session.volatile == nil)
     }
 
-    @Test func 字幕时间以录音开始为零点_按收到音频的时刻换算() async throws {
+    /// 每块音频带上录音里的时间（以录音开始为零点，按收到音频的时刻换算）送给引擎，
+    /// 引擎按它对齐（中途丢过音频也对得上，见 `StreamingAudioTimeline`），字幕直接用引擎给的时间
+    @Test func 每块音频带录音里的时间送给引擎_字幕用引擎给的时间() async throws {
         let f = Fixture()
         let t = try await f.run(at: 65)
+        // 中间约 10 秒的音频在分路里被丢掉了
+        f.session.append(buffer(), at: at(65.1))
+        f.session.append(buffer(), at: at(75.2))
+        #expect(t.appendedTimes == [65, 65.1, 75.2].map { at($0).timeIntervalSince(at(0)) })
 
-        t.volatile("好", 2)
-        t.sentence(2, 4.5, "好的。")
+        t.volatile("好", 67)
+        t.sentence(67, 69.5, "好的。")
         try await f.until { !f.session.lines.isEmpty }
 
         #expect(f.session.lines == [.sentence(LiveCaption(id: f.session.lines[0].id, start: 67, end: 69.5, text: "好的。"))])
@@ -121,7 +127,7 @@ private final class Fixture {
 
         f.resume(at: 120 + 7 * 60 + 20)
         let after = try await f.run(at: 561)
-        after.sentence(1, 3, "开盖后。")
+        after.sentence(562, 564, "开盖后。")
         try await f.until { f.sentences.count == 2 }
 
         #expect(f.sentences == ["合盖前。", "开盖后。"])
@@ -132,9 +138,8 @@ private final class Fixture {
         #expect(gap.start == 120)
         #expect(gap.minutes == 7)
         #expect(gap.text == "中间约 7 分钟没有字幕")
-        // 新的转写从 0 计时，按恢复后第一块音频重新换算，不回到录音开头
-        guard case .sentence(let last) = f.session.lines[2] else { return }
-        #expect(last.start == 562)
+        // 新的转写收到的仍是录音里的时间，不从 0 算起
+        #expect(after.appendedTimes == [561])
     }
 
     /// 恢复后没出字幕又停了（如开盖片刻又合上），合成一行，从第一次暂停算到最后一次恢复
@@ -209,7 +214,7 @@ private final class Fixture {
 
         f.retry(at: 190)
         let third = try await f.run(at: 190)
-        third.sentence(0, 2, "重试后。")
+        third.sentence(190, 192, "重试后。")
         try await f.until { f.sentences.count == 2 }
         #expect(f.session.status == .running)
         #expect(f.sentences == ["出错前。", "重试后。"])
@@ -335,7 +340,7 @@ private final class Fixture {
         builtIn.sentence(20, 22, "拔线前最后一句。")
         builtIn.end()
         try await f.until { f.sentences.count == 2 }
-        usb.sentence(1, 2, "外接麦克风。")
+        usb.sentence(31, 32, "外接麦克风。")
         try await f.until { f.sentences.count == 3 }
 
         #expect(f.sentences == ["内置麦克风。", "拔线前最后一句。", "外接麦克风。"])

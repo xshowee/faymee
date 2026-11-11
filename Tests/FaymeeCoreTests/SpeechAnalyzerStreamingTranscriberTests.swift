@@ -12,8 +12,10 @@ private final class Received: @unchecked Sendable {
 }
 
 /// 把录音按实时速度切成约 0.1 秒一块送入，返回收到的全部事件，以及送完音频、调用 finish() 之前已收到的事件。
-/// 格式保持文件原样（22050 Hz），格式转换也一并测到
-private func stream(_ url: URL, into transcription: any StreamingTranscription) async throws
+/// 格式保持文件原样（22050 Hz），格式转换也一并测到。每块带的时间是它在文件里的位置，
+/// 文件里过了 jump.after 秒之后的再加 jump.by 秒（模拟中途丢了一段音频）
+private func stream(_ url: URL, into transcription: any StreamingTranscription,
+                    jump: (after: TimeInterval, by: TimeInterval)? = nil) async throws
     -> (all: [StreamingTranscriptionEvent], beforeFinish: [StreamingTranscriptionEvent]) {
     let file = try AVAudioFile(forReading: url)
     let received = Received()
@@ -23,8 +25,10 @@ private func stream(_ url: URL, into transcription: any StreamingTranscription) 
     let chunk = AVAudioFrameCount(file.processingFormat.sampleRate / 10)
     while file.framePosition < file.length {
         let buffer = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: chunk))
+        let position = Double(file.framePosition) / file.processingFormat.sampleRate
         try file.read(into: buffer, frameCount: chunk)
-        transcription.append(buffer)
+        let shift = jump.map { position >= $0.after ? $0.by : 0 } ?? 0
+        transcription.append(buffer, at: position + shift)
         try await Task.sleep(for: .milliseconds(100))
     }
     let beforeFinish = received.all
@@ -80,6 +84,27 @@ struct SpeechAnalyzerStreamingTranscriberContractTests {
         let score = similarity(live, final)
         print("流式定稿：\(live)\n会后转写：\(final)\n相似度：\(score)，临时结果 \(volatile.count) 次，定稿 \(sentences.count) 句")
         #expect(score >= 0.8)
+    }
+
+    /// 识别器察觉不到丢掉的音频：之后的句子要按送入时带的时间对齐，而不是接着按样本数算
+    @Test func 送入的时间中途跳过一段时_之后的句子跟着往后挪() async throws {
+        let url = try sampleURL()
+        let length = try duration(of: url)
+        let engine = SpeechAnalyzerStreamingTranscriber()
+        try await engine.prepare { _ in }
+        let format = try AVAudioFile(forReading: url).processingFormat
+        let jump = (after: length / 2, by: 100.0)
+
+        let (events, _) = try await stream(url, into: engine.start(format: format, hotwords: []), jump: jump)
+
+        let sentences = events.compactMap { if case .sentence(let s) = $0 { s } else { nil } }
+        #expect(!sentences.isEmpty)
+        #expect(sentences.allSatisfy { $0.start <= $0.end })
+        #expect(zip(sentences, sentences.dropFirst()).allSatisfy { $0.end <= $1.start })
+        // 后半段的句子落在跳过之后
+        let late = try #require(sentences.last)
+        #expect(late.end > jump.after + jump.by)
+        #expect(late.end <= length + jump.by + 0.5)
     }
 
     @Test func 取消后事件流结束() async throws {

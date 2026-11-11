@@ -125,8 +125,9 @@ public final class LiveCaptionSession {
             current.transcription.finish()
             self.current = nil
         }
-        if current == nil { begin(format: buffer.format, at: time) }
-        current?.transcription.append(buffer)
+        if current == nil { begin(format: buffer.format) }
+        // 每块都带上录音里的时间：中途丢过音频（分路缓冲满、引擎积压、录音重启）时引擎据此对齐
+        current?.transcription.append(buffer, at: time.timeIntervalSince(recordingStartedAt))
     }
 
     /// 面板不可见：停掉引擎、释放模型，丢掉没定稿的文字。恢复时在字幕里插入分隔行。
@@ -160,36 +161,34 @@ public final class LiveCaptionSession {
         cancelTranscriptions()
     }
 
-    private func begin(format: AVAudioFormat, at time: Date) {
+    private func begin(format: AVAudioFormat) {
         nextToken += 1
         let token = nextToken
         let transcription = engine.start(format: format, hotwords: hotwords)
         current = (token, format, transcription)
         currentStartedAt = now()
         live[token] = transcription
-        // 引擎的时间从这次转写的第一块音频算起，换算到录音里
-        let anchor = time.timeIntervalSince(recordingStartedAt)
         Task { [weak self] in
             for await event in transcription.events {
                 guard let self, self.live[token] != nil else { return }
-                self.handle(event, token: token, anchor: anchor)
+                self.handle(event, token: token)
             }
             self?.ended(token)
         }
     }
 
-    private func handle(_ event: StreamingTranscriptionEvent, token: Int, anchor: TimeInterval) {
+    private func handle(_ event: StreamingTranscriptionEvent, token: Int) {
         switch event {
         case .volatile(let text, let start):
             // 换格式后收尾中的旧转写：临时文字不再显示，只等它的定稿句子
             guard current?.token == token else { return }
-            volatile = text.isEmpty ? nil : LiveCaptionVolatile(text: text, start: anchor + start)
+            volatile = text.isEmpty ? nil : LiveCaptionVolatile(text: text, start: start)
             volatileOwner = volatile == nil ? nil : token
             if !text.isEmpty { producedResult(token) }
         case .sentence(let s):
             producedResult(token)
             if volatileOwner == token { clearVolatile() }
-            lines.append(.sentence(LiveCaption(id: nextID, start: anchor + s.start, end: anchor + s.end, text: s.text)))
+            lines.append(.sentence(LiveCaption(id: nextID, start: s.start, end: s.end, text: s.text)))
             nextID += 1
             trim()
         case .failed(let reason):

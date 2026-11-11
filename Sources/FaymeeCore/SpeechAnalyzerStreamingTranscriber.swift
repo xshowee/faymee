@@ -18,6 +18,21 @@ public final class SpeechAnalyzerStreamingTranscriber: StreamingTranscriber {
 /// AVAudioPCMBuffer 不是 Sendable。送入后只在转写任务里读，调用方不再改它
 private struct AudioChunk: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
+    /// 开头在调用方时间线上的位置
+    let time: TimeInterval
+}
+
+/// 送音频的任务记、收结果的任务读
+private final class SharedTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timeline = StreamingAudioTimeline()
+
+    func record(_ chunk: AudioChunk) {
+        let seconds = Double(chunk.buffer.frameLength) / chunk.buffer.format.sampleRate
+        lock.withLock { timeline.record(duration: seconds, at: chunk.time) }
+    }
+
+    func time(at engineTime: TimeInterval) -> TimeInterval { lock.withLock { timeline.time(at: engineTime) } }
 }
 
 private struct StreamingFormatError: LocalizedError {
@@ -48,7 +63,9 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
         }
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) { input.yield(AudioChunk(buffer: buffer)) }
+    func append(_ buffer: AVAudioPCMBuffer, at time: TimeInterval) {
+        input.yield(AudioChunk(buffer: buffer, time: time))
+    }
     func finish() { input.finish() }
 
     func cancel() {
@@ -65,6 +82,8 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
               let converter = Converter(from: format, to: analyzerFormat)
         else { throw StreamingFormatError() }
 
+        // 积压太多时丢掉的音频不进识别器，只记实际送进去的，结果的时间据此换回调用方的时间线
+        let timeline = SharedTimeline()
         let context = AnalysisContext()
         if !hotwords.isEmpty { context.contextualStrings[.general] = hotwords }
         // 用完即释放模型；会话暂停、结束时调用方取消或结束这次转写
@@ -78,13 +97,14 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
                 try await withThrowingTaskGroup(of: Part.self) { group in
                     // 先开始读结果再启动分析
                     group.addTask {
-                        try await collect(module.results, output: output)
+                        try await collect(module.results, timeline: timeline, output: output)
                         return .results
                     }
                     try await analyzer.start(inputSequence: inputs)
                     group.addTask {
                         // 取消时 AsyncStream 的迭代直接结束
                         for await chunk in audio {
+                            timeline.record(chunk)
                             // 必须先转成分析器的格式：AnalyzerInput 收到不支持的格式（如 Float32）会直接崩溃
                             if let converted = try converter.convert(chunk.buffer) {
                                 feed.yield(AnalyzerInput(buffer: converted))
@@ -116,25 +136,31 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
 
     /// 临时结果原样（拼上还没断完的半句）发出；定稿结果的字和留着的半句一起断句，
     /// 断完的句子发出，末尾没说完的半句留给下一段定稿结果，期间仍作为临时文字显示
-    private static func collect(_ results: SpeechTranscriber.Results,
+    private static func collect(_ results: SpeechTranscriber.Results, timeline: SharedTimeline,
                                 output: AsyncStream<StreamingTranscriptionEvent>.Continuation) async throws {
         var open: [TimedToken] = []
         func showVolatile(_ tokens: [TimedToken]) {
             let pending = SentenceSplitter.sentence(tokens)
-            output.yield(.volatile(pending?.text ?? "", start: pending?.start ?? 0))
+            output.yield(.volatile(pending?.text ?? "", start: timeline.time(at: pending?.start ?? 0)))
+        }
+        func emit(_ sentence: TranscribedSentence) {
+            var s = sentence
+            s.start = timeline.time(at: sentence.start)
+            s.end = max(s.start, timeline.time(at: sentence.end))
+            output.yield(.sentence(s))
         }
         for try await result in results {
             let tokens = Self.tokens(of: result)
             if result.isFinal {
                 let split = SentenceSplitter.splitKeepingOpen(open + tokens)
-                for sentence in split.closed { output.yield(.sentence(sentence)) }
+                for sentence in split.closed { emit(sentence) }
                 open = split.open
                 showVolatile(open)
             } else {
                 showVolatile(open + tokens)
             }
         }
-        if let last = SentenceSplitter.sentence(open) { output.yield(.sentence(last)) }
+        if let last = SentenceSplitter.sentence(open) { emit(last) }
     }
 
     private static func tokens(of result: SpeechTranscriber.Result) -> [TimedToken] {

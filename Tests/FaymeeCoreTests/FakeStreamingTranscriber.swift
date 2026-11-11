@@ -1,13 +1,16 @@
 import AVFoundation
 @testable import FaymeeCore
 
-/// 假的一次流式转写：测试用 `emit` 发事件，记下收到的音频和结束方式
+/// 假的一次流式转写：测试用 `emit` 发事件（时间直接是录音里的秒数，同真实引擎换算后的），
+/// 记下收到的音频和结束方式
 final class FakeTranscription: StreamingTranscription, @unchecked Sendable {
     let format: AVAudioFormat
     let hotwords: [String]
     let events: AsyncStream<StreamingTranscriptionEvent>
     private let continuation: AsyncStream<StreamingTranscriptionEvent>.Continuation
-    private(set) var appended = 0
+    /// 每块音频带的录音里的时间
+    private(set) var appendedTimes: [TimeInterval] = []
+    var appended: Int { appendedTimes.count }
     private(set) var finished = false
     private(set) var cancelled = false
 
@@ -17,7 +20,7 @@ final class FakeTranscription: StreamingTranscription, @unchecked Sendable {
         (events, continuation) = AsyncStream.makeStream()
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) { appended += 1 }
+    func append(_ buffer: AVAudioPCMBuffer, at time: TimeInterval) { appendedTimes.append(time) }
     /// 结束、取消时都不马上关事件流：测试还可以发迟到的事件，再 `end()`
     func finish() { finished = true }
     func cancel() { cancelled = true }
