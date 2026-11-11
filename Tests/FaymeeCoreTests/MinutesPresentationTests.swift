@@ -98,22 +98,23 @@ private let transcript = Transcript(
                               source: MinutesSource(transcriptCreatedAt: transcript.createdAt,
                                                     textHash: transcript.textHash),
                               sections: [])
-        let resolver = MinutesRefResolver(minutes: minutes, transcript: transcript)
+        let resolver = MinutesRefResolver(minutes: minutes, transcript: transcript, meeting: nil)
         #expect(resolver.sync == .inSync)
         #expect(resolver.chip(MinutesRef(id: "s2", start: 3723)).hint == "那就推迟一周")
 
         minutes.template = "weekly"
-        #expect(resolver.isCurrent(minutes: minutes, transcript: transcript))
+        #expect(resolver.isCurrent(minutes: minutes, transcript: transcript, meeting: nil))
         var edited = transcript
         edited.items[0] = .sentence(TranscriptSentence(id: "s1", start: 195.4, end: 199, text: "支付接口准备好了"))
-        #expect(!resolver.isCurrent(minutes: minutes, transcript: edited))
-        #expect(MinutesRefResolver(minutes: minutes, transcript: edited).sync == .edited)
-        #expect(!resolver.isCurrent(minutes: nil, transcript: transcript))
-        #expect(resolver.updated(minutes: minutes, transcript: edited).sync == .edited)
-        #expect(resolver.updated(minutes: minutes, transcript: transcript).isCurrent(minutes: minutes,
-                                                                                    transcript: transcript))
+        #expect(!resolver.isCurrent(minutes: minutes, transcript: edited, meeting: nil))
+        #expect(MinutesRefResolver(minutes: minutes, transcript: edited, meeting: nil).sync == .edited)
+        #expect(!resolver.isCurrent(minutes: nil, transcript: transcript, meeting: nil))
+        #expect(resolver.updated(minutes: minutes, transcript: edited, meeting: nil).sync == .edited)
+        #expect(resolver.updated(minutes: minutes, transcript: transcript, meeting: nil).isCurrent(minutes: minutes,
+                                                                                    transcript: transcript,
+                                                                                    meeting: nil))
 
-        let empty = MinutesRefResolver(minutes: nil, transcript: nil)
+        let empty = MinutesRefResolver(minutes: nil, transcript: nil, meeting: nil)
         #expect(empty.sync == .inSync)
         #expect(empty.chip(MinutesRef(id: "s1", start: 195.4)).hint == "转写稿不可用，原句无法显示")
     }
@@ -139,6 +140,24 @@ private let transcript = Transcript(
         var allDeleted = section
         allDeleted.items = allDeleted.items.map { var i = $0; i.deleted = true; return i }
         #expect(allDeleted.visibleItems.isEmpty)
+    }
+
+    /// 「会中标注」的笔记条目在文字下面显示笔记原话（spec 50）。未扩写的条目文字就是原话，不重复显示；
+    /// 未扩写的条目改过文字后照样显示原话。标记、其他节的条目没有原话
+    @Test func 笔记条目显示原话_与文字相同时不重复() {
+        let expanded = MinutesItem(id: "n1", text: "预算由老王在周五前确认", refs: [MinutesRef(id: "s3", start: 903)],
+                                   annotationIDs: ["a2"], note: "预算 → 老王确认")
+        #expect(expanded.displayedNote == "预算 → 老王确认")
+
+        var raw = MinutesItem(id: "n2", text: "散会后找法务", refs: [], origin: .note, annotationIDs: ["a3"],
+                              note: "散会后找法务")
+        #expect(raw.displayedNote == nil)
+        raw.text = "散会后找法务确认合同"
+        #expect(raw.displayedNote == "散会后找法务")
+
+        let mark = MinutesItem(id: "n3", text: "月底上线，延期要提前说", refs: [MinutesRef(id: "s9", start: 1200)],
+                               annotationIDs: ["a1"])
+        #expect(mark.displayedNote == nil)
     }
 
     @Test func 不同步时的提示文字() {

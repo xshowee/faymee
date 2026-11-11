@@ -1,6 +1,6 @@
 import Foundation
 
-/// 纪要与当前转写稿的关系，按 `Minutes.source` 派生，不写盘
+/// 纪要与当前转写稿、会议的关系，按 `Minutes.source` 派生，不写盘。几种同时成立时取排在前面的
 public enum MinutesSync: Hashable, Sendable {
     case inSync
     /// 转写稿被重新转写：句子 id 已不可信，出处改用生成时记下的 `start`。
@@ -8,14 +8,19 @@ public enum MinutesSync: Hashable, Sendable {
     case retranscribed
     /// 转写稿的句子被修改：出处仍有效，内容可能过时。界面提示“转写稿有修改”
     case edited
+    /// 会中标注改过（改了笔记、删了标注）：出处仍有效，「会中标注」一节可能过时。
+    /// 界面提示可以重新生成，不自动重新生成
+    case annotationsChanged
 }
 
 extension Minutes {
-    /// 和当前转写稿比对。`createdAt` 相差 1 秒以内视为同一份：写盘会丢掉小数秒，
-    /// 内存里的转写稿和读回的差不到 1 秒；真正的重新转写间隔远大于此
-    public func sync(with transcript: Transcript) -> MinutesSync {
+    /// 和当前转写稿、会议比对。`createdAt` 相差 1 秒以内视为同一份：写盘会丢掉小数秒，
+    /// 内存里的转写稿和读回的差不到 1 秒；真正的重新转写间隔远大于此。
+    /// 会中标注比对 `annotationsHash`（生成时和现在都没有标注时都是 nil）；`meeting` 为 nil 时不比对标注
+    public func sync(with transcript: Transcript, meeting: Meeting?) -> MinutesSync {
         if abs(source.transcriptCreatedAt.timeIntervalSince(transcript.createdAt)) >= 1 { return .retranscribed }
         if source.textHash != transcript.textHash { return .edited }
+        if let meeting, source.annotationsHash != meeting.annotationsHash { return .annotationsChanged }
         return .inSync
     }
 }

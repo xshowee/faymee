@@ -227,6 +227,33 @@ private final class Fixture {
         #expect(f.store.loadAll().first?.minutes == MinutesState(status: .done))
     }
 
+    /// 开始生成时从会议和转写稿快照算出标注区间：标记在 100 秒，区间 40–115 秒里只有 s2
+    @Test func 按开始生成时会议上的会中标注展开并记下标注哈希() async throws {
+        let f = Fixture()
+        var m = f.addMeeting()
+        m.segments = [Segment(file: "0001.caf", startedAt: t0, sampleRate: 48000, channels: 1,
+                              device: "MacBook Pro 麦克风", deviceUID: "BuiltIn", offset: 0, duration: 600)]
+        m.addMark(at: at(100))
+        f.host.meetings["m1"] = m
+        try f.store.save(m)
+        f.engine.respond = { prompt in
+            prompt.contains("标记前后的一段") ? #"{"text": "展开了这段", "refs": ["s2"]}"# : oneOverview
+        }
+
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        let annotations = try #require(minutes.sections.first { $0.kind == .annotations })
+        #expect(annotations.items.map(\.text) == ["展开了这段"])
+        #expect(annotations.items.map { $0.refs.map(\.id) } == [["s2"]])
+        #expect(annotations.items.map(\.annotationIDs) == [["a1"]])
+        #expect(minutes.source.annotationsHash == m.annotationsHash)
+        let transcript = try #require(try f.store.loadTranscript("m1"))
+        #expect(minutes.sync(with: transcript, meeting: f.host.meetings["m1"]) == .inSync)
+        #expect(f.engine.prompts.first?.contains("★") == true)
+    }
+
     @Test func 生成失败时保留旧纪要并记下原因() async throws {
         let f = Fixture()
         f.addMeeting()
@@ -902,7 +929,7 @@ private final class Fixture {
         let minutes = try #require(try f.store.loadMinutes("m1"))
         let transcript = try #require(try f.store.loadTranscript("m1"))
         #expect(transcript.sentences.map(\.text) == ["重新转写出来的一句话，内容足够长"])
-        #expect(minutes.sync(with: transcript) == .inSync)
+        #expect(minutes.sync(with: transcript, meeting: nil) == .inSync)
     }
 
     // MARK: - 转写完成后纪要的去向（决定转写通知）

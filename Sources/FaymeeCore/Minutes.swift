@@ -84,13 +84,18 @@ public struct MinutesSource: Codable, Hashable, Sendable {
     public var textHash: String
     /// 对应 `Transcript.speakersCreatedAt`，生成时没区分过说话人为 nil（不写）。
     /// 与当前转写稿不同说明重新区分过，说话人编号已重排：负责人的说话人关联、姓名建议都失效。
-    /// 不影响同步状态（`sync(with:)`）
+    /// 不影响同步状态（`sync(with:meeting:)`）
     public var speakersCreatedAt: Date?
+    /// 对应 `Meeting.annotationsHash`，生成时会议没有会中标注为 nil（不写）。
+    /// 与当前会议不同说明标注改过（改了笔记、删了标注），见 `sync(with:meeting:)`
+    public var annotationsHash: String?
 
-    public init(transcriptCreatedAt: Date, textHash: String, speakersCreatedAt: Date? = nil) {
+    public init(transcriptCreatedAt: Date, textHash: String, speakersCreatedAt: Date? = nil,
+                annotationsHash: String? = nil) {
         self.transcriptCreatedAt = transcriptCreatedAt
         self.textHash = textHash
         self.speakersCreatedAt = speakersCreatedAt
+        self.annotationsHash = annotationsHash
     }
 }
 
@@ -108,11 +113,13 @@ public struct MinutesRef: Codable, Hashable, Sendable {
 
 public enum MinutesSectionKind: Hashable, Sendable {
     case overview, decisions, actions, questions
+    /// 「会中标注」：生成时会议有会中标注才有，位于概要之后，不属于任何模板
+    case annotations
     /// 模板额外定义的节，用 key 区分，如 "commitments"
     case custom(String)
 }
 
-/// 纪要的一节。文件中 `kind` 为 overview/decisions/actions/questions/custom，只有 custom 带 `key`
+/// 纪要的一节。文件中 `kind` 为 overview/decisions/actions/questions/annotations/custom，只有 custom 带 `key`
 public struct MinutesSection: Codable, Hashable, Sendable {
     public var kind: MinutesSectionKind
     public var title: String
@@ -124,7 +131,7 @@ public struct MinutesSection: Codable, Hashable, Sendable {
         self.items = items
     }
 
-    private enum Kind: String, Codable { case overview, decisions, actions, questions, custom }
+    private enum Kind: String, Codable { case overview, decisions, actions, questions, annotations, custom }
     private enum CodingKeys: String, CodingKey { case kind, key, title, items }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +141,7 @@ public struct MinutesSection: Codable, Hashable, Sendable {
         case .decisions: kind = .decisions
         case .actions: kind = .actions
         case .questions: kind = .questions
+        case .annotations: kind = .annotations
         case .custom: kind = .custom(try c.decode(String.self, forKey: .key))
         }
         title = try c.decode(String.self, forKey: .title)
@@ -147,6 +155,7 @@ public struct MinutesSection: Codable, Hashable, Sendable {
         case .decisions: try c.encode(Kind.decisions, forKey: .kind)
         case .actions: try c.encode(Kind.actions, forKey: .kind)
         case .questions: try c.encode(Kind.questions, forKey: .kind)
+        case .annotations: try c.encode(Kind.annotations, forKey: .kind)
         case let .custom(key):
             try c.encode(Kind.custom, forKey: .kind)
             try c.encode(key, forKey: .key)
@@ -164,6 +173,9 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
         case model
         /// 用户手动新增，没有出处
         case manual
+        /// 笔记原话：「会中标注」里没有扩写的笔记（附近没有转写稿，或扩写失败），文字就是笔记原文，没有出处，
+        /// 不算“未找到出处”。文件中为 "note"
+        case note
     }
 
     /// 第一次人工修改时保存的模型原文，“恢复原文”就是把它写回去
@@ -202,10 +214,15 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
     public var original: Original?
     /// 删除只做标记，方便撤销和统计修改数
     public var deleted: Bool
+    /// 「会中标注」的条目关联的标注 id（合并的标记有多个，笔记只有一个），其他节的条目为 nil。
+    /// 文件中键为 `annotations`，没有时不写。人工修改不动它
+    public var annotationIDs: [String]?
+    /// 笔记条目的笔记原话（生成时的笔记文字），其他条目为 nil。文件中键为 `note`，没有时不写。人工修改不动它
+    public var note: String?
 
     public init(id: String, text: String, owner: String? = nil, due: String? = nil, dueDate: CalendarDate? = nil,
                 ownerSpeaker: String? = nil, refs: [MinutesRef], origin: Origin = .model, original: Original? = nil,
-                deleted: Bool = false) {
+                deleted: Bool = false, annotationIDs: [String]? = nil, note: String? = nil) {
         self.id = id
         self.text = text
         self.owner = owner
@@ -216,14 +233,17 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
         self.origin = origin
         self.original = original
         self.deleted = deleted
+        self.annotationIDs = annotationIDs
+        self.note = note
     }
 
     /// “未找到出处”：模型给的出处在转写稿里都找不到。条目保留，由用户判断是否删除。
-    /// 手动添加的条目本来就没有出处，不算
+    /// 手动添加的条目、笔记原话本来就没有出处，不算
     public var isUnsourced: Bool { origin == .model && refs.isEmpty }
 
     fileprivate enum CodingKeys: String, CodingKey {
         case id, text, owner, due, dueDate, ownerSpeaker, refs, origin, original, deleted
+        case annotationIDs = "annotations", note
     }
 
     public init(from decoder: Decoder) throws {
@@ -238,6 +258,8 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
         origin = try c.decode(Origin.self, forKey: .origin)
         original = try c.decodeIfPresent(Original.self, forKey: .original)
         deleted = try c.decode(Bool.self, forKey: .deleted)
+        annotationIDs = try c.decodeIfPresent([String].self, forKey: .annotationIDs)
+        note = try c.decodeIfPresent(String.self, forKey: .note)
     }
 }
 
@@ -264,6 +286,8 @@ private struct ItemEncoding: Encodable {
             try c.encodeNil(forKey: .original)
         }
         try c.encode(item.deleted, forKey: .deleted)
+        try c.encodeIfPresent(item.annotationIDs, forKey: .annotationIDs)
+        try c.encodeIfPresent(item.note, forKey: .note)
     }
 }
 

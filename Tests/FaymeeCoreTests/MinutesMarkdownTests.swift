@@ -54,6 +54,64 @@ private let example = minutes([
         """)
     }
 
+    /// spec「纪要数据」：「会中标注」一节和其他节同样写出，笔记条目后面附“（笔记：原话）”；
+    /// 未扩写的笔记照常写原话，不重复附；改过文字的未扩写笔记附上原话
+    @Test func 会中标注一节在概要之后_笔记条目附原话() {
+        let m = minutes([
+            MinutesSection(kind: .overview, title: "概要", items: [
+                MinutesItem(id: "o1", text: "讨论了发布时间", refs: [ref(760)]),
+            ]),
+            MinutesSection(kind: .annotations, title: "会中标注", items: [
+                MinutesItem(id: "n1", text: "确定 v2.3 推迟一周，等支付接口联调完成", refs: [ref(722), ref(741)],
+                            annotationIDs: ["a1", "a2"]),
+                MinutesItem(id: "n2", text: "预算由老王在周五前确认", refs: [ref(903)],
+                            annotationIDs: ["a3"], note: "预算 → 老王确认"),
+                MinutesItem(id: "n3", text: "散会后找法务", refs: [], origin: .note,
+                            annotationIDs: ["a4"], note: "散会后找法务"),
+                MinutesItem(id: "n4", text: "海外版要单独报价", refs: [], origin: .note,
+                            original: MinutesItem.Original(text: "海外 单独报"),
+                            annotationIDs: ["a5"], note: "海外 单独报"),
+                MinutesItem(id: "n5", text: "删掉的", refs: [ref(1000)], deleted: true,
+                            annotationIDs: ["a6"], note: "误记"),
+            ]),
+            MinutesSection(kind: .decisions, title: "决议", items: [
+                MinutesItem(id: "d1", text: "v2.3 推迟到 11 月 24 日发布", refs: [ref(902)]),
+            ]),
+        ])
+        #expect(m.markdown(meeting: meeting(), timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00，52 分钟）
+
+        ## 概要
+        - 讨论了发布时间（12:40）
+
+        ## 会中标注
+        - 确定 v2.3 推迟一周，等支付接口联调完成（12:02、12:21）
+        - 预算由老王在周五前确认（15:03）（笔记：预算 → 老王确认）
+        - 散会后找法务
+        - 海外版要单独报价（笔记：海外 单独报）
+
+        ## 决议
+        - v2.3 推迟到 11 月 24 日发布（15:02）
+
+        """)
+    }
+
+    @Test func 笔记原话里的换行换成空格() {
+        let m = minutes([
+            MinutesSection(kind: .annotations, title: "会中标注", items: [
+                MinutesItem(id: "n1", text: "预算由老王确认", refs: [ref(903)], annotationIDs: ["a1"],
+                            note: "预算\n老王 "),
+            ]),
+        ])
+        #expect(m.markdown(meeting: meeting(duration: nil), timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 会中标注
+        - 预算由老王确认（15:03）（笔记：预算 老王）
+
+        """)
+    }
+
     @Test func 已删除的不导出_手动添加和未找到出处的照常导出且不带标记() {
         let m = minutes([
             MinutesSection(kind: .overview, title: "概要", items: [
@@ -158,6 +216,41 @@ private let example = minutes([
         [10:00] 合盖，未录到声音（10:00–13:00，03:00）
 
         [1:02:05] 好，今天就到这里
+
+        """)
+    }
+
+    /// 导出转写稿时笔记和复制全文一样插成一行（单独一段），标记不写；笔记里的换行换成空格
+    @Test func 附上转写稿全文_笔记按录音里的时间单独一段() {
+        // 两个分片，中间 100 秒没录到：墙钟 400 秒起是录音 300 秒起
+        let segments = [(0.0, 0.0, 300.0), (400, 300, 600)].enumerated().map { i, s in
+            Segment(file: "000\(i + 1).caf", startedAt: start.addingTimeInterval(s.0), sampleRate: 48000, channels: 1,
+                    device: "MacBook Pro 麦克风", deviceUID: "BuiltIn", offset: s.1, duration: s.2)
+        }
+        var mt = meeting(duration: nil)
+        mt.segments = segments
+        mt.annotations = [
+            Annotation(id: "a1", at: start.addingTimeInterval(100), kind: .mark),
+            Annotation(id: "a2", at: start.addingTimeInterval(460), kind: .note, text: "预算\n老王确认"),
+        ]
+        let transcript = Transcript(engine: "fake", createdAt: start, hotwords: [], items: [
+            .sentence(TranscriptSentence(id: "s1", start: 5, end: 9, text: "我们先过一下上周的待办")),
+            .sentence(TranscriptSentence(id: "s2", start: 355, end: 362, text: "预算老王周五前给")),
+            .sentence(TranscriptSentence(id: "s3", start: 370, end: 375, text: "好")),
+        ])
+        #expect(minutes([]).markdown(meeting: mt, transcript: transcript, attachingTranscript: true,
+                                     timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 转写稿
+
+        [00:05] 我们先过一下上周的待办
+
+        [05:55] 预算老王周五前给
+
+        [06:00] 笔记：预算 老王确认
+
+        [06:10] 好
 
         """)
     }

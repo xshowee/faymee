@@ -89,20 +89,30 @@ func inputLine(_ item: TranscriptItem) -> String {
     }
 }
 
-/// `speakers` 不为空（转写稿显示说话人）时说明行里的说话人标签，负责人可以填说话人；
-/// 还有未命名的说话人时多要一项“说话人身份”。没有说话人时与 v0.3 逐字相同
-func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil) -> String {
-    let speakers = speakers?.isEmpty == false ? speakers : nil
-    let format = speakers == nil
+/// 说明转写稿每行的格式。`speakers` 为 nil 时不带说话人
+private func lineFormat(_ speakers: SpeakerLabels?) -> String {
+    speakers == nil
         ? "转写稿每行一句，格式为“[句子编号 时间] 内容”，例如“[s12 03:15] 我们下周发布”。"
         : "转写稿每行一句，格式为“[句子编号 时间 说话人] 内容”，例如“[s12 03:15 说话人 2] 我们下周发布”。"
             + "说话人由机器按声音区分，“说话人 N”是还不知道名字的人；没标说话人的句子不知道是谁说的。"
+}
+
+/// `speakers` 不为空（转写稿显示说话人）时说明行里的说话人标签，负责人可以填说话人；
+/// 还有未命名的说话人时多要一项“说话人身份”。没有说话人时与 v0.3 逐字相同。
+/// `starred`（输入里有句子带 `★`）时说明 `★` 是会上标的重点；没有时与 v0.4 逐字相同
+func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil,
+                            starred: Bool = false) -> String {
+    let speakers = speakers?.isEmpty == false ? speakers : nil
+    let star = starred
+        ? "\n标签末尾带“★”的句子（如“[s12 03:15 ★]”）落在用户会上标记的重点或记了笔记的地方，"
+            + "与它们相关的决议、待办、未决问题不要漏掉。"
+        : ""
     return """
     你是会议纪要助手。根据用户给出的会议转写稿，提取会议纪要。
 
-    \(format)\
+    \(lineFormat(speakers))\
     转写稿由语音识别生成，可能有错别字和口语重复，请按意思理解。
-    “[合盖，未录到声音 …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。
+    “[合盖，未录到声音 …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。\(star)
 
     要求：
     - 只写转写稿里确实说到的内容，不要编造，不要补充常识或猜测。
@@ -285,3 +295,55 @@ func outputGrammar(_ kinds: [MinutesSectionKind], speakers: [String] = []) -> St
     ws ::= [ \n]?
     """# + speakerRules
 }
+
+/// 展开一个会中标注区间的系统提示：标记详细说明这段讲了什么、结论是什么，笔记结合附近的对话扩写成一句完整的话
+func expansionSystemPrompt(_ kind: AnnotationKind, speakers: SpeakerLabels? = nil) -> String {
+    let speakers = speakers?.isEmpty == false ? speakers : nil
+    let (task, rules) = switch kind {
+    case .mark:
+        ("用户在会上标记了一段重点，下面给出标记前后这段时间的会议转写稿。请把这段写成一条纪要。",
+         "- 详细说明这段讲了什么、结论是什么：提出了什么、讨论了哪些要点、最后怎么定的；没有定下来的写明还没定。"
+            + "比普通的纪要条目写得详细，但只写一段话。")
+    case .note:
+        ("用户在会上随手记了一条笔记，下面给出笔记原话和记笔记前后这段时间的会议转写稿。"
+            + "请结合附近的对话，把这条笔记扩写成一句完整的话。",
+         "- 保留笔记的原意，用附近的对话补全笔记省略的人、事和结论；笔记里的箭头、缩写按对话的意思理解。"
+            + "只写一句话。")
+    }
+    return """
+    你是会议纪要助手。\(task)
+
+    \(lineFormat(speakers))\
+    转写稿由语音识别生成，可能有错别字和口语重复，请按意思理解。
+
+    要求：
+    \(rules)
+    - 只写转写稿里确实说到的内容，不要编造，不要补充常识或猜测。
+    - refs 里列出最直接支撑这条内容的 1–3 个句子编号（如 "s12"），只能用转写稿里出现过的编号。
+    - 用简体中文书写。
+
+    只输出一个 JSON 对象，不要输出其他文字。格式如下：
+    {"text": "…", "refs": ["s12", "s15"]}
+    """
+}
+
+/// 展开一个区间的提示词：会议标题、笔记原话（只有笔记有）、区间里的句子
+func expansionPrompt(title: String, kind: AnnotationKind, note: String?, lines: [String]) -> String {
+    let noteLine = note.map { "笔记原话：\($0)\n\n" } ?? ""
+    return """
+    会议标题：\(title)
+
+    \(noteLine)转写稿（\(kind == .mark ? "标记" : "笔记")前后的一段）：
+    \(lines.joined(separator: "\n"))
+    """
+}
+
+/// 展开的输出文法：一个对象，依次是 text、refs，refs 是 1–3 个句子编号。
+/// 规则的写法同 `outputGrammar`
+let expansionGrammar = #"""
+root ::= "{" ws "\"text\":" ws string "," ws "\"refs\":" ws refs ws "}"
+refs ::= "[" ws ref ( "," ws ref ( "," ws ref )? )? ws "]"
+ref ::= "\"" [A-Za-z0-9_-]+ "\""
+string ::= "\"" ( [^"\\\x00-\x1f] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) )* "\""
+ws ::= [ \n]?
+"""#

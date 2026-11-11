@@ -19,7 +19,7 @@ public final class SpeechAnalyzerTranscriber: Transcriber {
     public init() {}
 
     public func prepare(progress: @escaping (Double) -> Void) async throws {
-        let module = try await makeModule()
+        let module = try await Self.makeModule()
         // 已装好时返回 nil。不能用 AssetInventory.status 判断：资源装好但本 App 未登记过时它也报 .supported
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [module]) {
             let observation = request.progress.observe(\.fractionCompleted, options: [.initial]) { p, _ in
@@ -37,7 +37,7 @@ public final class SpeechAnalyzerTranscriber: Transcriber {
 
     public func transcribe(audio: URL, hotwords: [String],
                            progress: @escaping (Double) -> Void) async throws -> [TranscribedSentence] {
-        let module = try await makeModule()
+        let module = try await Self.makeModule()
         let file = try AVAudioFile(forReading: audio)
         let length = Double(file.length) / file.processingFormat.sampleRate
 
@@ -66,12 +66,13 @@ public final class SpeechAnalyzerTranscriber: Transcriber {
         return sentences
     }
 
-    private func makeModule() async throws -> SpeechTranscriber {
+    /// 会后转写只要最终结果和逐字时间：不要中间结果，也不要候选。实时字幕另加临时结果，模型是同一份
+    static func makeModule(reportingOptions: Set<SpeechTranscriber.ReportingOption> = []) async throws
+        -> SpeechTranscriber {
         guard SpeechTranscriber.isAvailable else { throw SpeechAnalyzerTranscriberError.unavailable }
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "zh-CN"))
         else { throw SpeechAnalyzerTranscriberError.unsupportedLocale }
-        // 只要最终结果和逐字时间：不要中间结果，也不要候选
-        return SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [],
+        return SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: reportingOptions,
                                  attributeOptions: [.audioTimeRange])
     }
 

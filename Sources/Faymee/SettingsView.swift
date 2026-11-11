@@ -2,7 +2,7 @@ import AppKit
 import FaymeeCore
 import SwiftUI
 
-/// 设置窗口：区分说话人开关、声纹管理入口、纪要的自动生成开关、本机模型的下载与删除
+/// 设置窗口：全局快捷键和实时字幕开关、区分说话人开关、声纹管理入口、纪要的自动生成开关、本机模型的下载与删除
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -14,6 +14,20 @@ struct SettingsView: View {
         let downloader = model.modelDownloader
 
         Form {
+            Section("录音") {
+                Toggle("全局快捷键", isOn: $model.globalShortcutsEnabled)
+                Text("录音时在任何 App 里按 \(LiveShortcut.mark.label) 标记重点、\(LiveShortcut.note.label) 记一笔。只在录音期间生效，不录音时不占用这两个组合键")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Toggle("实时字幕", isOn: $model.liveCaptionsEnabled)
+                Text("录音时在会中面板里显示正在说的话，全程在本机识别、不存盘，只在面板看得见时运行。关闭后面板只显示标注和笔记输入框；会后照常转写")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("转写") {
                 Toggle("区分说话人", isOn: $model.diarizeSpeakers)
                 Text("转写时在本机区分谁在说话。关闭后只转写文字，更快；之后可以在会议里单独补上")
@@ -74,7 +88,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         // grouped Form 自带滚动，不给高度会被压扁；内容最多时（已就绪 + 删除说明 + 错误）也放得下
-        .frame(width: 480, height: 580)
+        .frame(width: 480, height: 730)
         .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
             Button("删除模型", role: .destructive) {
                 Task {

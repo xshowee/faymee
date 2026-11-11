@@ -35,6 +35,13 @@ extension MinutesItem {
         guard let phrase else { return dueDate.displayText(meetingStartedAt: meetingStartedAt, timeZone: timeZone) }
         return "\(phrase)（\(dueDate.dayText(meetingStartedAt: meetingStartedAt, timeZone: timeZone))，\(dueDate.weekdayText)）"
     }
+
+    /// 「会中标注」笔记条目要附上的笔记原话（一行），界面显示和导出 Markdown 共用。
+    /// 未扩写的条目文字就是原话，不重复；改过文字后照样附上。不是笔记条目时为 nil
+    public var displayedNote: String? {
+        guard let note = note?.singleLine, note != text.singleLine else { return nil }
+        return note
+    }
 }
 
 extension MinutesSection {
@@ -49,6 +56,7 @@ extension MinutesSync {
         case .inSync: nil
         case .retranscribed: "转写稿已重新生成，纪要的出处可能不准确"
         case .edited: "转写稿有修改"
+        case .annotationsChanged: "会中标注有改动，可以重新生成纪要"
         }
     }
 }
@@ -81,33 +89,38 @@ extension MinutesRef {
     }
 }
 
-/// 一份纪要对当前转写稿的同步状态和出处解析，详情页每次渲染都要用。
+/// 一份纪要对当前转写稿、会议的同步状态和出处解析，详情页每次渲染都要用。
 /// 同步状态要对整份转写稿算一次 SHA-256（`textHash`），句子索引也要遍历整份转写稿，
-/// 所以只在纪要的 `source` 或转写稿变了时重建（见 `updated`），不随每次渲染重算
+/// 所以只在纪要的 `source`、转写稿或会议的会中标注变了时重建（见 `updated`），不随每次渲染重算
 public struct MinutesRefResolver: Sendable {
     /// 没有纪要或转写稿时为 `.inSync`
     public let sync: MinutesSync
     private let source: MinutesSource?
     private var transcript: Transcript?
+    /// 建它时会议的 `annotationsHash`；会议为 nil 时不比对
+    private let annotationsHash: String??
     private let locator: TranscriptRefLocator?
 
-    public init(minutes: Minutes?, transcript: Transcript?) {
-        sync = minutes.flatMap { m in transcript.map { m.sync(with: $0) } } ?? .inSync
+    /// - Parameter meeting: 纪要所属的会议，用来判断“会中标注有改动”；nil 时不判断
+    public init(minutes: Minutes?, transcript: Transcript?, meeting: Meeting?) {
+        sync = minutes.flatMap { m in transcript.map { m.sync(with: $0, meeting: meeting) } } ?? .inSync
         source = minutes?.source
         self.transcript = transcript
+        annotationsHash = meeting.map(\.annotationsHash)
         locator = transcript.map(TranscriptRefLocator.init)
     }
 
-    /// 是否仍对应这份纪要和转写稿：同步状态只取决于纪要的 `source`，改条目不用重建
-    public func isCurrent(minutes: Minutes?, transcript: Transcript?) -> Bool {
-        minutes?.source == source && transcript == self.transcript
+    /// 是否仍对应这份纪要、转写稿和会议的标注：同步状态只取决于纪要的 `source`，改条目、改会议的其他字段不用重建
+    public func isCurrent(minutes: Minutes?, transcript: Transcript?, meeting: Meeting?) -> Bool {
+        minutes?.source == source && meeting.map(\.annotationsHash) == annotationsHash
+            && transcript == self.transcript
     }
 
-    /// 仍对应这份纪要和转写稿时沿用自己，否则重建。沿用时记下新传进来的转写稿：
+    /// 仍对应这份纪要、转写稿和会议的标注时沿用自己，否则重建。沿用时记下新传进来的转写稿：
     /// 内容相同、存储不同（如从磁盘重读）的转写稿只逐句比这一次，之后比较走数组共用存储的快速路径
-    public func updated(minutes: Minutes?, transcript: Transcript?) -> MinutesRefResolver {
-        guard isCurrent(minutes: minutes, transcript: transcript) else {
-            return MinutesRefResolver(minutes: minutes, transcript: transcript)
+    public func updated(minutes: Minutes?, transcript: Transcript?, meeting: Meeting?) -> MinutesRefResolver {
+        guard isCurrent(minutes: minutes, transcript: transcript, meeting: meeting) else {
+            return MinutesRefResolver(minutes: minutes, transcript: transcript, meeting: meeting)
         }
         var resolver = self
         resolver.transcript = transcript

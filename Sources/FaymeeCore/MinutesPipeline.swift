@@ -249,7 +249,8 @@ public final class MinutesPipeline {
         activity = .loading(0)
         isLoaded = true
         host?.setMinutes(MinutesState(status: .running), for: job.id)
-        // 以开始时的转写稿为准。从磁盘读：与之后读回比较的值一致，不受小数秒影响
+        // 以开始时的转写稿为准。从磁盘读：与之后读回比较的值一致，不受小数秒影响。
+        // 会中标注以开始时宿主里的会议为准（`m`），和转写稿快照一起算出区间
         let snapshot = Result { try store.loadTranscript(job.id) }
 
         // 进度回调来自后台线程，回到主线程再更新
@@ -271,7 +272,7 @@ public final class MinutesPipeline {
                 let createdAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
                 result = .success(try await generateMinutes(
                     transcript: transcript, title: m.title, startedAt: m.startedAt, template: job.template,
-                    generator: generator, model: model, createdAt: createdAt,
+                    annotations: m.minutesAnnotations(in: transcript), generator: generator, model: model, createdAt: createdAt,
                     progress: { report(.generating($0)) }))
             } catch {
                 result = .failure(error)

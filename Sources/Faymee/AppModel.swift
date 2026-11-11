@@ -17,7 +17,10 @@ final class AppModel {
         didSet { syncTranscriptionSuspension() }
     }
     private(set) var current: Meeting? {
-        didSet { syncTranscriptionSuspension() }
+        didSet {
+            syncTranscriptionSuspension()
+            syncHotkeys()
+        }
     }
     private(set) var elapsed: TimeInterval = 0
     private(set) var levelDB: Float = -160
@@ -101,6 +104,48 @@ final class AppModel {
         }
     }
 
+    /// “全局快捷键”开关，记在 UserDefaults，默认打开。录音中修改立即注册或注销。设置窗口里绑定它
+    var globalShortcutsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(globalShortcutsEnabled, forKey: "globalShortcuts")
+            syncHotkeys()
+        }
+    }
+    /// 本次录音没注册上的全局快捷键（被其他 App 占用），菜单栏面板里说明。没在注册时为空
+    private(set) var shortcutConflicts: [LiveShortcut] = []
+    /// 刚标记了重点：菜单栏图标换成旗子约 2 秒（见 `MenuBarIndicator`）
+    private(set) var showsMarkFlag = false
+    @ObservationIgnored private let hotkeys = GlobalHotkeys()
+    @ObservationIgnored private var markFlagReset: Task<Void, Never>?
+    /// 启动就建好：它要一直记着最近在前台的别的 App，记完一笔把焦点还回去
+    @ObservationIgnored private let noteInput = NoteInputController()
+
+    /// “实时字幕”开关，记在 UserDefaults，默认打开。关闭时会中面板只显示标注和输入框，不跑引擎；
+    /// 录音中修改立即生效。设置窗口里绑定它
+    var liveCaptionsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(liveCaptionsEnabled, forKey: "liveCaptions")
+            livePanel.captionsEnabled = liveCaptionsEnabled
+        }
+    }
+    /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
+    private(set) var liveCaptions: LiveCaptions? {
+        didSet {
+            recorder.liveTap = liveCaptions?.tap
+            livePanel.captions = liveCaptions
+        }
+    }
+    @ObservationIgnored private lazy var livePanel: LivePanelController = {
+        let panel = LivePanelController(model: self)
+        panel.captionsEnabled = liveCaptionsEnabled
+        return panel
+    }()
+    /// 录音开始时是否自动打开会中面板：记住上次录音结束时面板开没开，默认不开（投屏时不突然出现）
+    private var opensLivePanelOnStart: Bool {
+        get { UserDefaults.standard.bool(forKey: "livePanelOpensOnStart") }
+        set { UserDefaults.standard.set(newValue, forKey: "livePanelOpensOnStart") }
+    }
+
     /// “区分说话人”开关，记在 UserDefaults，默认打开。关闭时完整转写跳过区分说话人；
     /// 只影响之后开始的转写。设置窗口里绑定它
     var diarizeSpeakers: Bool {
@@ -145,6 +190,10 @@ final class AppModel {
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
         diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
+        globalShortcutsEnabled = UserDefaults.standard.object(forKey: "globalShortcuts") as? Bool ?? true
+        liveCaptionsEnabled = UserDefaults.standard.object(forKey: "liveCaptions") as? Bool ?? true
+        hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
+        noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
         meetings = store.loadAll()
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
@@ -218,10 +267,16 @@ final class AppModel {
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+        startLiveCaptions()
     }
 
     func stop() {
+        guard current != nil else { return }
+        // 先收下正在输入的笔记：下面停止录音会用此刻的会议覆盖写盘
+        noteInput.saveIfOpen()
+        livePanel.saveDraft()
         guard var m = current else { return }
+        stopLiveCaptions()
         recorder.stop()
         timer?.invalidate()
         timer = nil
@@ -328,6 +383,100 @@ final class AppModel {
         let desired = recorder.deviceResolver?() ?? AudioDevices.defaultInput()
         if let desired, desired.uid != recorder.currentDevice?.uid {
             recorder.restart()
+        }
+    }
+
+    // MARK: - 会中面板、实时字幕
+
+    /// 打开会中面板（菜单栏面板的“会中面板”）。不在录音时什么也不做
+    func showLivePanel() {
+        guard isRecording else { return }
+        livePanel.show()
+    }
+
+    /// 录音开始：建好本场的实时字幕（面板第一次看得见时才准备模型），按上次的状态决定是否打开面板
+    private func startLiveCaptions() {
+        guard let m = current else { return }
+        liveCaptions = LiveCaptions(engine: LiveCaptionEngine.make(), recordingStartedAt: m.startedAt,
+                                    hotwords: hotwords)
+        if opensLivePanelOnStart { livePanel.show() }
+    }
+
+    /// 录音停止：记下面板开没开（下次录音照样），关掉面板，字幕随之丢弃
+    private func stopLiveCaptions() {
+        opensLivePanelOnStart = livePanel.isOpen
+        livePanel.close()
+        liveCaptions = nil
+    }
+
+    // MARK: - 会中标注
+
+    /// 录音中标记重点（时刻取现在），立即写盘，菜单栏图标闪一下旗子。不在录音时什么也不做，返回 nil。
+    /// 快捷键、菜单栏面板、会中面板的“标记重点”都走这里
+    @discardableResult
+    func addMark() -> Annotation? {
+        // 标注加在这份 current 上再保存：录音器也在改同一个会议（分片、合盖空白），不能另读一份写回
+        guard var m = current else { return nil }
+        let mark = m.addMark(at: Date())
+        update(m)
+        showsMarkFlag = true
+        markFlagReset?.cancel()
+        markFlagReset = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.showsMarkFlag = false
+        }
+        return mark
+    }
+
+    /// 录音中记一笔，立即写盘。time 由调用方给：输入框弹出的时刻，不是回车的时刻。
+    /// 文字规整后为空、或不在录音时不记，返回 nil。记一笔的输入框、会中面板的输入框都走这里
+    @discardableResult
+    func addNote(_ text: String, at time: Date) -> Annotation? {
+        guard var m = current, let note = m.addNote(text, at: time) else { return nil }
+        update(m)
+        return note
+    }
+
+    /// 会后修改笔记的文字（转写稿里笔记行的“修改笔记…”）。规整后为空或没变时不改、不写盘。
+    /// 改动后纪要按标注哈希提示“会中标注有改动”
+    func editNote(_ annotationID: String, to text: String, in meetingID: String) {
+        guard var m = meeting(meetingID), m.editNote(annotationID, to: text) else { return }
+        update(m)
+    }
+
+    /// 会后删除一条标记或笔记（转写稿里旗子、笔记行的右键菜单）
+    func deleteAnnotation(_ annotationID: String, in meetingID: String) {
+        guard var m = meeting(meetingID), m.deleteAnnotation(annotationID) else { return }
+        update(m)
+    }
+
+    /// 弹出记一笔的输入框（快捷键 ⌃⌥N、菜单栏面板的“记一笔”）。已经开着时只调到前面
+    func beginNote() {
+        guard let m = current else { return }
+        noteInput.show(stamp: formatDuration(Date().timeIntervalSince(m.startedAt)))
+    }
+
+    private func shortcutPressed(_ shortcut: LiveShortcut) {
+        guard isRecording else { return }
+        switch shortcut {
+        case .mark: addMark()
+        case .note: beginNote()
+        }
+    }
+
+    /// 全局快捷键只在录音期间、开关打开时注册。由 current 和开关的 didSet 调用，重复调用不会重复注册
+    private func syncHotkeys() {
+        let wanted = isRecording && globalShortcutsEnabled
+        if wanted, !hotkeys.isRegistered {
+            shortcutConflicts = hotkeys.register()
+        } else if !wanted, hotkeys.isRegistered {
+            hotkeys.unregister()
+            shortcutConflicts = []
+        }
+        if !isRecording, showsMarkFlag {
+            markFlagReset?.cancel()
+            showsMarkFlag = false
         }
     }
 

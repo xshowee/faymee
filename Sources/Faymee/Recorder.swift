@@ -19,6 +19,7 @@ enum RecorderError: LocalizedError {
 /// - 分片用 16 位 PCM 的 CAF：进程被强杀后文件仍可读（已验证），不像 m4a 那样缺 moov 就整段报废。
 /// - 输入设备变化（插拔麦克风、蓝牙耳机连上）时 AVAudioEngine 会静默停止，
 ///   这里监听配置变化并重建引擎，从新分片继续录。
+/// - 设了 `liveTap` 时，每块音频写盘之后再交一份给实时字幕（分路自己拷贝、限长，不阻塞采集线程）。
 /// - 回调都在主线程触发。
 final class Recorder {
     static let segmentSeconds: Double = 60
@@ -47,6 +48,13 @@ final class Recorder {
     private var writeFailed = false
     private var segmentDevice = (name: "未知设备", uid: String?.none)
     private var lastBufferAt = Date.distantPast
+    private var tap: LiveAudioTap?
+
+    /// 实时字幕的音频分路。重建采集（切换麦克风）后照常往同一个分路送，格式变化由实时字幕自己处理
+    var liveTap: LiveAudioTap? {
+        get { lock.withLock { tap } }
+        set { lock.withLock { tap = newValue } }
+    }
 
     var isRunning: Bool { lock.withLock { directory != nil } }
 
@@ -212,7 +220,11 @@ final class Recorder {
                 }
             }
         }
+        let tap = tap
         lock.unlock()
+
+        // 写盘之后再分给实时字幕，分路出什么问题都不影响录音
+        tap?.push(buffer, at: Date())
 
         let onLevel = onLevel, onSegment = onSegment, onError = onError
         DispatchQueue.main.async {

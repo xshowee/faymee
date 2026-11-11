@@ -6,3 +6,8 @@ enum TranscriptionEngine {
         (SpeechAnalyzerTranscriber(), "apple/speechanalyzer")
     }
 }
+
+/// 实时字幕用哪个流式转写引擎。换引擎只改这里
+enum LiveCaptionEngine {
+    static func make() -> any StreamingTranscriber { SpeechAnalyzerStreamingTranscriber() }
+}

@@ -6,16 +6,18 @@ struct MenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        let indicator = MenuBarIndicator(isRecording: model.isRecording,
+                                         hasWarning: model.isSilent || model.hasRecordingError || model.isLidGapOpen,
+                                         showsMarkFlag: model.showsMarkFlag)
         Group {
             if model.isRecording {
                 HStack(spacing: 4) {
-                    Image(systemName: model.isSilent || model.hasRecordingError || model.isLidGapOpen
-                          ? "exclamationmark.triangle.fill" : "record.circle.fill")
+                    Image(systemName: indicator.symbolName)
                     Text(formatDuration(model.elapsed))
                         .monospacedDigit()
                 }
             } else {
-                Image(systemName: "waveform")
+                Image(systemName: indicator.symbolName)
             }
         }
         // 点了“生成纪要需要先下载模型”的通知：打开设置里的模型下载。菜单栏图标 App 启动就在，
@@ -123,6 +125,8 @@ struct MenuContent: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
 
+        annotationButtons
+
         if SystemState.isLidClosed != true {
             Button {
                 SystemState.sleepDisplay()
@@ -149,6 +153,58 @@ struct MenuContent: View {
         .buttonStyle(.borderedProminent)
         .tint(.red)
         .controlSize(.large)
+    }
+
+    /// 会中标注的入口：标记重点、记一笔、会中面板。快捷键被占用时说明是哪个，按钮照常可用
+    @ViewBuilder private var annotationButtons: some View {
+        HStack {
+            Button {
+                model.addMark()
+            } label: {
+                Label(LiveShortcut.mark.buttonTitle, systemImage: "flag")
+                    .frame(maxWidth: .infinity)
+            }
+            .help(shortcutHelp(.mark))
+            Button {
+                model.beginNote()
+            } label: {
+                Label(LiveShortcut.note.buttonTitle, systemImage: "square.and.pencil")
+                    .frame(maxWidth: .infinity)
+            }
+            .help(shortcutHelp(.note))
+        }
+        .controlSize(.large)
+
+        Button {
+            model.showLivePanel()
+        } label: {
+            Label("会中面板", systemImage: "captions.bubble")
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .help("实时字幕、标注和笔记输入框")
+
+        if let notice = LiveShortcut.conflictNotice(failed: model.shortcutConflicts) {
+            Text(notice)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func shortcutHelp(_ shortcut: LiveShortcut) -> String {
+        shortcut.buttonHelp(enabled: model.globalShortcutsEnabled, failed: model.shortcutConflicts)
+    }
+}
+
+private extension MenuBarIndicator {
+    var symbolName: String {
+        switch self {
+        case .idle: "waveform"
+        case .recording: "record.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .markFlag: "flag.fill"
+        }
     }
 }
 

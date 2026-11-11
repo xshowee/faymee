@@ -325,4 +325,81 @@ private func date(_ iso: String) -> Date {
         let restored = try #require(try MeetingStore(root: store.root).loadTranscript(m.id))
         #expect(restored.sentences == [.init(id: "s1", start: 0.48, end: 3.2, text: "灰来了")])
     }
+
+    /// v0.4 写出的 meeting.json（逐字）：没有标注的会议读入再保存，文件与 v0.4 逐字节相同
+    @Test func 没有标注时写出的文件与v04相同() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let v04 = """
+        {
+          "diarization" : {
+            "status" : "done"
+          },
+          "duration" : 3540,
+          "endedAt" : "2026-11-10T03:00:00Z",
+          "gaps" : [
+            {
+              "end" : "2026-11-10T02:11:00Z",
+              "reason" : "lidClosed",
+              "start" : "2026-11-10T02:10:00Z"
+            }
+          ],
+          "id" : "2026-11-10_10-00-00",
+          "minutes" : {
+            "status" : "done"
+          },
+          "recording" : "recording.m4a",
+          "segments" : [
+            {
+              "channels" : 1,
+              "device" : "MacBook Pro 麦克风",
+              "deviceUID" : "BuiltIn",
+              "duration" : 3540,
+              "file" : "0001.caf",
+              "offset" : 0,
+              "sampleRate" : 48000,
+              "startedAt" : "2026-11-10T02:00:00Z"
+            }
+          ],
+          "startedAt" : "2026-11-10T02:00:00Z",
+          "status" : "done",
+          "title" : "会议 11月10日 10:00",
+          "transcription" : {
+            "status" : "done"
+          }
+        }
+        """
+        let dir = store.directory("2026-11-10_10-00-00")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("meeting.json")
+        try Data(v04.utf8).write(to: url)
+
+        let loaded = try #require(store.loadAll().first)
+        #expect(loaded.annotationList.isEmpty)
+        try store.save(loaded)
+        #expect(try String(contentsOf: url, encoding: .utf8) == v04)
+    }
+
+    /// 标注时间来自 `Date()`，带小数秒；写盘丢小数秒。创建时就取整秒，存盘读回后会议和哈希都不变
+    @Test func 标注按约定字段写入并能读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        var m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        m.addMark(at: date("2026-11-10T02:05:00Z").addingTimeInterval(0.75))
+        m.addNote("预算 → 老王确认", at: date("2026-11-10T02:06:30Z").addingTimeInterval(0.25))
+        try store.save(m)
+
+        let loaded = try #require(MeetingStore(root: store.root).loadAll().first)
+        #expect(loaded == m)
+        #expect(loaded.annotationsHash == m.annotationsHash)
+
+        let url = store.directory(m.id).appendingPathComponent("meeting.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let annotations = try #require(json["annotations"] as? [[String: Any]])
+        #expect(annotations.count == 2)
+        #expect(annotations[0] as NSDictionary == ["id": "a1", "at": "2026-11-10T02:05:00Z", "kind": "mark"])
+        #expect(annotations[1] as NSDictionary
+            == ["id": "a2", "at": "2026-11-10T02:06:30Z", "kind": "note", "text": "预算 → 老王确认"])
+        #expect(json["lastAnnotationNumber"] as? Int == 2)
+    }
 }

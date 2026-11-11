@@ -174,6 +174,55 @@ private let sample = Minutes(
         #expect(!actions[1].keys.contains("ownerSpeaker"))
     }
 
+    /// v0.5 的会中标注：「会中标注」一节、条目的关联标注和笔记原话、来源“笔记原话”、source 的标注哈希。
+    /// 都可选，没有时不写（v0.4 的形状见 MinutesV04GoldenTests）
+    @Test func 会中标注相关字段按约定写出并能读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        var minutes = sample
+        minutes.source.annotationsHash = "sha256:def"
+        minutes.sections.insert(MinutesSection(kind: .annotations, title: "会中标注", items: [
+            MinutesItem(id: "n1", text: "讨论了发布时间，结论是推迟一周", refs: [MinutesRef(id: "s200", start: 902)],
+                        annotationIDs: ["a1", "a3"]),
+            MinutesItem(id: "n2", text: "预算由老王确认", refs: [MinutesRef(id: "s412", start: 1880.2)],
+                        original: MinutesItem.Original(text: "预算要老王确认"), annotationIDs: ["a2"],
+                        note: "预算 → 老王确认"),
+            MinutesItem(id: "n3", text: "散会后再聊", refs: [], origin: .note, annotationIDs: ["a4"], note: "散会后再聊"),
+        ]), at: 1)
+        try store.saveMinutes(minutes, for: m.id)
+
+        #expect(try store.loadMinutes(m.id) == minutes)
+        let url = store.directory(m.id).appendingPathComponent("minutes.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let source = try #require(json["source"] as? [String: Any])
+        #expect(source["annotationsHash"] as? String == "sha256:def")
+        let sections = try #require(json["sections"] as? [[String: Any]])
+        #expect(sections[1]["kind"] as? String == "annotations")
+        #expect(sections[1]["title"] as? String == "会中标注")
+        #expect(!sections[1].keys.contains("key"))
+        let items = try #require(sections[1]["items"] as? [[String: Any]])
+        #expect(items.map { Set($0.keys) } == [
+            ["id", "text", "refs", "origin", "original", "deleted", "annotations"],
+            ["id", "text", "refs", "origin", "original", "deleted", "annotations", "note"],
+            ["id", "text", "refs", "origin", "original", "deleted", "annotations", "note"],
+        ])
+        #expect(items.map { $0["annotations"] as? [String] } == [["a1", "a3"], ["a2"], ["a4"]])
+        #expect(items.map { $0["note"] as? String } == [nil, "预算 → 老王确认", "散会后再聊"])
+        #expect(items.map { $0["origin"] as? String } == ["model", "model", "note"])
+        #expect((items[1]["original"] as? [String: Any]).map { Set($0.keys) } == ["text"])
+        // 其他节的条目不写这两个字段
+        let overview = try #require(sections[0]["items"] as? [[String: Any]])
+        #expect(!overview[0].keys.contains("annotations"))
+        #expect(!overview[0].keys.contains("note"))
+    }
+
+    /// 笔记原话的条目没有出处，但不是“未找到出处”
+    @Test func 笔记原话的条目不算未找到出处() {
+        #expect(!MinutesItem(id: "n1", text: "散会后再聊", refs: [], origin: .note, note: "散会后再聊").isUnsourced)
+        #expect(MinutesItem(id: "n1", text: "展开", refs: [], annotationIDs: ["a1"]).isUnsourced)
+    }
+
     @Test func 纪要文件损坏时抛错() throws {
         let store = makeStore()
         defer { try? FileManager.default.removeItem(at: store.root) }

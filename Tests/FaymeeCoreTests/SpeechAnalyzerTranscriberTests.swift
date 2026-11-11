@@ -6,7 +6,7 @@ import Testing
 
 /// 契约测试：用一段几秒的真实中文录音跑系统语音识别。
 /// 依赖本机已下载的中文语音资源，不在时跳过（不在测试里下载，避免测试联网、耗时数分钟）
-private func chineseAssetsInstalled() async -> Bool {
+func chineseAssetsInstalled() async -> Bool {
     guard SpeechTranscriber.isAvailable,
           let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "zh-CN"))
     else { return false }
@@ -16,11 +16,11 @@ private func chineseAssetsInstalled() async -> Bool {
     return (try? await AssetInventory.assetInstallationRequest(supporting: [module])) == nil
 }
 
-private func sampleURL() throws -> URL {
+func sampleURL() throws -> URL {
     try #require(Bundle.module.url(forResource: "zh-sample", withExtension: "m4a", subdirectory: "Resources"))
 }
 
-private func duration(of url: URL) throws -> TimeInterval {
+func duration(of url: URL) throws -> TimeInterval {
     let file = try AVAudioFile(forReading: url)
     return Double(file.length) / file.processingFormat.sampleRate
 }
