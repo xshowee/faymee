@@ -36,21 +36,17 @@ public struct AnnotationSpan: Hashable, Sendable {
 }
 
 extension Meeting {
-    /// 会中标注换算成录音里的区间，按标注时刻排序（同一时刻按创建先后）。
+    /// 会中标注换算成录音里的区间，按 `annotationsInRecordingOrder` 的顺序。
     /// - 区间两端的墙钟时间分别经 `RecordingTimeline` 换算，所以自然截在录音范围之内，
     ///   整理时跳过的分片、分片之间没录到的几秒也不占区间
     /// - 区间重叠或首尾相接的标记合并成一段（链式），笔记各自独立，也不把两边的标记隔开
     /// - 没有句子的区间照样返回；没有分片（换算不了）时返回空列表
     public func annotationSpans(in transcript: Transcript) -> [AnnotationSpan] {
         guard let timeline = RecordingTimeline(self) else { return [] }
-        let sorted = annotationList.enumerated()
-            .map { (at: timeline.offset(at: $0.element.at), index: $0.offset, annotation: $0.element) }
-            .sorted { ($0.at, $0.index) < ($1.at, $1.index) }
-
         // 换算是单调的，按时刻排好之后区间的起点、终点也是有序的，只需和上一段标记比
         var spans: [AnnotationSpan] = []
         var lastMark: Int?
-        for (offset, _, a) in sorted {
+        for (a, offset) in annotationsInRecordingOrder(on: timeline) {
             let w = AnnotationSpan.window(a.kind)
             let start = timeline.offset(at: a.at.addingTimeInterval(-w.before))
             let end = timeline.offset(at: a.at.addingTimeInterval(w.after))

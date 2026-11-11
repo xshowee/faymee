@@ -288,3 +288,23 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
         #expect(noSegments.transcriptMarks.isEmpty)
     }
 }
+
+/// 笔记行、旗子、纪要的标注区间共用的顺序
+@Suite struct 标注按录音顺序 {
+    private typealias F = 复制文本带笔记
+
+    /// 按录音里的位置排（墙钟 350 秒落在没录到的那段，换算成 300，和墙钟 300 秒同一处），同一处按创建先后
+    @Test func 按录音里的位置排_同一处按创建先后() throws {
+        let m = F.meeting(annotations: [
+            F.note("a1", 500, "后来的"),
+            F.mark("a2", 350),
+            F.note("a3", 300, "同一处"),
+            F.mark("a4", 10),
+        ])
+        let timeline = try #require(RecordingTimeline(m))
+        let ordered = m.annotationsInRecordingOrder(on: timeline)
+
+        #expect(ordered.map(\.annotation.id) == ["a4", "a2", "a3", "a1"])
+        #expect(ordered.map(\.offset) == [10, 300, 300, 400])
+    }
+}

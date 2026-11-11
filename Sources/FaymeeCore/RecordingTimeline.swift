@@ -55,3 +55,16 @@ public struct RecordingTimeline: Sendable {
         return start...max(start, end)
     }
 }
+
+extension Meeting {
+    /// 会中标注按在录音里的位置排好，附上各自的偏移（每个标注单独经 timeline 换算）。
+    /// 同一位置按创建先后（`annotationList` 的顺序）。转写稿的笔记行、旗子和纪要的标注区间都按这个顺序，
+    /// 排序和平局规则只在这里
+    public func annotationsInRecordingOrder(on timeline: RecordingTimeline)
+        -> [(annotation: Annotation, offset: TimeInterval)] {
+        annotationList.enumerated()
+            .map { (index: $0.offset, annotation: $0.element, offset: timeline.offset(at: $0.element.at)) }
+            .sorted { ($0.offset, $0.index) < ($1.offset, $1.index) }
+            .map { ($0.annotation, $0.offset) }
+    }
+}

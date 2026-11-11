@@ -130,29 +130,31 @@ public enum TranscriptRow: Hashable, Sendable {
 }
 
 extension Meeting {
-    /// 会议的笔记在录音里的位置，按时间排序（同一时刻按创建先后）。标记不在里面。
+    /// 会议的笔记在录音里的位置，按 `annotationsInRecordingOrder` 的顺序。标记不在里面。
     /// 每条笔记单独换算（不用 `AnnotationSpan.at`）；没有分片、换算不了时为空
     public var transcriptNotes: [TranscriptNote] {
         guard let timeline = RecordingTimeline(self) else { return [] }
-        return annotationList.enumerated()
-            .compactMap { i, a -> (TranscriptNote, Int)? in
-                guard a.kind == .note, let text = a.text else { return nil }
-                return (TranscriptNote(id: a.id, offset: timeline.offset(at: a.at), text: text), i)
-            }
-            .sorted { ($0.0.offset, $0.1) < ($1.0.offset, $1.1) }
-            .map(\.0)
+        return transcriptNotes(on: timeline)
     }
 
-    /// 会议的标记在录音里的位置，按时间排序（同一时刻按创建先后）。笔记不在里面。
+    /// 会议的标记在录音里的位置，按 `annotationsInRecordingOrder` 的顺序。笔记不在里面。
     /// 每个标记单独换算（不用 `AnnotationSpan.at`，合并的标记只留了最早一个的时刻）；没有分片时为空
     public var transcriptMarks: [TranscriptMark] {
         guard let timeline = RecordingTimeline(self) else { return [] }
-        return annotationList.enumerated()
-            .compactMap { i, a -> (TranscriptMark, Int)? in
-                a.kind == .mark ? (TranscriptMark(id: a.id, offset: timeline.offset(at: a.at)), i) : nil
-            }
-            .sorted { ($0.0.offset, $0.1) < ($1.0.offset, $1.1) }
-            .map(\.0)
+        return transcriptMarks(on: timeline)
+    }
+
+    func transcriptNotes(on timeline: RecordingTimeline) -> [TranscriptNote] {
+        annotationsInRecordingOrder(on: timeline).compactMap { a, offset in
+            guard a.kind == .note, let text = a.text else { return nil }
+            return TranscriptNote(id: a.id, offset: offset, text: text)
+        }
+    }
+
+    func transcriptMarks(on timeline: RecordingTimeline) -> [TranscriptMark] {
+        annotationsInRecordingOrder(on: timeline).compactMap { a, offset in
+            a.kind == .mark ? TranscriptMark(id: a.id, offset: offset) : nil
+        }
     }
 }
 
