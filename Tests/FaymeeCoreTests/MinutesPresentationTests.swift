@@ -142,6 +142,24 @@ private let transcript = Transcript(
         #expect(allDeleted.visibleItems.isEmpty)
     }
 
+    /// 「会中标注」的笔记条目在文字下面显示笔记原话（spec 50）。未扩写的条目文字就是原话，不重复显示；
+    /// 未扩写的条目改过文字后照样显示原话。标记、其他节的条目没有原话
+    @Test func 笔记条目显示原话_与文字相同时不重复() {
+        let expanded = MinutesItem(id: "n1", text: "预算由老王在周五前确认", refs: [MinutesRef(id: "s3", start: 903)],
+                                   annotationIDs: ["a2"], note: "预算 → 老王确认")
+        #expect(expanded.displayedNote == "预算 → 老王确认")
+
+        var raw = MinutesItem(id: "n2", text: "散会后找法务", refs: [], origin: .note, annotationIDs: ["a3"],
+                              note: "散会后找法务")
+        #expect(raw.displayedNote == nil)
+        raw.text = "散会后找法务确认合同"
+        #expect(raw.displayedNote == "散会后找法务")
+
+        let mark = MinutesItem(id: "n3", text: "月底上线，延期要提前说", refs: [MinutesRef(id: "s9", start: 1200)],
+                               annotationIDs: ["a1"])
+        #expect(mark.displayedNote == nil)
+    }
+
     @Test func 不同步时的提示文字() {
         #expect(MinutesSync.retranscribed.notice == "转写稿已重新生成，纪要的出处可能不准确")
         #expect(MinutesSync.edited.notice == "转写稿有修改")

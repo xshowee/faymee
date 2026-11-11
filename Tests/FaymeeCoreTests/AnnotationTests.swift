@@ -115,6 +115,23 @@ private func meeting() -> Meeting {
 }
 
 /// annotationsHash 写进 minutes.json，之后和当前会议比对来判断“会中标注有改动”，所以算法一旦发布就不能变
+/// 详情页的“会中标注 N 处”（spec 44）：标记、笔记都算，删掉的不算；没有标注时不显示
+@Suite struct AnnotationCountTextTests {
+    @Test func 标记和笔记都算_删光后不显示() {
+        var m = meeting()
+        #expect(m.annotationCountText == nil)
+        m.addMark(at: at(10))
+        m.addNote("预算", at: at(20))
+        m.addMark(at: at(30))
+        #expect(m.annotationCountText == "会中标注 3 处")
+        m.deleteAnnotation("a1")
+        #expect(m.annotationCountText == "会中标注 2 处")
+        m.deleteAnnotation("a2")
+        m.deleteAnnotation("a3")
+        #expect(m.annotationCountText == nil)
+    }
+}
+
 @Suite struct AnnotationsHashTests {
     private func sample() -> Meeting {
         var m = meeting()

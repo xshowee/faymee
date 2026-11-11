@@ -73,8 +73,8 @@ extension Minutes {
         }
         let refs = item.refs.map { formatDuration($0.start) }
         if !refs.isEmpty { text += "（\(refs.joined(separator: "、"))）" }
-        // 「会中标注」的笔记条目附上原话。未扩写的条目文字就是原话，不重复写；改过文字后照样附上
-        if let note = item.note?.singleLine, note != item.text.singleLine {
+        // 「会中标注」的笔记条目附上原话，规则同界面（`displayedNote`）
+        if let note = item.displayedNote {
             text += "（笔记：\(note)）"
         }
         return (isAction ? "- [ ] " : "- ") + text

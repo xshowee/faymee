@@ -35,6 +35,13 @@ extension MinutesItem {
         guard let phrase else { return dueDate.displayText(meetingStartedAt: meetingStartedAt, timeZone: timeZone) }
         return "\(phrase)（\(dueDate.dayText(meetingStartedAt: meetingStartedAt, timeZone: timeZone))，\(dueDate.weekdayText)）"
     }
+
+    /// 「会中标注」笔记条目要附上的笔记原话（一行），界面显示和导出 Markdown 共用。
+    /// 未扩写的条目文字就是原话，不重复；改过文字后照样附上。不是笔记条目时为 nil
+    public var displayedNote: String? {
+        guard let note = note?.singleLine, note != text.singleLine else { return nil }
+        return note
+    }
 }
 
 extension MinutesSection {

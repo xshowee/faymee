@@ -226,3 +226,65 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
         #expect(t.plainText(meeting: m) == "[00:05] 我们先过一下上周的待办")
     }
 }
+
+/// 会后转写稿里标记的旗子挂在离标记最近的句子旁（spec 39）
+@Suite struct 转写稿里的旗子 {
+    private typealias F = 复制文本带笔记
+
+    /// 标记的时间经录音时间线换算：墙钟 460 秒是录音里的 06:00（朴素相减是 07:40，会挂到 s3 上）。笔记不挂旗子
+    @Test func 标记挂在它所在的那句旁_经时间线换算() {
+        let t = transcript([
+            sentence("s1", 0.5, 3, "我们先过一下上周的待办"),
+            sentence("s2", 355, 362, "老王说周五前给"),
+            sentence("s3", 440, 470, "这个月底必须上线"),
+        ])
+        let m = F.meeting(annotations: [F.mark("a1", 460), F.note("a2", 2, "待办")])
+        #expect(t.markedItems(m.transcriptMarks) == [1: [TranscriptMark(id: "a1", offset: 360)]])
+    }
+
+    /// 两句之间挂离得近的一句，一样近挂前一句；第一句之前挂第一句，最后一句之后挂最后一句。
+    /// 挂在同一句旁的几个标记按时间先后（与创建顺序无关）
+    @Test func 两句之间挂近的一句_一样近挂前一句_首尾之外挂首尾() {
+        let t = transcript([
+            sentence("s1", 10, 20, "第一句"),
+            sentence("s2", 30, 40, "第二句"),
+            sentence("s3", 100, 110, "第三句"),
+        ])
+        let m = F.meeting(annotations: [
+            F.mark("a1", 280),  // 最后一句之后
+            F.mark("a2", 3),    // 第一句之前
+            F.mark("a3", 27),   // 离 s2 3 秒、离 s1 7 秒
+            F.mark("a4", 25),   // 离 s1、s2 都是 5 秒
+            F.mark("a5", 70),   // 离 s2、s3 都是 30 秒
+            F.mark("a6", 104),  // 落在 s3 里，比 a1 早
+        ])
+        #expect(t.markedItems(m.transcriptMarks) == [
+            0: [TranscriptMark(id: "a2", offset: 3), TranscriptMark(id: "a4", offset: 25)],
+            1: [TranscriptMark(id: "a3", offset: 27), TranscriptMark(id: "a5", offset: 70)],
+            2: [TranscriptMark(id: "a6", offset: 104), TranscriptMark(id: "a1", offset: 280)],
+        ])
+    }
+
+    /// 合盖空白不挂旗子：标记落在空白里时挂离得最近的句子
+    @Test func 落在合盖空白里时挂最近的句子() {
+        let t = transcript([
+            sentence("s1", 10, 20, "合盖前"),
+            lidGap(20, 200),
+            sentence("s2", 200, 210, "开盖后"),
+        ])
+        let m = F.meeting(annotations: [F.mark("a1", 50), F.mark("a2", 180)])
+        #expect(t.markedItems(m.transcriptMarks) == [
+            0: [TranscriptMark(id: "a1", offset: 50)],
+            2: [TranscriptMark(id: "a2", offset: 180)],
+        ])
+    }
+
+    /// 没有句子（只有空白、空转写稿）或没有分片（算不出位置）时都不挂
+    @Test func 没有句子或没有分片时不挂() {
+        let m = F.meeting(annotations: [F.mark("a1", 50)])
+        #expect(transcript([lidGap(0, 100)]).markedItems(m.transcriptMarks).isEmpty)
+        #expect(transcript([]).markedItems(m.transcriptMarks).isEmpty)
+        let noSegments = F.meeting(segments: [], annotations: [F.mark("a1", 15)])
+        #expect(noSegments.transcriptMarks.isEmpty)
+    }
+}

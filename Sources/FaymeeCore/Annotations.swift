@@ -87,6 +87,11 @@ extension Meeting {
         return true
     }
 
+    /// 详情页显示的“会中标注 N 处”，标记、笔记都算；没有标注时为 nil，不显示
+    public var annotationCountText: String? {
+        annotationList.isEmpty ? nil : "会中标注 \(annotationList.count) 处"
+    }
+
     /// 笔记文字的规整，新建和修改共用：换行换成空格，去掉首尾空白；为空时返回 nil
     static func normalizedNoteText(_ text: String) -> String? {
         let t = text.split(whereSeparator: \.isNewline)

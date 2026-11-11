@@ -75,6 +75,39 @@ extension Transcript {
     }
 }
 
+extension Transcript {
+    /// 会后转写稿里每个标记的旗子挂在哪一条旁：键是 `items` 的下标，值是挂在这条旁的标记（按 `marks` 的顺序）。
+    /// 挂在离标记最近的句子旁：标记落在句子里就是这句；落在两句之间取离得近的一句，一样近取前一句
+    /// （标记的意思是“刚才这段很重要”）。合盖空白不挂旗子；没有句子时为空。
+    /// `marks` 按 `Meeting.transcriptMarks` 的顺序（按时间排好）
+    public func markedItems(_ marks: [TranscriptMark]) -> [Int: [TranscriptMark]] {
+        var placed: [Int: [TranscriptMark]] = [:]
+        for mark in marks {
+            var best: (index: Int, distance: TimeInterval)?
+            for (i, item) in items.enumerated() {
+                guard case let .sentence(s) = item else { continue }
+                let distance = max(s.start - mark.offset, mark.offset - s.end, 0)
+                if best.map({ distance < $0.distance }) ?? true { best = (i, distance) }
+            }
+            if let best { placed[best.index, default: []].append(mark) }
+        }
+        return placed
+    }
+}
+
+/// 一个标记在转写稿里的位置：会后转写稿在离它最近的句子旁显示旗子，点旗子从这里播放
+public struct TranscriptMark: Hashable, Sendable {
+    /// 标注 id，会后删除用
+    public var id: String
+    /// 标记时刻在录音里的位置（秒），经 `RecordingTimeline` 换算
+    public var offset: TimeInterval
+
+    public init(id: String, offset: TimeInterval) {
+        self.id = id
+        self.offset = offset
+    }
+}
+
 /// 一条笔记在转写稿里的位置：转写稿界面插一行、复制全文和导出转写稿写一行都按它
 public struct TranscriptNote: Hashable, Sendable {
     /// 标注 id，会后修改、删除用
@@ -105,6 +138,18 @@ extension Meeting {
             .compactMap { i, a -> (TranscriptNote, Int)? in
                 guard a.kind == .note, let text = a.text else { return nil }
                 return (TranscriptNote(id: a.id, offset: timeline.offset(at: a.at), text: text), i)
+            }
+            .sorted { ($0.0.offset, $0.1) < ($1.0.offset, $1.1) }
+            .map(\.0)
+    }
+
+    /// 会议的标记在录音里的位置，按时间排序（同一时刻按创建先后）。笔记不在里面。
+    /// 每个标记单独换算（不用 `AnnotationSpan.at`，合并的标记只留了最早一个的时刻）；没有分片时为空
+    public var transcriptMarks: [TranscriptMark] {
+        guard let timeline = RecordingTimeline(self) else { return [] }
+        return annotationList.enumerated()
+            .compactMap { i, a -> (TranscriptMark, Int)? in
+                a.kind == .mark ? (TranscriptMark(id: a.id, offset: timeline.offset(at: a.at)), i) : nil
             }
             .sorted { ($0.0.offset, $0.1) < ($1.0.offset, $1.1) }
             .map(\.0)
