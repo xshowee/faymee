@@ -19,6 +19,14 @@ import Testing
         #expect(LiveShortcut.conflictNotice(failed: [.note, .mark]) == expected)
         #expect(LiveShortcut.conflictNotice(failed: [.mark, .note, .mark]) == expected)
     }
+
+    /// 菜单栏面板和会中面板的按钮提示同一套规则：快捷键开着且这个组合键注册上了才提
+    @Test func 按钮提示只在快捷键开着且没被占用时提组合键() {
+        #expect(LiveShortcut.mark.buttonHelp(enabled: true, failed: []) == "在任何 App 里也可以按 ⌃⌥M")
+        #expect(LiveShortcut.note.buttonHelp(enabled: true, failed: [.mark]) == "在任何 App 里也可以按 ⌃⌥N")
+        #expect(LiveShortcut.mark.buttonHelp(enabled: true, failed: [.mark]) == "")
+        #expect(LiveShortcut.mark.buttonHelp(enabled: false, failed: []) == "")
+    }
 }
 
 @Suite struct MenuBarIndicatorTests {

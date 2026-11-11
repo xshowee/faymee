@@ -211,7 +211,8 @@ private struct LivePanelView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
-                .help(model.globalShortcutsEnabled ? "在任何 App 里也可以按 \(LiveShortcut.mark.label)" : "")
+                .help(LiveShortcut.mark.buttonHelp(enabled: model.globalShortcutsEnabled,
+                                                   failed: model.shortcutConflicts))
 
                 TextField("记一笔，回车保存", text: $draft.text)
                     .textFieldStyle(.roundedBorder)

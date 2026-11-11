@@ -193,8 +193,7 @@ struct MenuContent: View {
     }
 
     private func shortcutHelp(_ shortcut: LiveShortcut) -> String {
-        model.globalShortcutsEnabled && !model.shortcutConflicts.contains(shortcut)
-            ? "在任何 App 里按 \(shortcut.label)" : ""
+        shortcut.buttonHelp(enabled: model.globalShortcutsEnabled, failed: model.shortcutConflicts)
     }
 }
 

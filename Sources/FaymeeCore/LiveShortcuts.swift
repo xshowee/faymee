@@ -22,6 +22,12 @@ public enum LiveShortcut: CaseIterable, Hashable, Sendable {
         }
     }
 
+    /// 菜单栏面板、会中面板里同一功能按钮的提示：全局快捷键开着（enabled）且这个组合键注册上了
+    /// （不在 failed 里）才提它，否则为空，免得提一个按了不生效的组合键
+    public func buttonHelp(enabled: Bool, failed: [LiveShortcut]) -> String {
+        enabled && !failed.contains(self) ? "在任何 App 里也可以按 \(label)" : ""
+    }
+
     /// 菜单栏面板里的说明：哪些组合键没注册上（被其他 App 占用）、改用哪个按钮。都注册上时为 nil。
     /// 顺序固定为标记在前，重复的只说一次
     public static func conflictNotice(failed: [LiveShortcut]) -> String? {
