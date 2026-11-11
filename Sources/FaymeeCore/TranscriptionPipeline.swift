@@ -270,6 +270,7 @@ public final class TranscriptionPipeline {
         activity = .preparing(0)
         host?.setTranscription(TranscriptionState(status: .running), for: id)
         let diarizer = diarizes ? diarizer : nil
+        let meeting = m
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
             let result: Result<[TranscribedSentence], Error>
@@ -283,23 +284,27 @@ public final class TranscriptionPipeline {
                 result = .failure(error)
             }
             var diarization: Result<DiarizationResult, Error>?
-            if case .success = result, let diarizer {
-                diarization = await Self.diarize(diarizer, audio: audio, speakerCount: nil, report: report)
+            if case let .success(sentences) = result, let diarizer {
+                // 与保存的转写稿同样组装（合盖空白里的句子去掉），句子时间才对得上
+                let spans = Transcript.assemble(sentences, meeting: meeting, engine: "", hotwords: [], createdAt: Date())
+                    .sentenceSpans
+                diarization = await Self.diarize(diarizer, audio: audio, sentences: spans, speakerCount: nil,
+                                                 report: report)
             }
             self?.finish(id, token: token, hotwords: hotwords, result: result, diarization: diarization)
         }
     }
 
-    /// 只区分说话人：读转写稿快照，区分整段录音，结束时在重读的转写稿上只写说话人
+    /// 只区分说话人：读转写稿快照（句子时间交给引擎），区分整段录音，结束时在重读的转写稿上只写说话人
     private func startDiarization(_ id: String, audio: URL, speakerCount: Int?, token: Int,
                                   previous: Task<Void, Never>?,
                                   report: @escaping @Sendable (TranscriptionActivity) -> Void) {
         activity = .diarizing(0)
         host?.setDiarization(DiarizationState(status: .running), for: id)
-        // 开始时只需记下转写稿的生成时间，结束时据此判断期间有没有被重新转写
-        let snapshot: TranscriptSummary?
+        // 开始时记下句子时间和转写稿的生成时间，结束时据此判断期间有没有被重新转写
+        let snapshot: Transcript?
         do {
-            snapshot = try store.loadTranscriptSummary(id)
+            snapshot = try store.loadTranscript(id)
         } catch {
             return finishDiarization(id, token: token, createdAt: nil, result: .failure(error))
         }
@@ -309,7 +314,8 @@ public final class TranscriptionPipeline {
         }
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
-            let result = await Self.diarize(diarizer, audio: audio, speakerCount: speakerCount, report: report)
+            let result = await Self.diarize(diarizer, audio: audio, sentences: snapshot.sentenceSpans,
+                                            speakerCount: speakerCount, report: report)
             self?.finishDiarization(id, token: token, createdAt: snapshot.createdAt, result: result)
         }
     }
@@ -358,14 +364,15 @@ public final class TranscriptionPipeline {
         }
     }
 
-    private nonisolated static func diarize(_ diarizer: any SpeakerDiarizer, audio: URL, speakerCount: Int?,
+    private nonisolated static func diarize(_ diarizer: any SpeakerDiarizer, audio: URL,
+                                            sentences: [ClosedRange<TimeInterval>], speakerCount: Int?,
                                             report: @escaping @Sendable (TranscriptionActivity) -> Void) async
         -> Result<DiarizationResult, Error> {
         do {
             try Task.checkCancellation()
             report(.diarizing(0))
             try await diarizer.prepare { _ in }
-            return .success(try await diarizer.diarize(audio: audio, speakerCount: speakerCount,
+            return .success(try await diarizer.diarize(audio: audio, sentences: sentences, speakerCount: speakerCount,
                                                        progress: { report(.diarizing($0)) }))
         } catch {
             return .failure(error)

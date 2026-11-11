@@ -67,7 +67,7 @@ private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
     var block = false
     /// 在 diarize 返回前调用，模拟区分期间别处改了文件
     var onDiarize: (() -> Void)?
-    private(set) var calls: [(audio: URL, speakerCount: Int?)] = []
+    private(set) var calls: [(audio: URL, sentences: [ClosedRange<TimeInterval>], speakerCount: Int?)] = []
     /// 每次进入 diarize 时 yield 一次
     let started: AsyncStream<Void>
     private let startedContinuation: AsyncStream<Void>.Continuation
@@ -82,9 +82,9 @@ private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
         if let prepareError { throw prepareError }
     }
 
-    func diarize(audio: URL, speakerCount: Int?,
+    func diarize(audio: URL, sentences: [ClosedRange<TimeInterval>], speakerCount: Int?,
                  progress: @escaping (Double) -> Void) async throws -> DiarizationResult {
-        calls.append((audio, speakerCount))
+        calls.append((audio, sentences, speakerCount))
         startedContinuation.yield()
         progress(0.5)
         if block { try await Task.sleep(for: .seconds(3600)) }
@@ -102,7 +102,7 @@ private final class SlowToCancelDiarizer: SpeakerDiarizer, @unchecked Sendable {
 
     func prepare(progress: @escaping (Double) -> Void) async throws {}
 
-    func diarize(audio: URL, speakerCount: Int?,
+    func diarize(audio: URL, sentences: [ClosedRange<TimeInterval>], speakerCount: Int?,
                  progress: @escaping (Double) -> Void) async throws -> DiarizationResult {
         try await withCheckedThrowingContinuation { continuation = $0 }
     }
@@ -524,11 +524,27 @@ extension Fixture {
         #expect(d.speakers.map(\.voiceprint) == [vp1, vp2])
         #expect(d.speakers.map(\.speechDuration) == [11, 3])
         #expect(f.diarizer?.calls.map(\.speakerCount) == [nil])
+        #expect(f.diarizer?.calls.map(\.sentences) == [[0...5, 6...10, 11...15, 30...33]])
         #expect(f.diarizer?.calls.map(\.audio) == [f.store.directory(m.id).appendingPathComponent("recording.m4a")])
         #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
         #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .done))
         #expect(f.store.loadAll().first?.diarization == DiarizationState(status: .done))
         #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    /// 中点落在合盖空白里的句子不进转写稿，也不交给引擎
+    @Test func 完整转写时交给引擎的是转写稿里的句子() async throws {
+        let f = Fixture(FakeTranscriber([
+            .init(start: 0, end: 5, text: "大家好"),
+            .init(start: 320, end: 323, text: "合盖时的幻觉"),
+            .init(start: 355, end: 370, text: "开盖后接着说"),
+        ]), diarizer: FakeDiarizer())
+        let m = f.addMeeting(gaps: [Gap(start: at(300), end: at(360), reason: .lidClosed)])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(f.diarizer?.calls.map(\.sentences) == [[0...5, 355...370]])
     }
 
     @Test func 区分失败时转写稿照常保存_说话人状态记下原因() async throws {
@@ -616,6 +632,7 @@ extension Fixture {
         #expect(t.textHash == legacyTranscript().textHash)
         #expect(t.speakers.map(\.id) == ["spk1", "spk2"])
         #expect(f.diarizer?.calls.map(\.speakerCount) == [2])
+        #expect(f.diarizer?.calls.map(\.sentences) == [[0...5, 6...10, 11...15]])
         #expect(f.engine.calls.isEmpty)
         #expect(f.host.history[m.id] == nil)
         #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))

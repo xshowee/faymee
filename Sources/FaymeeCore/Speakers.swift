@@ -3,7 +3,7 @@ import Foundation
 /// 一份转写稿的说话人信息。整体可选：nil 表示从未区分说话人（含 v0.3 及更早的转写稿）。
 /// 句子归给哪个说话人记在句子的 `speaker` 上
 public struct Diarization: Codable, Hashable, Sendable {
-    /// 区分说话人用的引擎，如 "sherpa-onnx/pyannote"
+    /// 区分说话人用的引擎，如 "sherpa-onnx-2.0.1/sentence-clustering"
     public var engine: String
     /// 算声纹向量的模型。声纹只在同一模型之间可比
     public var voiceprintModel: String

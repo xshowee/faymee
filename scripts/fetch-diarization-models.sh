@@ -15,18 +15,12 @@ trap 'rm -rf "$WORK"' EXIT
 # FAYMEE_DIARIZATION_MIRROR：替换下载地址前缀（目录结构同 GitHub release：<tag>/<文件名>），如内网镜像或 file:// 本地目录
 RELEASES=${FAYMEE_DIARIZATION_MIRROR:-https://github.com/k2-fsa/sherpa-onnx/releases/download}
 
-# 分段：pyannote segmentation-3.0 的 sherpa-onnx 转换版（MIT，Copyright (c) 2022 CNRS），fp32。
-# 上游只发 tar.bz2、没有发布摘要，两个 sha256 都是本机算的
-SEG_TARBALL_URL=$RELEASES/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2
-SEG_TARBALL_SHA=24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488
-SEG_FILE=pyannote-segmentation-3-0.onnx
-SEG_SHA=220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079
-
-# 声纹：3D-Speaker CAM++ 中文通用模型（Apache-2.0，ModelScope iic/speech_campplus_sv_zh-cn_16k-common）。
-# sha256 与 release 里的 checksum.txt 一致。注意 tag 拼写就是 recongition
-EMB_URL=$RELEASES/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
-EMB_FILE=3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
-EMB_SHA=f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11
+# 声纹：3D-Speaker ERes2Net base 中文模型（Apache-2.0，ModelScope iic/speech_eres2net_base_sv_zh-cn_3dspeaker_16k，
+# 3D-Speaker 数据集训练）。sha256 与 release 里的 checksum.txt 一致。注意 tag 拼写就是 recongition
+EMB_URL=$RELEASES/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+EMB_FILE=3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+EMB_SHA=1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b
+EMB_LICENSE=3dspeaker-eres2net-base.LICENSE
 
 sha_ok() { [[ -f "$1" && "$(shasum -a 256 "$1" | cut -d' ' -f1)" == "$2" ]]; }
 
@@ -38,21 +32,18 @@ check() {
     fi
 }
 
-if ! sha_ok "$DEST/$SEG_FILE" "$SEG_SHA"; then
-    echo "==> 下载分段模型"
-    curl -fL --retry 3 -o "$WORK/seg.tar.bz2" "$SEG_TARBALL_URL"
-    check "$WORK/seg.tar.bz2" "$SEG_TARBALL_SHA"
-    tar -xjf "$WORK/seg.tar.bz2" -C "$WORK"
-    check "$WORK/sherpa-onnx-pyannote-segmentation-3-0/model.onnx" "$SEG_SHA"
-    mv "$WORK/sherpa-onnx-pyannote-segmentation-3-0/LICENSE" "$DEST/pyannote-segmentation-3-0.LICENSE"
-    mv "$WORK/sherpa-onnx-pyannote-segmentation-3-0/model.onnx" "$DEST/$SEG_FILE"
-fi
-
 if ! sha_ok "$DEST/$EMB_FILE" "$EMB_SHA"; then
     echo "==> 下载声纹模型"
     curl -fL --retry 3 -o "$WORK/emb.onnx" "$EMB_URL"
     check "$WORK/emb.onnx" "$EMB_SHA"
     mv "$WORK/emb.onnx" "$DEST/$EMB_FILE"
 fi
+
+cat > "$DEST/$EMB_LICENSE" <<'NOTICE'
+3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+来源：ModelScope iic/speech_eres2net_base_sv_zh-cn_3dspeaker_16k（3D-Speaker，阿里巴巴通义实验室），
+sherpa-onnx 转换版：https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+许可证：Apache License 2.0，https://www.apache.org/licenses/LICENSE-2.0
+NOTICE
 
 echo "==> 区分说话人模型就绪：$DEST"

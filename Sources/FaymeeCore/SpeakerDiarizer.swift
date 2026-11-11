@@ -3,14 +3,15 @@ import Foundation
 /// 区分说话人引擎，形状仿照 `Transcriber`。管线其余部分（排队、归属到句子、声纹识别、存储、取消）
 /// 只依赖这个协议，与具体引擎无关
 public protocol SpeakerDiarizer {
-    /// 写进转写稿的引擎标识，如 "sherpa-onnx/pyannote"
+    /// 写进转写稿的引擎标识，如 "sherpa-onnx-2.0.1/sentence-clustering"
     var engine: String { get }
     /// 声纹模型标识。声纹库只拿同一模型的声纹比较，换了模型的要重新登记
     var voiceprintModel: String { get }
     /// 准备引擎所需资源，已就绪时立即返回
     func prepare(progress: @escaping (Double) -> Void) async throws
-    /// 区分整段录音。speakerCount 为 nil 时由引擎判断人数。需要支持取消
-    func diarize(audio: URL, speakerCount: Int?,
+    /// 区分整段录音。sentences 是转写稿每句的起止时间（相对录音文件开头的秒数，按先后），引擎可以据此
+    /// 逐句判断；speakerCount 为 nil 时由引擎判断人数。需要支持取消
+    func diarize(audio: URL, sentences: [ClosedRange<TimeInterval>], speakerCount: Int?,
                  progress: @escaping (Double) -> Void) async throws -> DiarizationResult
 }
 
@@ -41,6 +42,11 @@ public struct SpeakerSegment: Hashable, Sendable {
 }
 
 extension Transcript {
+    /// 交给区分说话人引擎的每句起止时间
+    public var sentenceSpans: [ClosedRange<TimeInterval>] {
+        sentences.map { $0.start...max($0.start, $0.end) }
+    }
+
     /// 把区分结果合成到这份转写稿上，只改说话人：句子 id、文字、修改记录、合盖空白都不动；
     /// 原有的说话人、单句修改、名字全部作废（沿用名字是调用方的事）。
     /// - 片段落在合盖空白里的部分不算（合盖时录音是静音）
