@@ -27,25 +27,87 @@ extension Transcript {
     }
 
     /// 复制用的纯文本：一条一行，行首是方括号里的开始时间（`mm:ss` 或 `h:mm:ss`），
-    /// 方括号免得和以数字开头的句子粘在一起。显示说话人（`showsSpeakers`）时句子带上说话人，
-    /// 见 `copyLines(_:)`
-    public var plainText: String {
-        copyLines { $0 }.joined(separator: "\n")
+    /// 方括号免得和以数字开头的句子粘在一起。显示说话人（`showsSpeakers`）时句子带上说话人；
+    /// 会议的笔记按时间插成 `[12:03] 笔记：……` 一行，标记不写。见 `copyLines(notes:_:)`
+    ///
+    /// - Parameter meeting: 转写稿所属的会议，用来取笔记。nil 时不带笔记
+    public func plainText(meeting: Meeting?) -> String {
+        copyLines(notes: meeting?.transcriptNotes ?? []) { $0 }.joined(separator: "\n")
+    }
+
+    /// 转写稿里一行行的先后：条目按原顺序，笔记按录音里的时间插在条目之间。
+    /// 笔记排在开始时间不早于它的第一条之前（同一时刻的笔记排在句子、空白前面，同 `assemble` 里空白排在句子前面），
+    /// 晚于所有条目的排在最后。`notes` 按 `Meeting.transcriptNotes` 的顺序（按时间排好）
+    public func rows(notes: [TranscriptNote]) -> [TranscriptRow] {
+        var rows: [TranscriptRow] = []
+        rows.reserveCapacity(items.count + notes.count)
+        var n = notes.startIndex
+        for (i, item) in items.enumerated() {
+            while n < notes.endIndex, notes[n].offset <= item.start {
+                rows.append(.note(notes[n]))
+                n += 1
+            }
+            rows.append(.item(i))
+        }
+        rows += notes[n...].map(TranscriptRow.note)
+        return rows
     }
 
     /// 复制全文和导出转写稿共用的行：`[03:15] 张三：文本`。只有显示说话人时句子才带前缀，
-    /// 没有说话人的句子写“未知：”（与界面一致，免得被当成上一个人说的）；合盖空白永远不带。
-    /// `clean` 处理句子和说话人名字（导出时把换行换成空格）
-    func copyLines(_ clean: (String) -> String) -> [String] {
+    /// 没有说话人的句子写“未知：”（与界面一致，免得被当成上一个人说的）；合盖空白和笔记永远不带。
+    /// 笔记一行是 `[12:03] 笔记：文字`。`clean` 处理句子、说话人名字和笔记（导出时把换行换成空格）
+    func copyLines(notes: [TranscriptNote] = [], _ clean: (String) -> String) -> [String] {
         let showsSpeakers = showsSpeakers
-        return items.map { item in
-            let text = switch item {
-            case let .sentence(s) where showsSpeakers: "\(clean(speakerName(for: s)))：\(clean(s.text))"
-            case let .sentence(s): clean(s.text)
-            case let .gap(g): g.label
+        return rows(notes: notes).map { row in
+            switch row {
+            case let .note(note):
+                return "[\(formatDuration(note.offset))] 笔记：\(clean(note.text))"
+            case let .item(i):
+                let item = items[i]
+                let text = switch item {
+                case let .sentence(s) where showsSpeakers: "\(clean(speakerName(for: s)))：\(clean(s.text))"
+                case let .sentence(s): clean(s.text)
+                case let .gap(g): g.label
+                }
+                return "[\(formatDuration(item.start))] \(text)"
             }
-            return "[\(formatDuration(item.start))] \(text)"
         }
+    }
+}
+
+/// 一条笔记在转写稿里的位置：转写稿界面插一行、复制全文和导出转写稿写一行都按它
+public struct TranscriptNote: Hashable, Sendable {
+    /// 标注 id，会后修改、删除用
+    public var id: String
+    /// 笔记时刻在录音里的位置（秒），经 `RecordingTimeline` 换算
+    public var offset: TimeInterval
+    public var text: String
+
+    public init(id: String, offset: TimeInterval, text: String) {
+        self.id = id
+        self.offset = offset
+        self.text = text
+    }
+}
+
+/// 转写稿里的一行：转写稿的一条（`items` 的下标），或插在条目之间的一条笔记
+public enum TranscriptRow: Hashable, Sendable {
+    case item(Int)
+    case note(TranscriptNote)
+}
+
+extension Meeting {
+    /// 会议的笔记在录音里的位置，按时间排序（同一时刻按创建先后）。标记不在里面。
+    /// 每条笔记单独换算（不用 `AnnotationSpan.at`）；没有分片、换算不了时为空
+    public var transcriptNotes: [TranscriptNote] {
+        guard let timeline = RecordingTimeline(self) else { return [] }
+        return annotationList.enumerated()
+            .compactMap { i, a -> (TranscriptNote, Int)? in
+                guard a.kind == .note, let text = a.text else { return nil }
+                return (TranscriptNote(id: a.id, offset: timeline.offset(at: a.at), text: text), i)
+            }
+            .sorted { ($0.0.offset, $0.1) < ($1.0.offset, $1.1) }
+            .map(\.0)
     }
 }
 

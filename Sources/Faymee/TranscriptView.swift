@@ -78,7 +78,7 @@ struct TranscriptSection: View {
                 if transcript.items.isEmpty {
                     placeholder("没有识别出文字")
                 } else {
-                    TranscriptList(transcript: transcript, playback: playback, isEditable: isEditable,
+                    TranscriptList(transcript: transcript, meeting: meeting, playback: playback, isEditable: isEditable,
                                    reveal: $reveal,
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
                                    onRestore: { id in update { $0.restore(sentence: id) } },
@@ -438,7 +438,7 @@ struct TranscriptSection: View {
 
     private func copy(_ transcript: Transcript) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(transcript.plainText, forType: .string)
+        NSPasteboard.general.setString(transcript.plainText(meeting: meeting), forType: .string)
     }
 }
 
@@ -487,6 +487,8 @@ private enum TranscriptFocus: Hashable {
 /// 双击句子编辑：回车或点别处保存，Esc 取消；同一时间只编辑一句
 private struct TranscriptList: View {
     var transcript: Transcript
+    /// 全选复制时带上会议的笔记
+    var meeting: Meeting
     var playback: Playback?
     var isEditable: Bool
     @Binding var reveal: TranscriptReveal?
@@ -586,7 +588,7 @@ private struct TranscriptList: View {
         }
         .onCommand(#selector(NSResponder.selectAll(_:))) { allSelected = true }
         .onCopyCommand {
-            allSelected ? [NSItemProvider(object: transcript.plainText as NSString)] : []
+            allSelected ? [NSItemProvider(object: transcript.plainText(meeting: meeting) as NSString)] : []
         }
         .onExitCommand { allSelected = false }
     }

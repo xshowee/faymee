@@ -88,7 +88,7 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
             lidGap(600, 780.5),
             sentence("s3", 3725.2, 3730, "好的，今天先到这里"),
         ])
-        #expect(t.plainText == """
+        #expect(t.plainText(meeting: nil) == """
             [00:00] 我们先过一下上周的待办
             [01:05] 然后看一下数据
             [10:00] 合盖，未录到声音（10:00–13:00，03:00）
@@ -97,7 +97,7 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
     }
 
     @Test func 空转写稿是空字符串() {
-        #expect(transcript([]).plainText == "")
+        #expect(transcript([]).plainText(meeting: nil) == "")
     }
 }
 
@@ -127,7 +127,7 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
             lidGap(600, 780),
             said("s4", 3725, "spk1", "好，今天就到这里"),
         ], [speaker("spk1", "张三"), speaker("spk2")])
-        #expect(t.plainText == """
+        #expect(t.plainText(meeting: nil) == """
             [03:15] 张三：我们先过一下上周的待办
             [03:21] 说话人 2：报价单我周三前发
             [03:27] 未知：嗯
@@ -142,9 +142,87 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
             said("s1", 195, "spk1", "我们先过一下上周的待办"),
             said("s2", 201, nil, "嗯"),
         ], [speaker("spk1", "张三"), speaker("spk2")])
-        #expect(t.plainText == """
+        #expect(t.plainText(meeting: nil) == """
             [03:15] 我们先过一下上周的待办
             [03:21] 嗯
             """)
+    }
+}
+
+/// 复制全文、导出转写稿时，笔记按时间插成 `[12:03] 笔记：……` 一行，标记不写（spec 46）
+@Suite struct 复制文本带笔记 {
+    private static let t0 = try! Date("2026-11-10T02:00:00Z", strategy: .iso8601)
+
+    /// 两个分片，中间有 100 秒没录到：墙钟 0–300 秒是录音 0–300，墙钟 400–1000 秒是录音 300–900
+    static func meeting(segments: [Segment]? = nil, annotations: [Annotation]) -> Meeting {
+        func segment(_ file: String, _ wall: TimeInterval, _ offset: TimeInterval, _ duration: TimeInterval) -> Segment {
+            Segment(file: file, startedAt: t0.addingTimeInterval(wall), sampleRate: 48000, channels: 1,
+                    device: "MacBook Pro 麦克风", deviceUID: "BuiltIn", offset: offset, duration: duration)
+        }
+        return Meeting(id: "m", title: "会议", startedAt: t0, endedAt: t0.addingTimeInterval(1000), status: .done,
+                       segments: segments ?? [segment("0001.caf", 0, 0, 300), segment("0002.caf", 400, 300, 600)],
+                       recording: "recording.m4a", duration: 900, annotations: annotations)
+    }
+
+    static func mark(_ id: String, _ wall: TimeInterval) -> Annotation {
+        Annotation(id: id, at: t0.addingTimeInterval(wall), kind: .mark)
+    }
+
+    static func note(_ id: String, _ wall: TimeInterval, _ text: String) -> Annotation {
+        Annotation(id: id, at: t0.addingTimeInterval(wall), kind: .note, text: text)
+    }
+
+    /// 笔记的时间经录音时间线换算（墙钟 460 秒是录音里的 06:00，不是 07:40）；与句子同一时刻时排在句子前面；
+    /// 晚于最后一句的排在最后
+    @Test func 笔记按录音里的时间插成一行_标记不写() {
+        let t = transcript([
+            sentence("s1", 0.5, 3, "我们先过一下上周的待办"),
+            sentence("s2", 50, 55, "预算这块谁来跟"),
+            sentence("s3", 355, 362, "老王说周五前给"),
+            sentence("s4", 370, 375, "好"),
+        ])
+        let m = Self.meeting(annotations: [
+            Self.note("a1", 50, "预算"),
+            Self.mark("a2", 100),
+            Self.note("a3", 460, "预算 → 老王确认"),
+            Self.note("a4", 990, "散会后找法务"),
+        ])
+        #expect(t.plainText(meeting: m) == """
+            [00:00] 我们先过一下上周的待办
+            [00:50] 笔记：预算
+            [00:50] 预算这块谁来跟
+            [05:55] 老王说周五前给
+            [06:00] 笔记：预算 → 老王确认
+            [06:10] 好
+            [14:50] 笔记：散会后找法务
+            """)
+    }
+
+    /// 笔记不是谁说的话，显示说话人时也不带说话人前缀（同合盖空白行）
+    @Test func 显示说话人时笔记行不带说话人() {
+        let speakers = ["张三", nil].enumerated().map { i, name in
+            Speaker(id: "spk\(i + 1)", name: name, nameSource: name == nil ? nil : .user, voiceprint: Voiceprint([1]),
+                    speechDuration: 30)
+        }
+        let t = Transcript(engine: "test", createdAt: Self.t0, hotwords: [], items: [
+            .sentence(TranscriptSentence(id: "s1", start: 40, end: 45, text: "报价单谁来发", speaker: "spk1")),
+            .sentence(TranscriptSentence(id: "s2", start: 60, end: 65, text: "我周三前发给客户", speaker: "spk2")),
+            .gap(TranscriptGap(start: 200, end: 260, reason: .lidClosed)),
+        ], diarization: Diarization(engine: "fake", voiceprintModel: "fake", speakersCreatedAt: Self.t0,
+                                    speakers: speakers))
+        let m = Self.meeting(annotations: [Self.note("a1", 63, "报价单 周三"), Self.mark("a2", 64)])
+        #expect(t.plainText(meeting: m) == """
+            [00:40] 张三：报价单谁来发
+            [01:00] 说话人 2：我周三前发给客户
+            [01:03] 笔记：报价单 周三
+            [03:20] 合盖，未录到声音（03:20–04:20，01:00）
+            """)
+    }
+
+    /// 没有分片（录音没留下）时算不出笔记在录音里的位置，不写笔记行
+    @Test func 没有分片时不写笔记() {
+        let t = transcript([sentence("s1", 5, 9, "我们先过一下上周的待办")])
+        let m = Self.meeting(segments: [], annotations: [Self.note("a1", 5, "待办")])
+        #expect(t.plainText(meeting: m) == "[00:05] 我们先过一下上周的待办")
     }
 }

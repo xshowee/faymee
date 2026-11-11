@@ -220,6 +220,41 @@ private let example = minutes([
         """)
     }
 
+    /// 导出转写稿时笔记和复制全文一样插成一行（单独一段），标记不写；笔记里的换行换成空格
+    @Test func 附上转写稿全文_笔记按录音里的时间单独一段() {
+        // 两个分片，中间 100 秒没录到：墙钟 400 秒起是录音 300 秒起
+        let segments = [(0.0, 0.0, 300.0), (400, 300, 600)].enumerated().map { i, s in
+            Segment(file: "000\(i + 1).caf", startedAt: start.addingTimeInterval(s.0), sampleRate: 48000, channels: 1,
+                    device: "MacBook Pro 麦克风", deviceUID: "BuiltIn", offset: s.1, duration: s.2)
+        }
+        var mt = meeting(duration: nil)
+        mt.segments = segments
+        mt.annotations = [
+            Annotation(id: "a1", at: start.addingTimeInterval(100), kind: .mark),
+            Annotation(id: "a2", at: start.addingTimeInterval(460), kind: .note, text: "预算\n老王确认"),
+        ]
+        let transcript = Transcript(engine: "fake", createdAt: start, hotwords: [], items: [
+            .sentence(TranscriptSentence(id: "s1", start: 5, end: 9, text: "我们先过一下上周的待办")),
+            .sentence(TranscriptSentence(id: "s2", start: 355, end: 362, text: "预算老王周五前给")),
+            .sentence(TranscriptSentence(id: "s3", start: 370, end: 375, text: "好")),
+        ])
+        #expect(minutes([]).markdown(meeting: mt, transcript: transcript, attachingTranscript: true,
+                                     timeZone: shanghai) == """
+        # 产品周会（2026-11-10 10:00）
+
+        ## 转写稿
+
+        [00:05] 我们先过一下上周的待办
+
+        [05:55] 预算老王周五前给
+
+        [06:00] 笔记：预算 老王确认
+
+        [06:10] 好
+
+        """)
+    }
+
     @Test func 转写稿为空时只写标题和说明() {
         let transcript = Transcript(engine: "fake", createdAt: start, hotwords: [], items: [])
         #expect(minutes([]).markdown(meeting: meeting(duration: nil), transcript: transcript, attachingTranscript: true, timeZone: shanghai) == """

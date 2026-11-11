@@ -11,7 +11,7 @@ extension Minutes {
     ///   - transcript: 会议当前的转写稿，用来显示待办负责人（`displayedOwner`：关联的说话人改名后用新名字）。
     ///     不附全文（复制纪要）时也要传；nil 时负责人用生成时的文字
     ///   - attachingTranscript: 末尾附上转写稿全文（`transcript` 为 nil 时不附）。用修改后的文字，
-    ///     每句一段，合盖空白也单独一段；行格式同“复制全文”，显示说话人时带上说话人
+    ///     每句一段，合盖空白、会议的笔记也单独一段；行格式同“复制全文”，显示说话人时带上说话人
     ///   - timeZone: 标题行的开始时间按这个时区显示，也用来判断截止日期要不要带年份
     public func markdown(meeting: Meeting, transcript: Transcript? = nil, attachingTranscript: Bool = false,
                          timeZone: TimeZone = .current) -> String {
@@ -27,7 +27,7 @@ extension Minutes {
         if attachingTranscript, let transcript {
             // 每句一段（格式同“复制全文”）：只用一个换行的话，粘贴后整篇会并成一段
             blocks.append("## 转写稿")
-            let paragraphs = transcript.copyLines { $0.singleLine ?? "" }
+            let paragraphs = transcript.copyLines(notes: meeting.transcriptNotes) { $0.singleLine ?? "" }
             blocks += paragraphs.isEmpty ? ["无"] : paragraphs
         }
         return blocks.joined(separator: "\n\n") + "\n"
