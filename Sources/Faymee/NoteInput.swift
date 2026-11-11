@@ -101,12 +101,13 @@ private final class NoteDraft {
     var stamp = ""
 }
 
-/// 无边框浮窗：始终在最前，出现在所有桌面和全屏 App 上面。NSPanel 不算普通窗口，不会让 App 出现 Dock 图标
+/// 无边框浮窗：始终在最前，出现在所有桌面和全屏 App 上面。NSPanel 不算普通窗口，不会让 App 出现 Dock 图标。
+/// nonactivatingPanel：万一系统拒绝从后台激活 Faymee（macOS 14 起激活是协作式的），浮窗也能拿到键盘
 private final class NoteInputPanel: NSPanel {
     var onCancel: (() -> Void)?
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 56), styleMask: [.borderless],
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 56), styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
         isReleasedWhenClosed = false
         isFloatingPanel = true
