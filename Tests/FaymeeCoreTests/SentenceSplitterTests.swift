@@ -32,13 +32,14 @@ import Testing
         #expect(second.open.isEmpty)
     }
 
-    /// 本机流式识别的真实情形：上一段定稿结果没带句号，句号出现在下一段开头，与前一个字隔了 0.42 秒
+    /// 本机流式识别的真实情形：上一段定稿结果没带句号，句号出现在下一段开头，与前一个字隔了 0.42 秒。
+    /// 句号接到前一句，前一句仍在最后一个字处结束，中间的静音不算进去
     @Test func 停顿后紧跟的标点归前一句_不单独成句() {
         let input = tokens([("一", 32.4, 32.7), ("周", 32.7, 32.88), ("左", 32.88, 32.94), ("右", 32.94, 33.06),
                             ("。", 33.48, 33.66), ("明", 33.66, 33.9), ("白", 33.9, 34.1), ("了", 34.1, 34.3)])
 
         #expect(SentenceSplitter.split(input) == [
-            TranscribedSentence(start: 32.4, end: 33.66, text: "一周左右。"),
+            TranscribedSentence(start: 32.4, end: 33.06, text: "一周左右。"),
             TranscribedSentence(start: 33.66, end: 34.3, text: "明白了"),
         ])
     }
@@ -49,8 +50,43 @@ import Testing
                             ("，", 33.48, 33.66), ("明", 33.66, 33.9), ("白", 33.9, 34.1), ("了", 34.1, 34.3)])
 
         #expect(SentenceSplitter.split(input) == [
-            TranscribedSentence(start: 32.4, end: 33.66, text: "一周左右，"),
+            TranscribedSentence(start: 32.4, end: 33.06, text: "一周左右，"),
             TranscribedSentence(start: 33.66, end: 34.3, text: "明白了"),
+        ])
+    }
+
+    /// 开引号、开括号属于后面的话：停顿后紧跟的开引号不接到前一句，而是开始下一句
+    @Test func 停顿后的开引号开始下一句() {
+        let input = tokens([("他", 0, 0.2), ("说", 0.2, 0.4),
+                            ("“", 1.0, 1.0), ("我", 1.0, 1.2), ("们", 1.2, 1.4), ("下", 1.4, 1.6), ("周", 1.6, 1.8),
+                            ("发", 1.8, 2.0), ("布", 2.0, 2.2), ("”", 2.2, 2.2), ("。", 2.2, 2.3)])
+
+        #expect(SentenceSplitter.split(input) == [
+            TranscribedSentence(start: 0, end: 0.4, text: "他说"),
+            TranscribedSentence(start: 1.0, end: 2.3, text: "“我们下周发布”。"),
+        ])
+    }
+
+    /// 停顿并在开括号的时间里时，停顿在它前面（同普通的字），不在它后面断开
+    @Test func 开括号占得久时在它前面断句() {
+        let input = tokens([("我", 0, 0.2), ("们", 0.2, 0.4), ("先", 0.4, 0.6), ("过", 0.6, 0.8), ("一", 0.8, 1.0),
+                            ("下", 1.0, 1.2), ("（", 1.2, 1.8), ("草", 1.8, 2.0), ("案", 2.0, 2.2), ("）", 2.2, 2.2)])
+
+        #expect(SentenceSplitter.split(input) == [
+            TranscribedSentence(start: 0, end: 1.2, text: "我们先过一下"),
+            TranscribedSentence(start: 1.2, end: 2.2, text: "（草案）"),
+        ])
+    }
+
+    /// 流式识别里没有逐字时间的标点放在这段结果的开头，离前一个字隔着整段静音。
+    /// 接到前一句时不把它的结束拉到静音之后，否则点击、高亮会把这段静音算进前一句
+    @Test func 停顿后的标点接到前一句时不拉长它的结束() {
+        let input = tokens([("一", 32.4, 32.7), ("周", 32.7, 32.88), ("左", 32.88, 32.94), ("右", 32.94, 33.06),
+                            ("。", 38, 38), ("明", 38, 38.2), ("白", 38.2, 38.4), ("了", 38.4, 38.6)])
+
+        #expect(SentenceSplitter.split(input) == [
+            TranscribedSentence(start: 32.4, end: 33.06, text: "一周左右。"),
+            TranscribedSentence(start: 38, end: 38.6, text: "明白了"),
         ])
     }
 
