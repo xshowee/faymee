@@ -17,12 +17,7 @@ final class FakeTranscription: StreamingTranscription, @unchecked Sendable {
         (events, continuation) = AsyncStream.makeStream()
     }
 
-    private(set) var buffers: [AVAudioPCMBuffer] = []
-
-    func append(_ buffer: AVAudioPCMBuffer) {
-        appended += 1
-        buffers.append(buffer)
-    }
+    func append(_ buffer: AVAudioPCMBuffer) { appended += 1 }
     /// 结束、取消时都不马上关事件流：测试还可以发迟到的事件，再 `end()`
     func finish() { finished = true }
     func cancel() { cancelled = true }

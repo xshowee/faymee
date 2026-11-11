@@ -17,6 +17,9 @@ final class LivePanelController: NSObject, NSWindowDelegate {
     var captions: LiveCaptions? {
         didSet {
             oldValue?.stop()
+            // 上一场录音停止前排下的暂停不能落到这一场头上
+            pendingPause?.cancel()
+            pendingPause = nil
             pumpTimer?.invalidate()
             pumpTimer = nil
             if let captions {
@@ -267,6 +270,11 @@ private struct LivePanelTranscript: View {
     let placeholder: String
     @State private var followsBottom = true
 
+    private struct ScrollState: Equatable {
+        var atBottom: Bool
+        var contentHeight: CGFloat
+    }
+
     private static let bottomID = "bottom"
 
     var body: some View {
@@ -295,11 +303,19 @@ private struct LivePanelTranscript: View {
                 .padding(10)
                 .textSelection(.enabled)
             }
-            .defaultScrollAnchor(.bottom)
-            .onScrollGeometryChange(for: Bool.self) { geo in
-                geo.contentOffset.y + geo.containerSize.height >= geo.contentSize.height - 24
-            } action: { _, atBottom in
-                followsBottom = atBottom
+            // 只管刚打开时停在底部；内容变长时不自动挪，免得往上翻看时内容在眼前跑
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            .onScrollGeometryChange(for: ScrollState.self) { geo in
+                ScrollState(atBottom: geo.contentOffset.y + geo.containerSize.height >= geo.contentSize.height - 24,
+                            contentHeight: geo.contentSize.height)
+            } action: { old, new in
+                // 回到底部就恢复跟随；只有内容高度没变（是用户在翻）时离开底部才停止跟随，
+                // 新来一句较长的字幕撑高内容、还没滚下去的那一下不算
+                if new.atBottom {
+                    followsBottom = true
+                } else if old.contentHeight == new.contentHeight {
+                    followsBottom = false
+                }
             }
             .onChange(of: rows.last?.id) { scrollIfFollowing(proxy) }
             .onChange(of: volatile?.text) { scrollIfFollowing(proxy) }
