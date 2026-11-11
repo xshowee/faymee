@@ -22,15 +22,18 @@ enum SentenceSplitter {
     private static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
 
     static func split(_ tokens: [TimedToken]) -> [TranscribedSentence] {
+        let (closed, open) = splitKeepingOpen(tokens)
+        return closed + (sentence(open).map { [$0] } ?? [])
+    }
+
+    /// 同 `split`，但最后一句没遇到句末标点或停顿时不算断完，原样留下它的字（open），
+    /// 实时字幕把它和下一段定稿结果的字拼起来再断。对整段 tokens 断句与分几次断的结果相同
+    static func splitKeepingOpen(_ tokens: [TimedToken]) -> (closed: [TranscribedSentence], open: [TimedToken]) {
         var sentences: [TranscribedSentence] = []
         var current: [TimedToken] = []
 
         func close() {
-            guard let first = current.first, let last = current.last else { return }
-            let text = joined(current)
-            if !text.isEmpty {
-                sentences.append(TranscribedSentence(start: first.start, end: last.end, text: text))
-            }
+            if let s = sentence(current) { sentences.append(s) }
             current = []
         }
         func characterCount() -> Int {
@@ -43,8 +46,9 @@ enum SentenceSplitter {
             let isPunctuation = trimmed.allSatisfy(\.isPunctuation)
             let isLong = token.end - token.start >= pause
 
-            // 两段之间真正的静音（时间不连续）总是断开
-            if let last = current.last, token.start - last.end >= pause { close() }
+            // 两段之间真正的静音（时间不连续）总是断开。标点除外：它属于前面的话，
+            // 流式识别时上一段定稿结果没带句号、句号出现在下一段开头的情形就是这样
+            if !isPunctuation, let last = current.last, token.start - last.end >= pause { close() }
             // 停顿并在这个字里，停顿在它前面
             if !isPunctuation, isLong, characterCount() >= minCharacters { close() }
 
@@ -57,8 +61,14 @@ enum SentenceSplitter {
                 close()
             }
         }
-        close()
-        return sentences
+        return (sentences, current)
+    }
+
+    /// 一串字拼成的一句；全是空白时为 nil
+    static func sentence(_ tokens: [TimedToken]) -> TranscribedSentence? {
+        guard let first = tokens.first, let last = tokens.last else { return nil }
+        let text = joined(tokens)
+        return text.isEmpty ? nil : TranscribedSentence(start: first.start, end: last.end, text: text)
     }
 
     /// 拼接文字：去掉标点前多余的空格（引擎会输出「好 ，」），保留中英文之间的空格

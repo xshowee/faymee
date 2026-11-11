@@ -19,6 +19,30 @@ import Testing
         ])
     }
 
+    /// 实时字幕边收边断句：一段定稿结果末尾没说完的半句先留着，和下一段的字拼起来再断
+    @Test func 末尾没说完的半句留给下一段() {
+        let first = SentenceSplitter.splitKeepingOpen(tokens([
+            ("你", 0, 0.2), ("好", 0.2, 0.4), ("。", 0.4, 0.5), ("开", 0.5, 0.7), ("始", 0.7, 0.9),
+        ]))
+        #expect(first.closed == [TranscribedSentence(start: 0, end: 0.5, text: "你好。")])
+        #expect(first.open == tokens([("开", 0.5, 0.7), ("始", 0.7, 0.9)]))
+
+        let second = SentenceSplitter.splitKeepingOpen(first.open + tokens([("吧", 0.9, 1.1), ("！", 1.1, 1.2)]))
+        #expect(second.closed == [TranscribedSentence(start: 0.5, end: 1.2, text: "开始吧！")])
+        #expect(second.open.isEmpty)
+    }
+
+    /// 本机流式识别的真实情形：上一段定稿结果没带句号，句号出现在下一段开头，与前一个字隔了 0.42 秒
+    @Test func 停顿后紧跟的标点归前一句_不单独成句() {
+        let input = tokens([("一", 32.4, 32.7), ("周", 32.7, 32.88), ("左", 32.88, 32.94), ("右", 32.94, 33.06),
+                            ("。", 33.48, 33.66), ("明", 33.66, 33.9), ("白", 33.9, 34.1), ("了", 34.1, 34.3)])
+
+        #expect(SentenceSplitter.split(input) == [
+            TranscribedSentence(start: 32.4, end: 33.66, text: "一周左右。"),
+            TranscribedSentence(start: 33.66, end: 34.3, text: "明白了"),
+        ])
+    }
+
     @Test func 没有标点时在停顿处断句且不切出过短的片段() {
         // 本机真实输出（say -v Tingting「大家好，我们先过一下上周的待办。第二件事，下周三要和飞书团队开会。」）。
         // 停顿被并进下一个字的时间里：「第」「下」各占 0.48、0.6 秒，普通字 0.1–0.3 秒
