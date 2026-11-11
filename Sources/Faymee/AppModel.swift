@@ -120,6 +120,32 @@ final class AppModel {
     /// 启动就建好：它要一直记着最近在前台的别的 App，记完一笔把焦点还回去
     @ObservationIgnored private let noteInput = NoteInputController()
 
+    /// “实时字幕”开关，记在 UserDefaults，默认打开。关闭时会中面板只显示标注和输入框，不跑引擎；
+    /// 录音中修改立即生效。设置窗口里绑定它
+    var liveCaptionsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(liveCaptionsEnabled, forKey: "liveCaptions")
+            livePanel.captionsEnabled = liveCaptionsEnabled
+        }
+    }
+    /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
+    private(set) var liveCaptions: LiveCaptions? {
+        didSet {
+            recorder.liveTap = liveCaptions?.tap
+            livePanel.captions = liveCaptions
+        }
+    }
+    @ObservationIgnored private lazy var livePanel: LivePanelController = {
+        let panel = LivePanelController(model: self)
+        panel.captionsEnabled = liveCaptionsEnabled
+        return panel
+    }()
+    /// 录音开始时是否自动打开会中面板：记住上次录音结束时面板开没开，默认不开（投屏时不突然出现）
+    private var opensLivePanelOnStart: Bool {
+        get { UserDefaults.standard.bool(forKey: "livePanelOpensOnStart") }
+        set { UserDefaults.standard.set(newValue, forKey: "livePanelOpensOnStart") }
+    }
+
     /// “区分说话人”开关，记在 UserDefaults，默认打开。关闭时完整转写跳过区分说话人；
     /// 只影响之后开始的转写。设置窗口里绑定它
     var diarizeSpeakers: Bool {
@@ -165,6 +191,7 @@ final class AppModel {
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
         diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
         globalShortcutsEnabled = UserDefaults.standard.object(forKey: "globalShortcuts") as? Bool ?? true
+        liveCaptionsEnabled = UserDefaults.standard.object(forKey: "liveCaptions") as? Bool ?? true
         hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
         noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
         meetings = store.loadAll()
@@ -240,13 +267,16 @@ final class AppModel {
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+        startLiveCaptions()
     }
 
     func stop() {
         guard current != nil else { return }
         // 先收下正在输入的笔记：下面停止录音会用此刻的会议覆盖写盘
         noteInput.saveIfOpen()
+        livePanel.saveDraft()
         guard var m = current else { return }
+        stopLiveCaptions()
         recorder.stop()
         timer?.invalidate()
         timer = nil
@@ -301,6 +331,7 @@ final class AppModel {
         // 先切设备再判断合盖：合盖时若有外接麦克风，直接切过去，不产生空白
         reconcileDevice()
         checkLid()
+        livePanel.refreshVisibility()
 
         if let since = silentSince, Date().timeIntervalSince(since) >= Self.silenceAlertAfter {
             isSilent = true
@@ -354,6 +385,29 @@ final class AppModel {
         if let desired, desired.uid != recorder.currentDevice?.uid {
             recorder.restart()
         }
+    }
+
+    // MARK: - 会中面板、实时字幕
+
+    /// 打开会中面板（菜单栏面板的“会中面板”）。不在录音时什么也不做
+    func showLivePanel() {
+        guard isRecording else { return }
+        livePanel.show()
+    }
+
+    /// 录音开始：建好本场的实时字幕（面板第一次看得见时才准备模型），按上次的状态决定是否打开面板
+    private func startLiveCaptions() {
+        guard let m = current else { return }
+        liveCaptions = LiveCaptions(engine: LiveCaptionEngine.make(), recordingStartedAt: m.startedAt,
+                                    hotwords: hotwords)
+        if opensLivePanelOnStart { livePanel.show() }
+    }
+
+    /// 录音停止：记下面板开没开（下次录音照样），关掉面板，字幕随之丢弃
+    private func stopLiveCaptions() {
+        opensLivePanelOnStart = livePanel.isOpen
+        livePanel.close()
+        liveCaptions = nil
     }
 
     // MARK: - 会中标注

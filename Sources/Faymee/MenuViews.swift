@@ -155,7 +155,7 @@ struct MenuContent: View {
         .controlSize(.large)
     }
 
-    /// 会中标注的入口：标记重点、记一笔。快捷键被占用时说明是哪个，按钮照常可用
+    /// 会中标注的入口：标记重点、记一笔、会中面板。快捷键被占用时说明是哪个，按钮照常可用
     @ViewBuilder private var annotationButtons: some View {
         HStack {
             Button {
@@ -174,6 +174,15 @@ struct MenuContent: View {
             .help(shortcutHelp(.note))
         }
         .controlSize(.large)
+
+        Button {
+            model.showLivePanel()
+        } label: {
+            Label("会中面板", systemImage: "captions.bubble")
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .help("实时字幕、标注和笔记输入框")
 
         if let notice = LiveShortcut.conflictNotice(failed: model.shortcutConflicts) {
             Text(notice)
