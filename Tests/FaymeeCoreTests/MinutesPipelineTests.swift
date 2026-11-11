@@ -133,6 +133,13 @@ private final class FakeHost: MinutesHost, TranscriptionHost {
         meetings[id] = m
         try! store.save(m)
     }
+
+    func setDiarization(_ state: DiarizationState?, for id: String) {
+        guard var m = meetings[id] else { return }
+        m.diarization = state
+        meetings[id] = m
+        try! store.save(m)
+    }
 }
 
 /// 转写稿：两句一段合盖空白。createdAt 带小数秒，和真实转写一样（写盘后会丢掉小数）
@@ -453,6 +460,43 @@ private final class Fixture {
         let minutes = try #require(try f.store.loadMinutes("m1"))
         #expect(minutes.source == MinutesSource(transcriptCreatedAt: snapshot.createdAt, textHash: snapshot.textHash))
         #expect(minutes.sections.first?.items.first?.refs.map(\.id) == ["s1", "s2"])
+    }
+
+    /// 写盘前按磁盘上最新的旧纪要继承忽略：生成期间才点的“忽略”也算
+    @Test func 重新生成继承旧纪要里忽略的姓名建议_含生成期间忽略的() async throws {
+        let engine = FakeGenerator()
+        engine.respond = { prompt in
+            prompt.contains("[s") ? #"{"overview": [], "speakers": [{"speaker": "说话人 2", "name": "王总", "refs": ["s1"]}]}"#
+                : oneOverview
+        }
+        let f = Fixture(engine)
+        var transcript = makeTranscript(["王总你怎么看", "我觉得可以"])
+        transcript.items = transcript.items.map { item in
+            guard case var .sentence(s) = item else { return item }
+            s.speaker = s.id == "s1" ? "spk1" : "spk2"
+            return .sentence(s)
+        }
+        transcript.diarization = Diarization(
+            engine: "fake-diarizer/1", voiceprintModel: "fake-embedding/1", speakersCreatedAt: at(3700),
+            speakers: ["spk1", "spk2"].map { Speaker(id: $0, voiceprint: Voiceprint([1]), speechDuration: 30) })
+        f.addMeeting(transcript: transcript)
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.nameSuggestions.map(\.ignored) == [false])
+
+        engine.block = true
+        f.pipeline.enqueue("m1")
+        var started = engine.started.makeAsyncIterator()
+        await started.next()
+        var old = try #require(try f.store.loadMinutes("m1"))
+        old.ignoreNameSuggestion(speaker: "spk2", name: "王总")
+        try f.store.saveMinutes(old, for: "m1")
+        engine.block = false
+        try await f.drain()
+
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        #expect(minutes.nameSuggestions.map(\.name) == ["王总"])
+        #expect(minutes.nameSuggestions.map(\.ignored) == [true])
     }
 
     @Test func 用电池时自动任务保持排队_接上电源后开始() async throws {

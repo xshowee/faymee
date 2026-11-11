@@ -79,6 +79,20 @@ public final class MeetingStore {
         return try decoder.decode(Transcript.self, from: Data(contentsOf: url))
     }
 
+    /// 有没有转写稿文件（不读内容，不管能不能读）
+    public func hasTranscript(_ id: String) -> Bool {
+        FileManager.default.fileExists(atPath: transcriptURL(id).path)
+    }
+
+    /// 只读转写稿的生成时间和有没有说话人，不解出句子和说话人。管线在主线程上判断状态用，
+    /// 长会议的转写稿完整解码会卡界面。`createdAt` 与 `loadTranscript` 读出的相等。
+    /// 还没有转写稿时返回 nil；文件存在但读不了时抛错
+    public func loadTranscriptSummary(_ id: String) throws -> TranscriptSummary? {
+        let url = transcriptURL(id)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try decoder.decode(TranscriptSummary.self, from: Data(contentsOf: url))
+    }
+
     /// 原子写入：中途崩溃不会留下半份转写稿。会议目录已不存在（被删除）时失败，不会重建目录
     public func saveTranscript(_ t: Transcript, for id: String) throws {
         try encoder.encode(t).write(to: transcriptURL(id), options: .atomic)
@@ -107,5 +121,30 @@ public final class MeetingStore {
     /// 移到废纸篓而不是直接删除，误删还能找回
     public func trash(_ id: String) throws {
         try FileManager.default.trashItem(at: directory(id), resultingItemURL: nil)
+    }
+}
+
+/// 转写稿的摘要，见 `MeetingStore.loadTranscriptSummary(_:)`
+public struct TranscriptSummary: Decodable, Hashable, Sendable {
+    public var createdAt: Date
+    /// 区分过说话人（`Transcript.diarization` 不为 nil）
+    public var hasSpeakers: Bool
+
+    public init(createdAt: Date, hasSpeakers: Bool) {
+        self.createdAt = createdAt
+        self.hasSpeakers = hasSpeakers
+    }
+
+    private enum CodingKeys: String, CodingKey { case createdAt, diarization }
+
+    /// 只看字段在不在，不解它的内容
+    private struct Present: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        hasSpeakers = try c.decodeIfPresent(Present.self, forKey: .diarization) != nil
     }
 }

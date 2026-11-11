@@ -17,18 +17,32 @@ struct TranscriptSection: View {
     var meeting: Meeting
     var playback: Playback?
     @Binding var transcript: Transcript?
+    /// 和纪要部分共用的纪要：读姓名建议，点“忽略”时写回
+    @Binding var minutes: Minutes?
     /// 转写稿读取失败的原因
     var loadError: String?
     /// 纪要点出处时的定位请求，处理完置空
     @Binding var reveal: TranscriptReveal?
     @State private var saveError: String?
     @State private var confirmingRetranscribe = false
+    /// 正在改名的说话人和输入框里的名字
+    @State private var renaming: Speaker?
+    @State private var renameDraft = ""
+    /// 改名改成了本场另一个说话人的名字，等确认合并
+    @State private var pendingMerge: SpeakerMerge?
+    /// 有说话人修改时重新区分前先确认
+    @State private var pendingRediarize: Rediarize?
+    /// 记住声音成功后的短暂提示，和哪次登记设的（连点两次时，第一次的计时不清掉第二次的提示）
+    @State private var voiceprintNotice: VoiceprintNotice?
+    /// 采纳姓名建议后，顺便问一句要不要记住这个声音（只给按钮，用户点了才登记）
+    @State private var enrollOffer: EnrollOffer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("转写稿").font(.headline)
                 status
+                speakerStatusView
                 Spacer()
                 actions
             }
@@ -40,6 +54,26 @@ struct TranscriptSection: View {
                     .foregroundStyle(.orange)
             }
 
+            if let voiceprintNotice {
+                Label(voiceprintNotice.text, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // 之后又改了名（或清空、合并掉）就不再问：按钮会按新名字登记，提示里的名字已不对
+            if let enrollOffer, transcript?.speaker(enrollOffer.speakerID)?.displayName == enrollOffer.name {
+                enrollOfferView(enrollOffer)
+            }
+
+            let suggestions = nameSuggestionActions
+            if let transcript, transcript.diarization != nil, !transcript.items.isEmpty {
+                SpeakerBar(transcript: transcript, canEdit: canEditSpeakers,
+                           onRename: beginRename,
+                           onMerge: { source, target in update { $0.mergeSpeaker(source, into: target) } },
+                           voiceprintActions: voiceprintActions(transcript),
+                           suggestions: suggestions)
+            }
+
             if let transcript {
                 if transcript.items.isEmpty {
                     placeholder("没有识别出文字")
@@ -47,20 +81,214 @@ struct TranscriptSection: View {
                     TranscriptList(transcript: transcript, playback: playback, isEditable: isEditable,
                                    reveal: $reveal,
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
-                                   onRestore: { id in update { $0.restore(sentence: id) } })
+                                   onRestore: { id in update { $0.restore(sentence: id) } },
+                                   speakerActions: speakerActions, suggestions: suggestions)
                 }
             } else if let loadError {
                 placeholder(loadError)
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        // 转写稿由 MeetingDetail 在转写状态变化时重读，之前的保存错误随之作废
+        // 转写稿由 MeetingDetail 在转写、说话人状态变化时重读，之前的保存错误随之作废
         .onChange(of: meeting.transcription) { saveError = nil }
-        .confirmationDialog("重新转写会丢弃 \(transcript?.editCount ?? 0) 处修改",
+        .onChange(of: meeting.diarization) { saveError = nil }
+        .onChange(of: meeting.id) {
+            voiceprintNotice = nil
+            enrollOffer = nil
+        }
+        // 重新区分、重新转写后编号已重排，问的那个 spk2 不再是同一个人
+        .onChange(of: transcript?.speakersCreatedAt) { enrollOffer = nil }
+        // 开始区分说话人时关掉还没确认的改名、合并：结束时说话人整体替换
+        .onChange(of: canEditSpeakers) { _, editable in
+            if !editable {
+                renaming = nil
+                pendingMerge = nil
+                enrollOffer = nil
+            }
+        }
+        .confirmationDialog("重新转写会丢弃 \(retranscribeEditCount) 处修改",
                             isPresented: $confirmingRetranscribe) {
             Button("重新转写", role: .destructive) { model.transcription.enqueue(meeting.id) }
         } message: {
-            Text("转写完成前仍显示当前转写稿，成功后整体替换。")
+            if transcript?.diarization != nil, !model.transcription.transcriptionDiarizes {
+                Text("转写完成前仍显示当前转写稿，成功后整体替换。这次不区分说话人，新转写稿没有说话人，说话人和名字都会丢掉。")
+            } else {
+                Text("转写完成前仍显示当前转写稿，成功后整体替换。")
+            }
+        }
+        .alert("给说话人改名", isPresented: $renaming.isPresent(), presenting: renaming) { speaker in
+            TextField(speaker.displayName, text: $renameDraft)
+            Button("改名") { rename(speaker.id, to: renameDraft) }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("转写稿里这个人的所有句子都会显示新名字。留空则恢复为编号。")
+        }
+        .confirmationDialog(pendingMerge.map { "“\($0.name)”已是本场的另一个说话人，合并为同一人？" } ?? "",
+                            isPresented: $pendingMerge.isPresent(), presenting: pendingMerge) { merge in
+            Button("合并") {
+                guard var edited = transcript, edited.mergeSpeaker(merge.source, into: merge.target),
+                      save(edited) else { return }
+                // 采纳姓名建议引起的合并：问的是合并后的那个人
+                if merge.offersEnroll { offerEnroll(merge.target, in: edited) }
+            }
+        } message: { _ in
+            Text("两人的句子会归到同一个说话人下。")
+        }
+        .confirmationDialog("重新区分说话人会丢弃 \(transcript?.speakerEditCount ?? 0) 处说话人修改",
+                            isPresented: $pendingRediarize.isPresent(), presenting: pendingRediarize) { request in
+            Button("重新区分说话人", role: .destructive) {
+                model.transcription.enqueueDiarization(meeting.id, speakerCount: request.speakerCount)
+            }
+        } message: { _ in
+            Text("完成前仍显示当前说话人。名字会沿用到时间上重合最多的新说话人，句子文字不变。")
+        }
+    }
+
+    private var speakerStatus: SpeakerStatus {
+        SpeakerStatus(transcription: meeting.transcription, diarization: meeting.diarization,
+                      activity: model.transcription.activity(for: meeting.id), transcript: transcript,
+                      canDiarize: model.transcription.canDiarize)
+    }
+
+    /// 改说话人（改名、合并、单句改）：转写中不能改（同改文字），区分说话人排队或进行中也不能改，
+    /// 结束时说话人整体替换，这期间的修改会被清掉
+    private var canEditSpeakers: Bool { isEditable && !speakerStatus.isBusy }
+
+    /// 已有说话人时可以指定人数重新区分；没有引擎时入队总会失败，不给入口
+    private var canRediarize: Bool {
+        transcript?.diarization != nil && model.transcription.canDiarize
+    }
+
+    private var speakerActions: SpeakerActions? {
+        guard transcript?.diarization != nil else { return nil }
+        return SpeakerActions(
+            canEdit: canEditSpeakers,
+            onSet: { id, speaker in update { $0.setSpeaker(sentence: id, to: speaker) } },
+            onNew: { id in update { $0.setNewSpeaker(sentence: id) != nil } },
+            onRestore: { id in update { $0.restoreSpeaker(sentence: id) } },
+            onRename: { id in if let s = transcript?.speaker(id) { beginRename(s) } })
+    }
+
+    private func voiceprintActions(_ transcript: Transcript) -> VoiceprintActions {
+        let library = model.voiceprints.library
+        let current = model.transcription.voiceprintModel
+        return VoiceprintActions(
+            enrollment: { speaker in
+                library.enrollmentOption(speaker: speaker.id, in: transcript, meetingID: meeting.id,
+                                         currentVoiceprintModel: current)
+            },
+            onEnroll: { speaker in enroll(speaker, from: transcript) },
+            onReject: { speaker in update { $0.rejectRecognizedPerson(speaker.id) } })
+    }
+
+    /// 姓名建议：采纳走改名（同名时照常确认合并），忽略写纪要。转写稿和纪要不可用时为空
+    private var nameSuggestionActions: NameSuggestionActions {
+        let prompts = minutes?.nameSuggestionPrompts(transcript: transcript) ?? [:]
+        guard !prompts.isEmpty else { return NameSuggestionActions() }
+        return NameSuggestionActions(
+            prompts: prompts, canAdopt: canEditSpeakers,
+            onAdopt: { prompt in rename(prompt.speaker, to: prompt.name, offeringEnroll: true) },
+            onIgnore: ignore,
+            onJump: { target in
+                playback?.play(from: target.time)
+                reveal = TranscriptReveal(sentenceID: target.sentenceID, time: target.time)
+            })
+    }
+
+    /// 忽略建议：从磁盘重读纪要再改，免得把刚生成好、界面还没换上的新纪要用旧的覆盖。
+    /// 不算人工修改，生成纪要期间也可以点（管线写盘前会继承）
+    private func ignore(_ prompt: NameSuggestionPrompt) {
+        do {
+            guard var current = try model.store.loadMinutes(meeting.id) else { return }
+            if current.ignoreNameSuggestion(speaker: prompt.speaker, name: prompt.name) {
+                try model.store.saveMinutes(current, for: meeting.id)
+            }
+            minutes = current
+            saveError = nil
+        } catch {
+            saveError = "没能忽略建议：\(error.localizedDescription)"
+        }
+    }
+
+    /// 采纳建议改名成功后：这个人能登记声纹时，给一个“记住这个声音”按钮。不自动登记
+    private func offerEnroll(_ id: String, in edited: Transcript) {
+        guard let speaker = edited.speaker(id) else { return }
+        let option = model.voiceprints.library.enrollmentOption(
+            speaker: id, in: edited, meetingID: meeting.id,
+            currentVoiceprintModel: model.transcription.voiceprintModel)
+        enrollOffer = option.isEnabled
+            ? EnrollOffer(speakerID: id, name: speaker.displayName, title: option.title) : nil
+    }
+
+    private func enrollOfferView(_ offer: EnrollOffer) -> some View {
+        HStack(spacing: 8) {
+            Label("已改名为\(offer.name)", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
+            Button(offer.title) {
+                enrollOffer = nil
+                if let transcript, let speaker = transcript.speaker(offer.speakerID) {
+                    enroll(speaker, from: transcript)
+                }
+            }
+            .help("以后的会议自动认出\(offer.name)；声纹只存在这台 Mac 上")
+            Button {
+                enrollOffer = nil
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .help("不用了")
+        }
+        .font(.caption)
+        .controlSize(.small)
+    }
+
+    /// 记住这个声音：只写声纹库，不改转写稿。之后的会议才会认出此人
+    private func enroll(_ speaker: Speaker, from transcript: Transcript) {
+        do {
+            try model.voiceprints.enroll(speaker: speaker.id, from: transcript, meetingID: meeting.id)
+            saveError = nil
+            let notice = VoiceprintNotice(text: "已记住\(speaker.displayName)的声音，之后的会议会自动认出")
+            voiceprintNotice = notice
+            Task {
+                try? await Task.sleep(for: .seconds(4))
+                if voiceprintNotice?.id == notice.id { voiceprintNotice = nil }
+            }
+        } catch {
+            saveError = "没能记住声音：\(error.localizedDescription)"
+        }
+    }
+
+    private func beginRename(_ speaker: Speaker) {
+        renameDraft = speaker.name ?? ""
+        renaming = speaker
+    }
+
+    /// 改成本场另一个人的名字时不直接改，先确认合并。
+    /// `offeringEnroll`：采纳姓名建议，改好后问要不要记住这个声音
+    private func rename(_ id: String, to name: String, offeringEnroll: Bool = false) {
+        guard var edited = transcript else { return }
+        switch edited.renameSpeaker(id, to: name) {
+        case .unchanged:
+            break
+        case .renamed:
+            if save(edited), offeringEnroll { offerEnroll(id, in: edited) }
+        case let .needsMerge(target):
+            // 清空名字退回的“说话人 N”与别人相同时 name 为空，提示里显示对方的名字
+            let merge = SpeakerMerge(source: id, target: target,
+                                     name: edited.speaker(target)?.displayName ?? name,
+                                     offersEnroll: offeringEnroll)
+            // 等改名框关掉再弹合并确认，同一刻弹出可能被吞掉
+            Task { pendingMerge = merge }
+        }
+    }
+
+    /// 重新区分说话人（含区分失败后的“重试”）。会清掉单句改过的说话人和合并，有这类修改时先确认
+    private func rediarize(_ speakerCount: Int?) {
+        if let transcript, transcript.speakerEditCount > 0 {
+            pendingRediarize = Rediarize(speakerCount: speakerCount)
+        } else {
+            model.transcription.enqueueDiarization(meeting.id, speakerCount: speakerCount)
         }
     }
 
@@ -73,9 +301,14 @@ struct TranscriptSection: View {
         }
     }
 
+    /// 重新转写会丢弃的修改数。这次不区分说话人（开关关着、没有引擎）时说话人名字也会丢，一起算
+    private var retranscribeEditCount: Int {
+        transcript?.retranscribeEditCount(diarizes: model.transcription.transcriptionDiarizes) ?? 0
+    }
+
     /// “重试”和“重新转写”成功后都会整份替换现有转写稿，有人工修改时先确认
     private func retranscribe() {
-        if let transcript, transcript.editCount > 0 {
+        if retranscribeEditCount > 0 {
             confirmingRetranscribe = true
         } else {
             model.transcription.enqueue(meeting.id)
@@ -85,12 +318,59 @@ struct TranscriptSection: View {
     /// 改一句就整份原子写盘。写盘失败时界面保持磁盘上的样子，不显示没保存的修改
     private func update(_ change: (inout Transcript) -> Bool) {
         guard var edited = transcript, change(&edited) else { return }
+        save(edited)
+    }
+
+    @discardableResult
+    private func save(_ edited: Transcript) -> Bool {
         do {
             try model.store.saveTranscript(edited, for: meeting.id)
             transcript = edited
             saveError = nil
+            return true
         } catch {
             saveError = "修改没能保存：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// 说话人的状态和操作：区分进度、排队、失败原因和重试、旧会议的“区分说话人”。
+    /// 转写排队或进行中时不显示，由转写状态说明
+    @ViewBuilder private var speakerStatusView: some View {
+        let status = speakerStatus
+        if let text = status.text {
+            if let p = status.progress {
+                progress(text, p)
+            } else if case .failed = status {
+                Label(text, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            } else {
+                Text(text).foregroundStyle(.secondary)
+            }
+        }
+        // 区分前后、失败时入口都在这一个位置：从未区分是“区分说话人”，失败是“重试”（点按钮自动判断人数，
+        // 箭头里可以指定人数），区分过是“重新区分说话人”菜单（只有菜单，免得误点就整份重新区分）
+        if let title = status.actionTitle {
+            Menu(title) { rediarizeItems } primaryAction: { rediarize(nil) }
+                .fixedSize()
+                .disabled(!canEditSpeakers)
+        } else if status == .done, canRediarize {
+            Menu("重新区分说话人") { rediarizeItems }
+                .fixedSize()
+                .disabled(!canEditSpeakers)
+                .help("人数不对时指定人数重新区分；名字会沿用到时间上重合最多的新说话人")
+        }
+    }
+
+    /// “重新区分说话人”可选的人数上限
+    private static let maxSpeakerCount = 8
+
+    @ViewBuilder private var rediarizeItems: some View {
+        Button("自动判断人数") { rediarize(nil) }
+        Divider()
+        ForEach(2...Self.maxSpeakerCount, id: \.self) { n in
+            Button("\(n) 人") { rediarize(n) }
         }
     }
 
@@ -101,6 +381,9 @@ struct TranscriptSection: View {
                 progress("正在准备转写引擎（\(formatPercent(p))）", p)
             case let .transcribing(p):
                 progress("转写中 \(formatPercent(p))", p)
+            case .diarizing:
+                // 由 speakerStatusView 显示
+                EmptyView()
             }
         } else {
             switch meeting.transcription?.status {
@@ -117,6 +400,7 @@ struct TranscriptSection: View {
                     .foregroundStyle(.orange)
                     .lineLimit(2)
                 Button("重试") { retranscribe() }
+                    .disabled(isDiarizing)
             case .done:
                 EmptyView()
             }
@@ -130,7 +414,13 @@ struct TranscriptSection: View {
         // 转写稿缺失或读不出来时也要能重新转写，否则就再也转不了
         if meeting.transcription?.status == .done {
             Button("重新转写") { retranscribe() }
+                // 只区分说话人正在进行时管线不接受重新转写
+                .disabled(isDiarizing)
         }
+    }
+
+    private var isDiarizing: Bool {
+        if case .diarizing = speakerStatus { true } else { false }
     }
 
     private func progress(_ title: String, _ value: Double) -> some View {
@@ -152,6 +442,40 @@ struct TranscriptSection: View {
     }
 }
 
+private struct SpeakerMerge {
+    var source: String
+    var target: String
+    /// 合并目标的显示名（即用户输入的名字），确认提示里显示
+    var name: String
+    /// 采纳姓名建议引起的合并：合并后问要不要记住这个声音
+    var offersEnroll = false
+}
+
+/// 采纳建议后“记住这个声音”的按钮：对哪个说话人，标题同说话人菜单里那一项
+private struct EnrollOffer {
+    var speakerID: String
+    var name: String
+    var title: String
+}
+
+private struct Rediarize {
+    var speakerCount: Int?
+}
+
+private struct VoiceprintNotice {
+    let id = UUID()
+    var text: String
+}
+
+/// 转写稿区分过说话人时，句子菜单里改说话人、段首点名字改名用的操作
+struct SpeakerActions {
+    var canEdit: Bool
+    var onSet: (_ sentenceID: String, _ speakerID: String) -> Void
+    var onNew: (_ sentenceID: String) -> Void
+    var onRestore: (_ sentenceID: String) -> Void
+    var onRename: (_ speakerID: String) -> Void
+}
+
 /// 列表里谁有键盘焦点：列表本身（⌘A/⌘C）或正在编辑的句子
 private enum TranscriptFocus: Hashable {
     case list
@@ -168,6 +492,10 @@ private struct TranscriptList: View {
     @Binding var reveal: TranscriptReveal?
     var onEdit: (_ id: String, _ text: String) -> Void
     var onRestore: (_ id: String) -> Void
+    /// 区分过说话人时才有
+    var speakerActions: SpeakerActions?
+    /// 姓名建议挂在这个人第一次开口的段首
+    var suggestions = NameSuggestionActions()
     @State private var following = true
     /// 纪要点出处后短暂高亮的条目，和哪次请求高亮的（连点两次时，第一次的计时不清掉第二次的高亮）
     @State private var revealed: Int?
@@ -180,11 +508,15 @@ private struct TranscriptList: View {
     @FocusState private var focus: TranscriptFocus?
 
     var body: some View {
+        // 段首和可选的说话人整份算一次，不在每行里重算
+        let turns = transcript.speakerTurns
+        let choices = transcript.speakerList.map { SpeakerChoice(id: $0.speaker.id, name: $0.speaker.displayName) }
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(transcript.items.indices, id: \.self) { i in
-                        row(i, isCurrent: i == current, isRevealed: i == revealed)
+                        row(i, turn: turns[i], isFirst: i == 0, choices: choices,
+                            isCurrent: i == current, isRevealed: i == revealed)
                             .id(i)
                     }
                 }
@@ -259,13 +591,29 @@ private struct TranscriptList: View {
         .onExitCommand { allSelected = false }
     }
 
-    @ViewBuilder private func row(_ i: Int, isCurrent: Bool, isRevealed: Bool) -> some View {
-        Group {
+    @ViewBuilder private func row(_ i: Int, turn: SpeakerTurn?, isFirst: Bool, choices: [SpeakerChoice],
+                                  isCurrent: Bool, isRevealed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let turn {
+                HStack(spacing: 8) {
+                    SpeakerTurnHeader(turn: turn, canEdit: speakerActions?.canEdit ?? false) { id in
+                        commitEdit()
+                        speakerActions?.onRename(id)
+                    }
+                    if turn.isFirstOfSpeaker, let id = turn.speakerID, let prompt = suggestions.prompts[id] {
+                        NameSuggestionView(prompt: prompt, actions: suggestions)
+                    }
+                }
+                // 与句子文字左对齐：行的外边距 4 + 内边距 8 + 时间列 + 间距 10
+                .padding(.leading, 12 + timeWidth + 10)
+                .padding(.top, isFirst ? 4 : 10)
+            }
             switch transcript.items[i] {
             case let .sentence(s):
                 TranscriptSentenceRow(
                     sentence: s, isCurrent: isCurrent, isRevealed: isRevealed, timeWidth: timeWidth,
                     isEditable: isEditable,
+                    speakerMenu: speakerMenu(for: s, choices: choices),
                     isEditing: editingID == s.id, draft: $draft, focus: $focus,
                     onSeek: {
                         commitEdit()
@@ -286,6 +634,30 @@ private struct TranscriptList: View {
             }
         }
         .background(allSelected ? Color(nsColor: .selectedTextBackgroundColor) : .clear)
+    }
+
+    private func speakerMenu(for s: TranscriptSentence, choices: [SpeakerChoice]) -> SentenceSpeakerMenu? {
+        guard let actions = speakerActions, actions.canEdit else { return nil }
+        // 只有改过说话人的句子才去查能不能恢复
+        let canRestore = s.originalSpeaker != nil && transcript.canRestoreSpeaker(sentence: s.id)
+        let original = s.originalSpeaker.map { o in
+            o.speaker.flatMap(transcript.speaker)?.displayName ?? Speaker.unknownName
+        }
+        return SentenceSpeakerMenu(
+            choices: choices.filter { $0.id != s.speaker },
+            restoreTo: canRestore ? original : nil,
+            onSet: { id in
+                commitEdit()
+                actions.onSet(s.id, id)
+            },
+            onNew: {
+                commitEdit()
+                actions.onNew(s.id)
+            },
+            onRestore: {
+                commitEdit()
+                actions.onRestore(s.id)
+            })
     }
 
     /// 定位到纪要出处那句：结束编辑、恢复跟随、滚过去并短暂高亮。播放由点出处的一方负责
@@ -363,6 +735,8 @@ private struct TranscriptSentenceRow: View {
     var isRevealed = false
     var timeWidth: CGFloat
     var isEditable: Bool
+    /// 右键菜单里改这句的说话人；没区分过、不能改说话人时为 nil
+    var speakerMenu: SentenceSpeakerMenu?
     var isEditing: Bool
     @Binding var draft: String
     var focus: FocusState<TranscriptFocus?>.Binding
@@ -415,9 +789,37 @@ private struct TranscriptSentenceRow: View {
                         Button("恢复原文", action: onRestore)
                     }
                 }
+                if let speakerMenu {
+                    Divider()
+                    Menu("改说话人") {
+                        ForEach(speakerMenu.choices) { choice in
+                            Button(choice.name) { speakerMenu.onSet(choice.id) }
+                        }
+                        if !speakerMenu.choices.isEmpty { Divider() }
+                        Button("新说话人", action: speakerMenu.onNew)
+                    }
+                    if let name = speakerMenu.restoreTo {
+                        Button("恢复说话人（\(name)）", action: speakerMenu.onRestore)
+                    }
+                }
             }
         }
     }
+}
+
+private struct SpeakerChoice: Identifiable {
+    var id: String
+    var name: String
+}
+
+private struct SentenceSpeakerMenu {
+    /// 可以改给的说话人，不含这句当前的
+    var choices: [SpeakerChoice]
+    /// 能恢复时为区分结果原来的说话人名字（可能是“未知”）
+    var restoreTo: String?
+    var onSet: (_ speakerID: String) -> Void
+    var onNew: () -> Void
+    var onRestore: () -> Void
 }
 
 /// 人工修改过的标记：不显眼的铅笔图标，点开显示引擎原文和“恢复原文”

@@ -110,6 +110,21 @@ struct LlamaTextGeneratorModelTests {
         }
     }
 
+    /// 带说话人身份的文法：llama 能解析，speaker 只能是给出的标签
+    @Test func 带说话人身份的输出文法能被llama解析_标签只能是给出的() async throws {
+        try await engine.load { _ in }
+        let output = try await engine.generate(
+            system: "你是助手。只输出 JSON。",
+            prompt: #"原样输出：{"overview": [], "speakers": [{"speaker": "说话人 9", "name": "王总", "refs": ["s1"]}]}"#,
+            maxTokens: 80, grammar: outputGrammar([.overview], speakers: ["说话人 1", "说话人 2"]))
+
+        #expect(engine.lastStats?.endedByEOG == true, "\(output)")
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let guesses = try #require(object["speakers"] as? [[String: Any]], "\(output)")
+        #expect(guesses.count <= 2)
+        #expect(guesses.allSatisfy { ["说话人 1", "说话人 2"].contains($0["speaker"] as? String ?? "") }, "\(output)")
+    }
+
     @Test func 文法写错时抛错() async throws {
         try await engine.load { _ in }
         await #expect(throws: LlamaError.invalidGrammar) {

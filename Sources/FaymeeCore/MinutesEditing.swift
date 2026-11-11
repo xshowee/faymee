@@ -24,23 +24,39 @@ extension Minutes {
     /// - 文字清空不算修改（要去掉就删除）
     /// - 改回模型原文等于恢复原文，不再算修改
     /// - 已删除的条目不能改，要改先撤销删除
+    /// - 负责人与说话人的关联：`owner` 按显示出来的负责人（`displayedOwner(of:transcript:)`）比较，
+    ///   界面按显示的名字预填，原样保存不算改负责人，关联保留；改回模型原文显示的名字时关联回来；
+    ///   其他改动（含清空）都是手动修改，清掉关联，之后不再跟着说话人改名
     /// 返回纪要是否有变化，没有变化就不必写盘
+    ///
+    /// - Parameter transcript: 当前转写稿，用来算显示出来的负责人；不给时按存下的负责人文字比较
     @discardableResult
     public mutating func edit(item id: String, text: String, owner: String? = nil, due: String? = nil,
-                              dueDate: CalendarDate? = nil) -> Bool {
+                              dueDate: CalendarDate? = nil, transcript: Transcript? = nil) -> Bool {
         guard let text = text.singleLine, let (s, i) = itemIndex(id, deleted: false) else { return false }
         var item = sections[s].items[i]
         let isAction = sections[s].kind == .actions
-        let content = isAction
-            ? MinutesItem.Original(text: text, owner: owner?.singleLine, due: due?.singleLine,
-                                   dueDate: dueDate)
-            : MinutesItem.Original(text: text)
-        guard content != item.content else { return false }
         let original = item.original ?? item.content
+        let content: MinutesItem.Original
+        if isAction {
+            let owner = owner?.singleLine
+            func shown(_ c: MinutesItem.Original) -> String? {
+                displayedOwner(c.owner, speaker: c.ownerSpeaker, transcript: transcript)
+            }
+            let (ownerText, ownerSpeaker) = owner == shown(item.content) ? (item.owner, item.ownerSpeaker)
+                : owner == shown(original) ? (original.owner, original.ownerSpeaker)
+                : (owner, nil)
+            content = MinutesItem.Original(text: text, owner: ownerText, due: due?.singleLine, dueDate: dueDate,
+                                           ownerSpeaker: ownerSpeaker)
+        } else {
+            content = MinutesItem.Original(text: text)
+        }
+        guard content != item.content else { return false }
         item.text = content.text
         item.owner = content.owner
         item.due = content.due
         item.dueDate = content.dueDate
+        item.ownerSpeaker = content.ownerSpeaker
         item.original = item.origin == .manual || content == original ? nil : original
         sections[s].items[i] = item
         return true
@@ -75,6 +91,7 @@ extension Minutes {
         sections[s].items[i].owner = original.owner
         sections[s].items[i].due = original.due
         sections[s].items[i].dueDate = original.dueDate
+        sections[s].items[i].ownerSpeaker = original.ownerSpeaker
         sections[s].items[i].original = nil
         return true
     }
@@ -108,5 +125,7 @@ extension Minutes {
 
 extension MinutesItem {
     /// 可以人工修改的部分，形状和 `original` 一样
-    fileprivate var content: Original { Original(text: text, owner: owner, due: due, dueDate: dueDate) }
+    fileprivate var content: Original {
+        Original(text: text, owner: owner, due: due, dueDate: dueDate, ownerSpeaker: ownerSpeaker)
+    }
 }

@@ -14,15 +14,65 @@ public struct Minutes: Codable, Hashable, Sendable {
     public var source: MinutesSource
     /// 按模板定义的顺序排列。空的节也保留
     public var sections: [MinutesSection]
+    /// 模型从称呼里推断的说话人姓名，对应生成时的 `source.speakersCreatedAt`。
+    /// 按说话人 id 排列，每个说话人最多一条；被忽略的也留着，重新生成时继承。
+    /// 写盘时为空就不写（v0.3 的纪要没有这个字段）
+    public var nameSuggestions: [NameSuggestion]
 
     public init(version: Int = Minutes.currentVersion, model: String, template: String, createdAt: Date,
-                source: MinutesSource, sections: [MinutesSection]) {
+                source: MinutesSource, sections: [MinutesSection], nameSuggestions: [NameSuggestion] = []) {
         self.version = version
         self.model = model
         self.template = template
         self.createdAt = createdAt
         self.source = source
         self.sections = sections
+        self.nameSuggestions = nameSuggestions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, model, template, createdAt, source, sections, nameSuggestions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        model = try c.decode(String.self, forKey: .model)
+        template = try c.decode(String.self, forKey: .template)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        source = try c.decode(MinutesSource.self, forKey: .source)
+        sections = try c.decode([MinutesSection].self, forKey: .sections)
+        nameSuggestions = try c.decodeIfPresent([NameSuggestion].self, forKey: .nameSuggestions) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(model, forKey: .model)
+        try c.encode(template, forKey: .template)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(source, forKey: .source)
+        try c.encode(sections, forKey: .sections)
+        if !nameSuggestions.isEmpty { try c.encode(nameSuggestions, forKey: .nameSuggestions) }
+    }
+}
+
+/// 姓名建议：“说话人 2 可能是王总？”。只给生成时还没命名的说话人，
+/// 至少一处出处原句里字面包含这个名字
+public struct NameSuggestion: Codable, Hashable, Sendable {
+    /// 说话人 id，如 "spk2"
+    public var speaker: String
+    public var name: String
+    /// 含这个称呼的句子，最多 3 个，点击跳转同纪要条目的出处
+    public var refs: [MinutesRef]
+    /// 用户点了“忽略”：不再显示，重新生成时同一说话人同一名字也不再出现
+    public var ignored: Bool
+
+    public init(speaker: String, name: String, refs: [MinutesRef], ignored: Bool = false) {
+        self.speaker = speaker
+        self.name = name
+        self.refs = refs
+        self.ignored = ignored
     }
 }
 
@@ -32,10 +82,15 @@ public struct MinutesSource: Codable, Hashable, Sendable {
     public var transcriptCreatedAt: Date
     /// 对应 `Transcript.textHash`：只有它不同，说明句子被修改过
     public var textHash: String
+    /// 对应 `Transcript.speakersCreatedAt`，生成时没区分过说话人为 nil（不写）。
+    /// 与当前转写稿不同说明重新区分过，说话人编号已重排：负责人的说话人关联、姓名建议都失效。
+    /// 不影响同步状态（`sync(with:)`）
+    public var speakersCreatedAt: Date?
 
-    public init(transcriptCreatedAt: Date, textHash: String) {
+    public init(transcriptCreatedAt: Date, textHash: String, speakersCreatedAt: Date? = nil) {
         self.transcriptCreatedAt = transcriptCreatedAt
         self.textHash = textHash
+        self.speakersCreatedAt = speakersCreatedAt
     }
 }
 
@@ -117,12 +172,15 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
         public var owner: String?
         public var due: String?
         public var dueDate: CalendarDate?
+        public var ownerSpeaker: String?
 
-        public init(text: String, owner: String? = nil, due: String? = nil, dueDate: CalendarDate? = nil) {
+        public init(text: String, owner: String? = nil, due: String? = nil, dueDate: CalendarDate? = nil,
+                    ownerSpeaker: String? = nil) {
             self.text = text
             self.owner = owner
             self.due = due
             self.dueDate = dueDate
+            self.ownerSpeaker = ownerSpeaker
         }
     }
 
@@ -134,6 +192,10 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
     public var due: String?
     /// 按会议日期换算出的截止日期，换算不出来时为空
     public var dueDate: CalendarDate?
+    /// 负责人是哪个说话人（说话人 id）：模型给的负责人与输入里某个说话人的显示名完全相同时记下。
+    /// 关联有效时负责人显示该说话人当前的名字（见 `Minutes.displayedOwner(of:transcript:)`），
+    /// `owner` 留着生成时的文字。手动改负责人后清掉。只有待办有，没有时不写
+    public var ownerSpeaker: String?
     /// 写盘前已校验过，都存在于生成时的转写稿中
     public var refs: [MinutesRef]
     public var origin: Origin
@@ -142,12 +204,14 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
     public var deleted: Bool
 
     public init(id: String, text: String, owner: String? = nil, due: String? = nil, dueDate: CalendarDate? = nil,
-                refs: [MinutesRef], origin: Origin = .model, original: Original? = nil, deleted: Bool = false) {
+                ownerSpeaker: String? = nil, refs: [MinutesRef], origin: Origin = .model, original: Original? = nil,
+                deleted: Bool = false) {
         self.id = id
         self.text = text
         self.owner = owner
         self.due = due
         self.dueDate = dueDate
+        self.ownerSpeaker = ownerSpeaker
         self.refs = refs
         self.origin = origin
         self.original = original
@@ -159,7 +223,7 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
     public var isUnsourced: Bool { origin == .model && refs.isEmpty }
 
     fileprivate enum CodingKeys: String, CodingKey {
-        case id, text, owner, due, dueDate, refs, origin, original, deleted
+        case id, text, owner, due, dueDate, ownerSpeaker, refs, origin, original, deleted
     }
 
     public init(from decoder: Decoder) throws {
@@ -169,6 +233,7 @@ public struct MinutesItem: Decodable, Hashable, Sendable {
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
         due = try c.decodeIfPresent(String.self, forKey: .due)
         dueDate = try c.decodeIfPresent(CalendarDate.self, forKey: .dueDate)
+        ownerSpeaker = try c.decodeIfPresent(String.self, forKey: .ownerSpeaker)
         refs = try c.decode([MinutesRef].self, forKey: .refs)
         origin = try c.decode(Origin.self, forKey: .origin)
         original = try c.decodeIfPresent(Original.self, forKey: .original)
@@ -189,6 +254,7 @@ private struct ItemEncoding: Encodable {
             try c.encode(item.owner, forKey: .owner)
             try c.encode(item.due, forKey: .due)
             try c.encode(item.dueDate, forKey: .dueDate)
+            try c.encodeIfPresent(item.ownerSpeaker, forKey: .ownerSpeaker)
         }
         try c.encode(item.refs, forKey: .refs)
         try c.encode(item.origin, forKey: .origin)
@@ -212,6 +278,7 @@ private struct OriginalEncoding: Encodable {
             try c.encode(original.owner, forKey: .owner)
             try c.encode(original.due, forKey: .due)
             try c.encode(original.dueDate, forKey: .dueDate)
+            try c.encodeIfPresent(original.ownerSpeaker, forKey: .ownerSpeaker)
         }
     }
 }

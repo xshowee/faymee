@@ -7,28 +7,26 @@ extension Minutes {
     /// 不带“未找到出处”“手动添加”之类的内部标记；已删除的条目不导出；待办用 `- [ ]`
     ///
     /// - Parameters:
-    ///   - transcript: 要附上的转写稿全文，nil 时只有纪要。用修改后的文字，每句一段，合盖空白也单独一段
+    ///   - transcript: 会议当前的转写稿，用来显示待办负责人（`displayedOwner`：关联的说话人改名后用新名字）。
+    ///     不附全文（复制纪要）时也要传；nil 时负责人用生成时的文字
+    ///   - attachingTranscript: 末尾附上转写稿全文（`transcript` 为 nil 时不附）。用修改后的文字，
+    ///     每句一段，合盖空白也单独一段；行格式同“复制全文”，显示说话人时带上说话人
     ///   - timeZone: 标题行的开始时间按这个时区显示，也用来判断截止日期要不要带年份
-    public func markdown(meeting: Meeting, transcript: Transcript? = nil, timeZone: TimeZone = .current) -> String {
+    public func markdown(meeting: Meeting, transcript: Transcript? = nil, attachingTranscript: Bool = false,
+                         timeZone: TimeZone = .current) -> String {
         var blocks = [heading(meeting: meeting, timeZone: timeZone)]
         for section in sections {
             let lines = section.visibleItems.map { item in
-                line(item, isAction: section.kind == .actions, meetingStartedAt: meeting.startedAt,
-                     timeZone: timeZone)
+                line(item, isAction: section.kind == .actions, owner: displayedOwner(of: item, transcript: transcript),
+                     meetingStartedAt: meeting.startedAt, timeZone: timeZone)
             }
             // 空的节（或条目都删了）和界面一样写“无”
             blocks.append((["## \(section.title)"] + (lines.isEmpty ? ["无"] : lines)).joined(separator: "\n"))
         }
-        if let transcript {
+        if attachingTranscript, let transcript {
             // 每句一段（格式同“复制全文”）：只用一个换行的话，粘贴后整篇会并成一段
             blocks.append("## 转写稿")
-            let paragraphs = transcript.items.map { item in
-                let text = switch item {
-                case let .sentence(s): s.text
-                case let .gap(g): g.label
-                }
-                return "[\(formatDuration(item.start))] \(text.singleLine ?? "")"
-            }
+            let paragraphs = transcript.copyLines { $0.singleLine ?? "" }
             blocks += paragraphs.isEmpty ? ["无"] : paragraphs
         }
         return blocks.joined(separator: "\n\n") + "\n"
@@ -58,10 +56,11 @@ extension Minutes {
         }
     }
 
-    private func line(_ item: MinutesItem, isAction: Bool, meetingStartedAt: Date, timeZone: TimeZone) -> String {
+    private func line(_ item: MinutesItem, isAction: Bool, owner: String?, meetingStartedAt: Date,
+                      timeZone: TimeZone) -> String {
         var text = item.text.singleLine ?? ""
         if isAction {
-            if let owner = item.owner?.singleLine { text = "\(owner)：\(text)" }
+            if let owner = owner?.singleLine { text = "\(owner)：\(text)" }
             // 换算出日期时只写日期（spec 示例），换算不出来才写会上的原话
             if let dueDate = item.dueDate {
                 text += "，截止 \(dueDate.displayText(meetingStartedAt: meetingStartedAt, timeZone: timeZone))"

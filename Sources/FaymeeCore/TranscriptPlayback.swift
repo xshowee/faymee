@@ -27,16 +27,25 @@ extension Transcript {
     }
 
     /// 复制用的纯文本：一条一行，行首是方括号里的开始时间（`mm:ss` 或 `h:mm:ss`），
-    /// 方括号免得和以数字开头的句子粘在一起
+    /// 方括号免得和以数字开头的句子粘在一起。显示说话人（`showsSpeakers`）时句子带上说话人，
+    /// 见 `copyLines(_:)`
     public var plainText: String {
-        items.map { item in
+        copyLines { $0 }.joined(separator: "\n")
+    }
+
+    /// 复制全文和导出转写稿共用的行：`[03:15] 张三：文本`。只有显示说话人时句子才带前缀，
+    /// 没有说话人的句子写“未知：”（与界面一致，免得被当成上一个人说的）；合盖空白永远不带。
+    /// `clean` 处理句子和说话人名字（导出时把换行换成空格）
+    func copyLines(_ clean: (String) -> String) -> [String] {
+        let showsSpeakers = showsSpeakers
+        return items.map { item in
             let text = switch item {
-            case let .sentence(s): s.text
+            case let .sentence(s) where showsSpeakers: "\(clean(speakerName(for: s)))：\(clean(s.text))"
+            case let .sentence(s): clean(s.text)
             case let .gap(g): g.label
             }
             return "[\(formatDuration(item.start))] \(text)"
         }
-        .joined(separator: "\n")
     }
 }
 

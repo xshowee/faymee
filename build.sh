@@ -71,6 +71,9 @@ if [[ -z "$IDENTITY" ]]; then
     exit 1
 fi
 
+# 区分说话人模型（约 40MB，不进 git）：没有或校验不过时下载
+./scripts/fetch-diarization-models.sh Resources/Diarization
+
 ARCH=$(uname -m)
 echo "==> 编译 Faymee（${ARCH}）"
 swift build -c release --arch "$ARCH"
@@ -81,6 +84,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Faymee" "$APP/Contents/MacOS/Faymee"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+# 数据文件不用单独签，随 App 签名封进 CodeResources；sherpa-onnx 是静态链接，不用拷 framework
+mkdir -p "$APP/Contents/Resources/Diarization"
+# 只拷当前引擎用的文件（目录里可能还留着旧引擎的模型）
+cp Resources/Diarization/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx \
+    Resources/Diarization/3dspeaker-eres2net-base.LICENSE "$APP/Contents/Resources/Diarization/"
 # llama.cpp 是动态 framework：拷进 Contents/Frameworks（ditto 保留 Versions/Current 等符号链接，
 # 不拷 llama.dSYM），release 可执行文件的 rpath 只有 @loader_path，要补一条。
 # install_name_tool 会让签名失效，必须在签名之前

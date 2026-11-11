@@ -14,14 +14,17 @@ public struct Transcript: Codable, Hashable, Sendable {
     public var hotwords: [String]
     /// 按时间排序的句子与合盖空白
     public var items: [TranscriptItem]
+    /// 说话人信息，nil 表示从未区分说话人。v0.4 新增的可选字段，`version` 不变
+    public var diarization: Diarization?
 
     public init(version: Int = Transcript.currentVersion, engine: String, createdAt: Date,
-                hotwords: [String], items: [TranscriptItem]) {
+                hotwords: [String], items: [TranscriptItem], diarization: Diarization? = nil) {
         self.version = version
         self.engine = engine
         self.createdAt = createdAt
         self.hotwords = hotwords
         self.items = items
+        self.diarization = diarization
     }
 
     public var sentences: [TranscriptSentence] {
@@ -30,7 +33,7 @@ public struct Transcript: Codable, Hashable, Sendable {
 
     /// 所有句子 `(id, text)` 的 SHA-256，形如 `sha256:<64 位小写十六进制>`。
     /// 生成纪要时记进 `Minutes.source`，之后与当前转写稿比对：只有它不同，才说明句子被修改过。
-    /// 时间、合盖空白、`original` 不参与。
+    /// 时间、合盖空白、`original`、说话人不参与：改说话人不让纪要变成“转写稿有修改”。
     ///
     /// 值会写盘并在以后比对，字节格式不能改：按句子顺序，每句依次写
     /// `<id 的 UTF-8 字节数>:<id><text 的 UTF-8 字节数>:<text>`，中间没有分隔符。
@@ -56,13 +59,20 @@ public struct TranscriptSentence: Hashable, Sendable {
     public var text: String
     /// 被人工修改后保存引擎原文，未修改时为 nil；“恢复原文”就是把它写回 text
     public var original: String?
+    /// 说话人 id（`spk1`……），nil 表示没区分过或与任何说话片段都不重合（显示“未知”）
+    public var speaker: String?
+    /// 单句改过说话人时的区分结果原值，未改过时为 nil
+    public var originalSpeaker: OriginalSpeaker?
 
-    public init(id: String, start: TimeInterval, end: TimeInterval, text: String, original: String? = nil) {
+    public init(id: String, start: TimeInterval, end: TimeInterval, text: String, original: String? = nil,
+                speaker: String? = nil, originalSpeaker: OriginalSpeaker? = nil) {
         self.id = id
         self.start = start
         self.end = end
         self.text = text
         self.original = original
+        self.speaker = speaker
+        self.originalSpeaker = originalSpeaker
     }
 }
 
@@ -80,7 +90,8 @@ public struct TranscriptGap: Hashable, Sendable {
 }
 
 /// 文件中用 "kind" 区分条目：`{"kind": "sentence", ...}` / `{"kind": "gap", ...}`。
-/// 编解码手写，因为合成的枚举编码是 `{"sentence": {...}}`，也不会把 original 写成 null
+/// 编解码手写，因为合成的枚举编码是 `{"sentence": {...}}`，也不会把 original 写成 null。
+/// 句子的 speaker、originalSpeaker 没有时不写
 public enum TranscriptItem: Codable, Hashable, Sendable {
     case sentence(TranscriptSentence)
     case gap(TranscriptGap)
@@ -100,7 +111,9 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
     }
 
     private enum Kind: String, Codable { case sentence, gap }
-    private enum CodingKeys: String, CodingKey { case kind, id, start, end, text, original, reason }
+    private enum CodingKeys: String, CodingKey {
+        case kind, id, start, end, text, original, speaker, originalSpeaker, reason
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -111,7 +124,9 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
             self = .sentence(TranscriptSentence(
                 id: try c.decode(String.self, forKey: .id), start: start, end: end,
                 text: try c.decode(String.self, forKey: .text),
-                original: try c.decodeIfPresent(String.self, forKey: .original)))
+                original: try c.decodeIfPresent(String.self, forKey: .original),
+                speaker: try c.decodeIfPresent(String.self, forKey: .speaker),
+                originalSpeaker: try c.decodeIfPresent(OriginalSpeaker.self, forKey: .originalSpeaker)))
         case .gap:
             self = .gap(TranscriptGap(start: start, end: end, reason: try c.decode(GapReason.self, forKey: .reason)))
         }
@@ -127,6 +142,9 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
             try c.encode(s.end, forKey: .end)
             try c.encode(s.text, forKey: .text)
             try c.encode(s.original, forKey: .original)
+            // v0.4 新增，没有时不写：没区分过的转写稿与 v0.3 写出的一样
+            try c.encodeIfPresent(s.speaker, forKey: .speaker)
+            try c.encodeIfPresent(s.originalSpeaker, forKey: .originalSpeaker)
         case let .gap(g):
             try c.encode(Kind.gap, forKey: .kind)
             try c.encode(g.start, forKey: .start)

@@ -2,9 +2,10 @@ import AppKit
 import FaymeeCore
 import SwiftUI
 
-/// 设置窗口：纪要的自动生成开关、本机模型的下载与删除
+/// 设置窗口：区分说话人开关、声纹管理入口、纪要的自动生成开关、本机模型的下载与删除
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var confirmingDelete = false
     @State private var deleteError: String?
 
@@ -13,6 +14,25 @@ struct SettingsView: View {
         let downloader = model.modelDownloader
 
         Form {
+            Section("转写") {
+                Toggle("区分说话人", isOn: $model.diarizeSpeakers)
+                Text("转写时在本机区分谁在说话。关闭后只转写文字，更快；之后可以在会议里单独补上")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("声纹") {
+                LabeledContent(model.voiceprints.loadError == nil
+                               ? "已登记 \(model.voiceprints.library.people.count) 人" : "声纹库读取失败") {
+                    Button("管理声纹…") { openWindow(id: "voiceprints") }
+                }
+                Text("登记过的人在之后的会议里会被自动认出。声纹只存在本机，只在你在会议里点“记住这个声音”时登记")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("纪要") {
                 Toggle("转写完成后自动生成纪要", isOn: $model.autoGenerateMinutes)
                 Text("只在接通电源时自动开始；用电池时排队，接上电源后再生成")
@@ -54,7 +74,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         // grouped Form 自带滚动，不给高度会被压扁；内容最多时（已就绪 + 删除说明 + 错误）也放得下
-        .frame(width: 480, height: 400)
+        .frame(width: 480, height: 580)
         .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
             Button("删除模型", role: .destructive) {
                 Task {

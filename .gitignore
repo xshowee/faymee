@@ -6,3 +6,5 @@ build/
 .env.*
 !.env.example
 .scratch/
+# 区分说话人模型（scripts/fetch-diarization-models.sh 下载）
+Resources/Diarization/

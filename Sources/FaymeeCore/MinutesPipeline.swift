@@ -289,7 +289,9 @@ public final class MinutesPipeline {
         // 生成期间会议被删除时什么都不写
         if let host, host.meeting(id) != nil {
             do {
-                let minutes = try result.get()
+                var minutes = try result.get()
+                // 按写盘前磁盘上的旧纪要继承：生成期间才点的“忽略”也算。旧纪要读不出来就不继承
+                minutes.inheritIgnoredNameSuggestions(from: (try? store.loadMinutes(id)) ?? nil)
                 try store.saveMinutes(minutes, for: id)
                 host.setMinutes(MinutesState(status: .done), for: id)
                 outcome = .done(minutes)

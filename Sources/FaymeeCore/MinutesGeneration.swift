@@ -17,19 +17,26 @@ public func generateMinutes(
     let sentences = Dictionary(transcript.sentences.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     let sentenceIDs = Set(sentences.keys)
     let meeting = MeetingInfo(title: title, startedAt: startedAt, timeZone: timeZone)
-    let system = extractionSystemPrompt(template)
+    let labels = SpeakerLabels(transcript)
+    let system = extractionSystemPrompt(template, speakers: labels)
+    let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
     let budget = Budget(generator, system: system, outputTokens: generator.contextTokens * 2 / 5)
 
     let lineBudget = budget.promptTokens - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
-    let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens) {
-        budget.fits(extractionPrompt(meeting, lines: $0.map(inputLine), partial: true))
+    let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens,
+                               line: labels.line) {
+        budget.fits(extractionPrompt(meeting, lines: $0.map(labels.line), partial: true))
     }
     var drafts: [Draft] = []
+    var guesses: [NameGuess] = []
     for (n, items) in segments.enumerated() {
-        let prompt = extractionPrompt(meeting, lines: items.map(inputLine), partial: segments.count > 1)
-        let draft = try await generateDraft(generator, system: system, prompt: prompt,
-                                            maxTokens: budget.outputTokens, template: template)
+        let prompt = extractionPrompt(meeting, lines: items.map(labels.line), partial: segments.count > 1)
+        let (draft, output) = try await generateOutput(generator, system: system, prompt: prompt,
+                                                       maxTokens: budget.outputTokens, template: template,
+                                                       grammar: grammar)
         drafts.append(draft.validated(against: sentenceIDs))
+        // 说话人身份只在提取时要，各段的结果由代码投票，不交给合并
+        if labels.wantsNames { guesses += labels.validated(parseNameGuesses(output), in: items) }
         if segments.count > 1 { progress(Double(n + 1) / Double(segments.count + 1)) }
     }
     let draft = drafts.count > 1
@@ -38,10 +45,11 @@ public func generateMinutes(
         : drafts.first ?? [:]
     progress(1)
 
-    let sections = makeSections(draft, template: template, sentences: sentences, meeting: meeting)
+    let sections = makeSections(draft, template: template, sentences: sentences, meeting: meeting, labels: labels)
     return Minutes(model: model, template: template.key, createdAt: createdAt,
-                   source: MinutesSource(transcriptCreatedAt: transcript.createdAt, textHash: transcript.textHash),
-                   sections: sections)
+                   source: MinutesSource(transcriptCreatedAt: transcript.createdAt, textHash: transcript.textHash,
+                                         speakersCreatedAt: transcript.speakersCreatedAt),
+                   sections: sections, nameSuggestions: labels.suggestions(guesses, sentences: sentences))
 }
 
 /// 一次调用的 token 预算：系统提示 + 提示词 + 输出 ≤ contextTokens。
@@ -102,14 +110,15 @@ func largestFittingGrowing(_ lower: Int, _ upper: Int, _ fits: (Int) -> Bool) ->
     return good
 }
 
-/// 把转写稿在条目（句子或合盖空白）边界切成若干段，每段都满足 `fits`。
+/// 把转写稿在条目（句子或合盖空白）边界切成若干段，每段都满足 `fits`。`line` 是条目写进提示词的那一行。
 /// 先按逐行 token 数估算尽量装满，再用 `fits` 按完整提示词核对，超了就把末尾的条目挪到下一段
 /// （二分找能放下的最多条目）；装不下时在后半段里找切点：优先在合盖空白之后，
 /// 其次在最长的停顿处（至少 `longPause` 秒），都没有就切在装满的位置
 func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: (String) -> Int,
+             line: (TranscriptItem) -> String = inputLine,
              fits: (ArraySlice<TranscriptItem>) -> Bool) throws -> [[TranscriptItem]] {
     let longPause: TimeInterval = 5
-    let costs = items.map { countTokens(inputLine($0)) + 1 }
+    let costs = items.map { countTokens(line($0)) + 1 }
 
     var segments: [[TranscriptItem]] = []
     var start = 0
@@ -274,13 +283,14 @@ extension Dictionary where Key == String, Value == [DraftItem] {
 
 /// 按模板的节排好，给条目编号（概要 o1、决议 d1、待办 a1、未决问题 q1、额外的节 <key>-1），
 /// 出处记上快照里该句的 start。截止时间是常见说法时由代码按会议日期换算，否则用模型给的 dueDate。
-/// 模型漏掉的节保留为空
-private func makeSections(_ draft: Draft, template: MinutesTemplate,
-                          sentences: [String: TranscriptSentence], meeting: MeetingInfo) -> [MinutesSection] {
+/// 负责人对得上输入里的说话人时记下说话人 id。模型漏掉的节保留为空
+private func makeSections(_ draft: Draft, template: MinutesTemplate, sentences: [String: TranscriptSentence],
+                          meeting: MeetingInfo, labels: SpeakerLabels) -> [MinutesSection] {
     template.sections.map { kind, title in
         let items = (draft[sectionKey(kind)] ?? []).enumerated().map { n, item in
             MinutesItem(id: itemIDPrefix(kind) + String(n + 1), text: item.text, owner: item.owner, due: item.due,
                         dueDate: item.due.flatMap(meeting.dueDate(for:)) ?? item.dueDate.flatMap { CalendarDate($0) },
+                        ownerSpeaker: item.owner.flatMap(labels.speakerID(owner:)),
                         refs: item.refs.compactMap { id in sentences[id].map { MinutesRef(id: id, start: $0.start) } })
         }
         return MinutesSection(kind: kind, title: title, items: items)
@@ -312,11 +322,17 @@ func sectionKey(_ kind: MinutesSectionKind) -> String {
 /// 引擎自己抛的错（含取消）原样抛出，不重试
 private func generateDraft(_ generator: TextGenerator, system: String, prompt: String, maxTokens: Int,
                            template: MinutesTemplate, sections: [MinutesSectionKind]? = nil) async throws -> Draft {
-    let grammar = outputGrammar(sections ?? template.sections.map(\.kind))
+    try await generateOutput(generator, system: system, prompt: prompt, maxTokens: maxTokens, template: template,
+                             grammar: outputGrammar(sections ?? template.sections.map(\.kind))).draft
+}
+
+/// 同 `generateDraft`，文法由调用方给；连同解析成功的那次原始输出一起返回（提取时还要从中取说话人身份）
+private func generateOutput(_ generator: TextGenerator, system: String, prompt: String, maxTokens: Int,
+                            template: MinutesTemplate, grammar: String) async throws -> (draft: Draft, output: String) {
     for _ in 0..<2 {
         try Task.checkCancellation()
         let output = try await generator.generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: grammar)
-        if let draft = parseDraft(output, template: template) { return draft }
+        if let draft = parseDraft(output, template: template) { return (draft, output) }
     }
     throw MinutesGenerationError.unparseableOutput
 }

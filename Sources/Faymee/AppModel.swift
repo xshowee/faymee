@@ -74,6 +74,8 @@ final class AppModel {
     var isLidGapOpen: Bool { current?.openGap != nil }
 
     @ObservationIgnored let store = MeetingStore()
+    /// 声纹库。界面（说话人菜单、声纹管理窗口）经它读写；转写管线识别时自己读盘
+    @ObservationIgnored let voiceprints = VoiceprintLibraryModel()
     @ObservationIgnored private let hotwordStore = HotwordStore()
     /// 热词表文件里现在的内容（上次读到或存下的），保存前用它核对文件没被别处改过
     @ObservationIgnored private var savedHotwords = ""
@@ -99,14 +101,27 @@ final class AppModel {
         }
     }
 
+    /// “区分说话人”开关，记在 UserDefaults，默认打开。关闭时完整转写跳过区分说话人；
+    /// 只影响之后开始的转写。设置窗口里绑定它
+    var diarizeSpeakers: Bool {
+        didSet {
+            UserDefaults.standard.set(diarizeSpeakers, forKey: "diarizeSpeakers")
+            transcription.diarizes = diarizeSpeakers
+        }
+    }
+
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
         let engine = TranscriptionEngine.make()
+        let diarization = DiarizationEngine.make()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, host: self)
+                                             engine: engine.name, diarizer: diarization.diarizer,
+                                             voiceprints: VoiceprintStore(), host: self)
+        pipeline.voiceprintThreshold = diarization.voiceprintThreshold
         pipeline.isSuspended = true
         pipeline.hotwords = hotwords
+        pipeline.diarizes = diarizeSpeakers
         pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
         return pipeline
     }()
@@ -129,6 +144,7 @@ final class AppModel {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
+        diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
         meetings = store.loadAll()
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
@@ -395,10 +411,8 @@ final class AppModel {
             meetings.removeAll { $0.id == id }
         } catch {
             lastError = "删除失败：\(error.localizedDescription)"
-            // 会议还在，把被取消的转写放回队列
-            if let status = meeting(id)?.transcription?.status, status == .queued || status == .running {
-                transcription.enqueue(id)
-            }
+            // 会议还在，把被取消的转写（或只区分说话人）放回队列，规则同启动时恢复
+            if let m = meeting(id) { transcription.restore([m]) }
             if let status = meeting(id)?.minutes?.status, status == .queued || status == .running {
                 minutes.enqueue(id)
             }
@@ -532,6 +546,12 @@ extension AppModel: TranscriptionHost, MinutesHost {
     func setTranscription(_ state: TranscriptionState, for id: String) {
         guard var m = meeting(id) else { return }
         m.transcription = state
+        update(m)
+    }
+
+    func setDiarization(_ state: DiarizationState?, for id: String) {
+        guard var m = meeting(id) else { return }
+        m.diarization = state
         update(m)
     }
 
