@@ -64,13 +64,24 @@ final class AppUpdater: NSObject {
     }
 }
 
-extension AppUpdater: @preconcurrency SPUUpdaterDelegate {
-    /// 用户点了“安装并重新启动”：录音或整理中先不重启，等 isBusy 变回 false
+extension AppUpdater: SPUUpdaterDelegate {
+    /// 用户点了“安装并重新启动”：录音或整理中先不重启，等 isBusy 变回 false。
+    /// Sparkle 的“可以开始安装了”窗口会一直留着，会上投屏时别人也看得见：先收起来，
+    /// 改由菜单栏面板说明（窗口是 Sparkle 自己的，按窗口控制器所在的 bundle 认）
     func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,
                  untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
         guard isBusy else { return false }
         postponedInstall = installHandler
         isInstallPostponed = true
+        // 等 Sparkle 处理完这次点击（它可能还会刷新窗口）再收
+        DispatchQueue.main.async {
+            let sparkle = Bundle(for: SPUUpdater.self)
+            for window in NSApp.windows {
+                guard let controller = window.windowController, Bundle(for: type(of: controller)) == sparkle
+                else { continue }
+                window.orderOut(nil)
+            }
+        }
         return true
     }
 }
