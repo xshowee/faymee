@@ -151,7 +151,7 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
 
 /// 复制全文、导出转写稿时，笔记按时间插成 `[12:03] 笔记：……` 一行，标记不写（spec 46）
 @Suite struct 复制文本带笔记 {
-    private static let t0 = try! Date("2026-11-10T02:00:00Z", strategy: .iso8601)
+    static let t0 = try! Date("2026-11-10T02:00:00Z", strategy: .iso8601)
 
     /// 两个分片，中间有 100 秒没录到：墙钟 0–300 秒是录音 0–300，墙钟 400–1000 秒是录音 300–900
     static func meeting(segments: [Segment]? = nil, annotations: [Annotation]) -> Meeting {
@@ -286,6 +286,99 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
         #expect(transcript([]).markedItems(m.transcriptMarks).isEmpty)
         let noSegments = F.meeting(segments: [], annotations: [F.mark("a1", 15)])
         #expect(noSegments.transcriptMarks.isEmpty)
+    }
+
+    /// 一次归并的结果与逐个标记比遍所有句子相同。随机转写稿里有合盖空白、首尾相同和长度为 0 的句子、
+    /// 互相包含的句子（结束时间不递增），标记有恰好在两句正中、落在所有句子之前和之后的
+    @Test func 归并与逐个比较的结果相同() {
+        var rng = SplitMix64(seed: 7)
+        for _ in 0..<500 {
+            var items: [TranscriptItem] = []
+            var cursor = 0.0
+            for i in 0..<Int.random(in: 0...12, using: &rng) {
+                cursor += Double(Int.random(in: 0...4, using: &rng))
+                let length = Double(Int.random(in: 0...6, using: &rng))
+                items.append(Int.random(in: 0..<5, using: &rng) == 0
+                             ? lidGap(cursor, cursor + length)
+                             : sentence("s\(i)", cursor, cursor + length, "句"))
+            }
+            let marks = (0..<Int.random(in: 0...8, using: &rng))
+                // 半秒为单位：句子首尾是整秒，正中间的点才取得到
+                .map { TranscriptMark(id: "a\($0)", offset: Double(Int.random(in: -4...(Int(cursor) * 2 + 16), using: &rng)) / 2) }
+                .sorted { $0.offset < $1.offset }
+            let t = transcript(items)
+            #expect(t.markedItems(marks) == Self.naiveMarkedItems(t, marks), "\(items) \(marks)")
+        }
+    }
+
+    /// 原来的写法：每个标记比遍所有句子，取距离最小、一样近取下标小的
+    private static func naiveMarkedItems(_ t: Transcript, _ marks: [TranscriptMark]) -> [Int: [TranscriptMark]] {
+        var placed: [Int: [TranscriptMark]] = [:]
+        for mark in marks {
+            var best: (index: Int, distance: TimeInterval)?
+            for (i, item) in t.items.enumerated() {
+                guard case let .sentence(s) = item else { continue }
+                let distance = max(s.start - mark.offset, mark.offset - s.end, 0)
+                if best.map({ distance < $0.distance }) ?? true { best = (i, distance) }
+            }
+            if let best { placed[best.index, default: []].append(mark) }
+        }
+        return placed
+    }
+}
+
+/// 转写稿界面每次重绘（编辑时每按一键、播放时每换一句）都要笔记行和旗子，整份只在用到的输入变了时重算
+@Suite struct 转写稿的标注排版 {
+    private typealias F = 复制文本带笔记
+
+    private let t = transcript([
+        sentence("s1", 0.5, 3, "我们先过一下上周的待办"),
+        sentence("s2", 355, 362, "老王说周五前给"),
+    ])
+    private let m = F.meeting(annotations: [F.mark("a1", 460), F.note("a2", 2, "待办")])
+
+    @Test func 笔记行和旗子与逐项算的相同() {
+        let layout = TranscriptAnnotationLayout(transcript: t, meeting: m)
+
+        #expect(layout.notes == m.transcriptNotes)
+        #expect(layout.rows == t.rows(notes: m.transcriptNotes))
+        #expect(layout.marks == t.markedItems(m.transcriptMarks))
+    }
+
+    @Test func 转写稿的条目或标注或分片变了才重算() {
+        let layout = TranscriptAnnotationLayout(transcript: t, meeting: m)
+        var renamed = m
+        renamed.title = "改了标题"
+        var retimed = t
+        retimed.hotwords = ["飞书"]
+        #expect(layout.isCurrent(transcript: t, meeting: renamed))
+        #expect(layout.isCurrent(transcript: retimed, meeting: m))
+
+        var edited = t
+        edited.items[0] = sentence("s1", 0.5, 3, "改过的句子")
+        #expect(!layout.isCurrent(transcript: edited, meeting: m))
+        var annotated = m
+        annotated.addMark(at: F.t0.addingTimeInterval(10))
+        #expect(!layout.isCurrent(transcript: t, meeting: annotated))
+        var resegmented = m
+        resegmented.segments.removeLast()
+        #expect(!layout.isCurrent(transcript: t, meeting: resegmented))
+
+        #expect(layout.updated(transcript: t, meeting: annotated).marks
+                == t.markedItems(annotated.transcriptMarks))
+    }
+}
+
+/// 可复现的随机数
+private struct SplitMix64: RandomNumberGenerator {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }
 

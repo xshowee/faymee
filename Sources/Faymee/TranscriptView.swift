@@ -557,6 +557,7 @@ private struct TranscriptList: View {
     @State private var draft = ""
     /// 当前播放到的条目，由 CurrentItemTracker 在条目切换时写入
     @State private var current: Int?
+    @State private var layout = TranscriptLayoutCache()
     @FocusState private var focus: TranscriptFocus?
 
     var body: some View {
@@ -564,9 +565,10 @@ private struct TranscriptList: View {
         let turns = transcript.speakerTurns
         let choices = transcript.speakerList.map { SpeakerChoice(id: $0.speaker.id, name: $0.speaker.displayName) }
         // 笔记按时间插在条目之间（同复制全文），标记的旗子挂在最近的句子旁
-        let notes = meeting.transcriptNotes
-        let rows = transcript.rows(notes: notes)
-        let marks = transcript.markedItems(meeting.transcriptMarks)
+        let annotationLayout = layout.layout(transcript: transcript, meeting: meeting)
+        let notes = annotationLayout.notes
+        let rows = annotationLayout.rows
+        let marks = annotationLayout.marks
         let timeWidth = timeWidth(lastNote: notes.last)
         ScrollViewReader { proxy in
             ScrollView {
@@ -794,6 +796,19 @@ private struct TranscriptList: View {
         withAnimation(.easeInOut(duration: 0.3)) {
             proxy.scrollTo(i, anchor: UnitPoint(x: 0, y: 0.3))
         }
+    }
+}
+
+/// body 在编辑句子时每按一键、播放时每换一句都会重算，笔记行和旗子的排版要换算时间线、排序、挂旗子，
+/// 所以转写稿的条目和会议的标注没变时沿用上次的结果。是普通的类而不是状态：在 body 里更新它不触发重绘
+@MainActor private final class TranscriptLayoutCache {
+    private var cached: TranscriptAnnotationLayout?
+
+    func layout(transcript: Transcript, meeting: Meeting) -> TranscriptAnnotationLayout {
+        let layout = cached?.updated(transcript: transcript, meeting: meeting)
+            ?? TranscriptAnnotationLayout(transcript: transcript, meeting: meeting)
+        cached = layout
+        return layout
     }
 }
 
