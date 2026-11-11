@@ -8,3 +8,16 @@ build/
 .scratch/
 # 区分说话人模型（scripts/fetch-diarization-models.sh 下载）
 Resources/Diarization/
+
+# 签名、公证、Sparkle 更新的密钥，绝不提交
+*.p8
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+*eddsa*private*
+*ed25519*
+*sparkle-key*
