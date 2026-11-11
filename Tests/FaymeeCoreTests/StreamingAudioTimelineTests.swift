@@ -55,6 +55,22 @@ import Testing
         #expect(timeline.time(at: 16) == 306)
     }
 
+    /// 一块晚到了 0.7 秒（采集线程被耽搁），后面几块又按时到：时间先往后挪、再挪回来，
+    /// 但不倒退（字幕一句比一句晚），挪回来之后照常
+    @Test func 晚到一块再按时到时不倒退_之后恢复() {
+        var timeline = StreamingAudioTimeline()
+        timeline.record(duration: 1, at: 0)
+        timeline.record(duration: 1, at: 1.7)
+        timeline.record(duration: 1, at: 2)
+        timeline.record(duration: 1, at: 3)
+        timeline.record(duration: 1, at: 4)
+
+        let times = stride(from: 0.0, through: 5, by: 0.1).map(timeline.time(at:))
+        #expect(zip(times, times.dropFirst()).allSatisfy { $0 <= $1 })
+        #expect(timeline.time(at: 3.5) == 3.5)
+        #expect(timeline.time(at: 4.5) == 4.5)
+    }
+
     @Test func 还没送过音频时原样返回() {
         #expect(StreamingAudioTimeline().time(at: 3) == 3)
     }

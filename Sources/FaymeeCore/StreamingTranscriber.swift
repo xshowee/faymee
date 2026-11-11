@@ -36,20 +36,25 @@ public enum StreamingTranscriptionEvent: Hashable, Sendable {
 ///
 /// 送进识别器的音频可能中途丢过一段（分路缓冲满了丢最旧的、积压太多丢最旧的、录音停滞后重启），
 /// 识别器察觉不到，之后按样本数算出的时间会偏早。所以记下每块实际送进去的音频在调用方时间线上的位置：
-/// 和按样本数推算的位置差得超过 `tolerance` 就从这块重新对齐。只记对齐的点，连续送几个小时也只有几条
+/// 和按样本数推算的位置差得超过 `tolerance` 就从这块重新对齐。只记对齐的点，连续送几个小时也只有几条。
+///
+/// 换算出的时间不倒退：某块晚到（采集线程被耽搁）时会先往后对齐，后面按时到的块又往前对齐回来，
+/// 这时停在之前算到的时间上，等按样本数追上了再接着走，字幕不会一句比一句早
 struct StreamingAudioTimeline: Sendable {
     /// 每块的位置取采集线程收到它的时刻，有零点几秒的抖动，差这么多以内不算丢了音频
     static let tolerance: TimeInterval = 0.5
 
-    /// 从识别器时间 engine 起，对应调用方时间线上的 time。按 engine 递增
-    private var anchors: [(engine: TimeInterval, time: TimeInterval)] = []
+    /// 从识别器时间 engine 起对应调用方时间线上的 time，但不早于 floor（对齐前算到的时间）。按 engine 递增
+    private var anchors: [(engine: TimeInterval, time: TimeInterval, floor: TimeInterval)] = []
     /// 已送进识别器的秒数
     private var fed: TimeInterval = 0
 
     /// 一块 duration 秒的音频送进了识别器，它开头在调用方时间线上的位置是 time
     mutating func record(duration: TimeInterval, at time: TimeInterval) {
-        if anchors.isEmpty || abs(self.time(at: fed) - time) > Self.tolerance {
-            anchors.append((fed, time))
+        // 和最近的对齐点按样本数推算的位置比（不算 floor），停住期间按时到的块不会反复对齐
+        let predicted = anchors.last.map { $0.time + (fed - $0.engine) }
+        if predicted.map({ abs($0 - time) > Self.tolerance }) ?? true {
+            anchors.append((fed, time, anchors.isEmpty ? -.infinity : self.time(at: fed)))
         }
         fed += duration
     }
@@ -58,6 +63,6 @@ struct StreamingAudioTimeline: Sendable {
     func time(at engineTime: TimeInterval) -> TimeInterval {
         // 结果一般落在最近送入的音频里，从后往前找
         guard let anchor = anchors.last(where: { $0.engine <= engineTime }) ?? anchors.first else { return engineTime }
-        return anchor.time + (engineTime - anchor.engine)
+        return max(anchor.time + (engineTime - anchor.engine), anchor.floor)
     }
 }
