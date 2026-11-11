@@ -22,14 +22,8 @@ final class LivePanelController: NSObject, NSWindowDelegate {
             pendingPause = nil
             pumpTimer?.invalidate()
             pumpTimer = nil
-            if let captions {
-                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak captions] _ in
-                    MainActor.assumeIsolated { captions?.pump() }
-                }
-                RunLoop.main.add(timer, forMode: .common)
-                pumpTimer = timer
-            }
             refreshVisibility()
+            updatePumpTimer()
         }
     }
 
@@ -62,6 +56,11 @@ final class LivePanelController: NSObject, NSWindowDelegate {
                 self?.refreshVisibility()
             }
         }
+        // 屏幕接上、拔掉（合盖时只剩外接显示器、或一个都不剩）：`SystemState.hasVisibleScreen` 跟着变
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshVisibility() }
+        }
     }
 
     /// 打开面板（菜单栏面板的“会中面板”、录音开始时自动打开）。不激活 Faymee，不抢键盘
@@ -83,7 +82,10 @@ final class LivePanelController: NSObject, NSWindowDelegate {
         refreshVisibility()
     }
 
-    /// 按面板现在看不看得见决定字幕跑不跑。可见性通知之外，录音的每秒定时器也调一次，免得漏掉通知
+    /// 按面板现在看不看得见决定字幕跑不跑。由各个输入的变化事件调用，不轮询：
+    /// 设置开关和 `captions`（didSet）、面板打开关闭（show、close、windowWillClose）、被挡住
+    /// （windowDidChangeOcclusionState）、熄屏（screensDidSleep / DidWake）、屏幕接上拔掉
+    /// （didChangeScreenParameters）
     func refreshVisibility() {
         guard let captions else { return }
         let wanted = captionsEnabled && !screensAsleep && SystemState.hasVisibleScreen
@@ -91,20 +93,41 @@ final class LivePanelController: NSObject, NSWindowDelegate {
         if wanted {
             pendingPause?.cancel()
             pendingPause = nil
-            captions.isWanted = true
+            setWanted(true)
         } else if !captionsEnabled || !isOpen {
             // 用户关了面板或开关：立即停
             pendingPause?.cancel()
             pendingPause = nil
-            captions.isWanted = false
+            setWanted(false)
         } else if captions.isWanted, pendingPause == nil {
             pendingPause = Task { [weak self] in
                 try? await Task.sleep(for: Self.pauseAfter)
                 guard !Task.isCancelled, let self else { return }
                 self.pendingPause = nil
-                self.captions?.isWanted = false
+                self.setWanted(false)
             }
         }
+    }
+
+    /// 改 `captions.isWanted` 只走这里，取音频的定时器跟着开停
+    private func setWanted(_ wanted: Bool) {
+        captions?.isWanted = wanted
+        updatePumpTimer()
+    }
+
+    /// 只在需要字幕时每 0.1 秒取一次分路里的音频；面板没开、被挡住、设置里关了字幕时不跑
+    private func updatePumpTimer() {
+        guard let captions, captions.needsPumping else {
+            pumpTimer?.invalidate()
+            pumpTimer = nil
+            return
+        }
+        guard pumpTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak captions] _ in
+            MainActor.assumeIsolated { captions?.pump() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pumpTimer = timer
     }
 
     // MARK: - 窗口

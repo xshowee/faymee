@@ -331,7 +331,6 @@ final class AppModel {
         // 先切设备再判断合盖：合盖时若有外接麦克风，直接切过去，不产生空白
         reconcileDevice()
         checkLid()
-        livePanel.refreshVisibility()
 
         if let since = silentSince, Date().timeIntervalSince(since) >= Self.silenceAlertAfter {
             isSilent = true

@@ -9,7 +9,7 @@ import Observation
 /// - 只在会话真正在跑时打开分路，其余时候（没开过、暂停、准备中、出错、录音结束）不复制音频
 /// - 录音结束时 `stop()`，之后什么都不做
 ///
-/// App 定时（约 0.1 秒）在主线程调用 `pump()` 取走分路里的音频
+/// App 在 `needsPumping` 时定时（约 0.1 秒）在主线程调用 `pump()` 取走分路里的音频
 @MainActor @Observable
 public final class LiveCaptions {
     /// 还没需要过时为 nil
@@ -41,6 +41,10 @@ public final class LiveCaptions {
         self.tap = tap
         self.now = now
     }
+
+    /// App 是否要定时调用 `pump()`：需要字幕且录音没结束时（含准备模型期间，准备好后靠 `pump` 打开分路）。
+    /// 不需要时分路已关、会话已暂停，`pump` 什么都不做，定时器可以停掉
+    public var needsPumping: Bool { isWanted && !stopped }
 
     /// 取走分路里的音频交给会话，并按会话的状态开关分路
     public func pump() {

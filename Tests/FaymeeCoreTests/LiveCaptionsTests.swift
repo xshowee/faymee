@@ -145,6 +145,26 @@ private final class Fixture {
         #expect(!f.captions.tap.isEnabled)
     }
 
+    /// App 的 0.1 秒取音频定时器只在需要字幕时跑：面板没开、关了字幕、录音结束后都不跑
+    @Test func 只在需要字幕时要定时取音频() async throws {
+        let f = Fixture()
+        #expect(!f.captions.needsPumping)
+
+        f.captions.isWanted = true
+        // 准备模型期间也要取：准备好后靠 pump 打开分路
+        #expect(f.captions.needsPumping)
+        let session = try #require(f.captions.session)
+        try await f.until { session.status == .running }
+        #expect(f.captions.needsPumping)
+
+        f.captions.isWanted = false
+        #expect(!f.captions.needsPumping)
+
+        f.captions.isWanted = true
+        f.captions.stop()
+        #expect(!f.captions.needsPumping)
+    }
+
     /// 录音时面板一直没开，停止录音后也不该凭空创建会话
     @Test func 没显示过面板就结束录音_不创建会话() {
         let f = Fixture()
