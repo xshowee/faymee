@@ -1,4 +1,3 @@
-import AVKit
 import FaymeeCore
 import SwiftUI
 
@@ -127,8 +126,7 @@ private struct MeetingDetail: View {
             switch meeting.status {
             case .done:
                 if let playback {
-                    AudioPlayer(player: playback.player)
-                        .frame(height: 60)
+                    PlaybackBar(playback: playback)
                 }
                 panes
             case .recording:
@@ -266,18 +264,76 @@ private struct PaneVisibility: ViewModifier {
     }
 }
 
-/// 播放器由 Playback 持有，暂停和清理也由它负责
-private struct AudioPlayer: NSViewRepresentable {
-    var player: AVPlayer
+/// 回放条：前后跳 15 秒、播放/暂停、进度、时间和倍速。
+/// 不用 AVPlayerView：录音只有音频，它会在画面区画一个音频占位图，压扁后成了播放条后面一团模糊
+private struct PlaybackBar: View {
+    var playback: Playback
+    /// 拖进度条时的位置，松手才跳转；不在拖时为 nil
+    @State private var scrubTime: TimeInterval?
+    @State private var isScrubbing = false
 
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.controlsStyle = .inline
-        view.player = player
-        return view
+    var body: some View {
+        HStack(spacing: 10) {
+            Button { playback.skip(by: -15) } label: {
+                Label("后退 15 秒", systemImage: "gobackward.15")
+            }
+            .help("后退 15 秒")
+            Button { playback.togglePlay() } label: {
+                Label(playback.isPlaying ? "暂停" : "播放",
+                      systemImage: playback.isPlaying ? "pause.fill" : "play.fill")
+                    .frame(width: 18)
+            }
+            .help(playback.isPlaying ? "暂停" : "播放")
+            Button { playback.skip(by: 15) } label: {
+                Label("前进 15 秒", systemImage: "goforward.15")
+            }
+            .help("前进 15 秒")
+
+            Text(formatDuration(position))
+                .foregroundStyle(.secondary)
+            Slider(value: Binding(get: { position }, set: scrub),
+                   in: 0...max(playback.duration, 1)) { editing in
+                isScrubbing = editing
+                if !editing, let scrubTime { playback.seek(to: scrubTime) }
+                if !editing { scrubTime = nil }
+            }
+            .controlSize(.small)
+            .disabled(playback.duration == 0)
+            .accessibilityLabel("播放进度")
+            .accessibilityValue(formatDuration(position))
+            Text(formatDuration(playback.duration))
+                .foregroundStyle(.secondary)
+
+            Menu {
+                Picker("播放速度", selection: Binding(get: { playback.rate }, set: { playback.setRate($0) })) {
+                    ForEach(Playback.rates, id: \.self) { Text(rateLabel($0)).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Text(rateLabel(playback.rate))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("播放速度")
+            .accessibilityLabel("播放速度")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .monospacedDigit()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        if view.player !== player { view.player = player }
+    private var position: TimeInterval { scrubTime ?? playback.currentTime }
+
+    /// 拖动时只记位置；点击、键盘等不经过拖动的改动直接跳转
+    private func scrub(_ time: TimeInterval) {
+        if isScrubbing { scrubTime = time } else { playback.seek(to: time) }
+    }
+
+    private func rateLabel(_ rate: Float) -> String {
+        String(format: "%g×", rate)
     }
 }
