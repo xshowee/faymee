@@ -4,6 +4,11 @@ import PackageDescription
 let package = Package(
     name: "Faymee",
     platforms: [.macOS(.v26)],
+    dependencies: [
+        // 自动更新。build.sh 把 Sparkle.framework 拷进 Contents/Frameworks 并重签；
+        // 发布用的 sign_update 在 .build/artifacts/sparkle/Sparkle/bin
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
+    ],
     targets: [
         // llama.cpp 官方预编译 xcframework（b12110 = 稳定版 v0.9.0）。动态 framework，Metal shader 内嵌；
         // build.sh 把它拷进 Faymee.app/Contents/Frameworks 并重签。升级：看 vX.Y.Z 的 nightly-tag.txt，
@@ -29,7 +34,8 @@ let package = Package(
         // 非界面代码：数据模型、存储、整理。不声明 library product，静态链接进 App
         .target(name: "FaymeeCore", dependencies: ["llama", "SherpaOnnxC", "onnxruntime"], path: "Sources/FaymeeCore",
                 linkerSettings: [.linkedFramework("CoreML"), .linkedFramework("Network"), .linkedLibrary("c++")]),
-        .executableTarget(name: "Faymee", dependencies: ["FaymeeCore"], path: "Sources/Faymee"),
+        .executableTarget(name: "Faymee", dependencies: ["FaymeeCore", .product(name: "Sparkle", package: "Sparkle")],
+                          path: "Sources/Faymee"),
         // Resources/ 放契约测试用的真实录音
         .testTarget(name: "FaymeeCoreTests", dependencies: ["FaymeeCore"], path: "Tests/FaymeeCoreTests",
                     resources: [.copy("Resources")]),

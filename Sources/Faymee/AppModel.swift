@@ -77,6 +77,8 @@ final class AppModel {
     var isLidGapOpen: Bool { current?.openGap != nil }
 
     @ObservationIgnored let store = MeetingStore()
+    /// 自动更新。录音、整理期间推迟重启，由 syncTranscriptionSuspension 同步忙闲
+    @ObservationIgnored let updater = AppUpdater()
     /// 声纹库。界面（说话人菜单、声纹管理窗口）经它读写；转写管线识别时自己读盘
     @ObservationIgnored let voiceprints = VoiceprintLibraryModel()
     @ObservationIgnored private let hotwordStore = HotwordStore()
@@ -614,14 +616,17 @@ final class AppModel {
 
     /// 录音和整理期间暂停转写和纪要，启动恢复完成前也不开始。
     /// 由 meetings、current、launchRecovered 的 didSet 调用，别处不用手动同步。
+    /// 同时告诉自动更新现在能不能重启。
     /// 停止录音后到开始整理前，会议还是 .recording（整理在异步任务里才开始），
     /// 也算在内，免得中间空档里转写刚开始就被取消。
     /// 先设转写再设纪要：同时解除时转写先开始（纪要管线另外也会等转写空闲）
     private func syncTranscriptionSuspension() {
-        let suspended = !launchRecovered || isRecording
-            || meetings.contains { $0.status == .recording || $0.status == .finalizing }
+        let capturing = isRecording || meetings.contains { $0.status == .recording || $0.status == .finalizing }
+        let suspended = !launchRecovered || capturing
         transcription.isSuspended = suspended
         minutes.isSuspended = suspended
+        // 转写、纪要被打断后下次启动会续上，不必挡住更新；录音和整理要挡
+        updater.isBusy = capturing
     }
 
     // MARK: - 转写、纪要通知

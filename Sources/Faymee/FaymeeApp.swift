@@ -33,6 +33,12 @@ struct FaymeeApp: App {
             CommandGroup(replacing: .appSettings) {
                 SettingsCommand()
             }
+            CommandGroup(after: .appInfo) {
+                if model.updater.isEnabled {
+                    Button("检查更新…") { model.updater.checkForUpdates() }
+                        .disabled(!model.updater.canCheckForUpdates)
+                }
+            }
         }
 
         // 用普通 Window 而不是 Settings 场景：菜单栏程序（accessory）里 openSettings 不可靠

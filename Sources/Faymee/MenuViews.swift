@@ -58,6 +58,8 @@ struct MenuContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            UpdateNotice(updater: model.updater)
+
             Divider()
 
             Button("会议记录…") {
@@ -209,6 +211,26 @@ private extension MenuBarIndicator {
 }
 
 /// 麦克风选择，以及实际在用（或将要用）哪个设备
+/// 定时检查发现的新版本只在这里提示，不弹窗；已同意安装、在等录音整理完时说明一下
+private struct UpdateNotice: View {
+    var updater: AppUpdater
+
+    var body: some View {
+        if updater.isInstallPostponed {
+            Label("录音整理完后安装更新并重新启动", systemImage: "arrow.down.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let version = updater.availableVersion {
+            Button {
+                updater.checkForUpdates()
+            } label: {
+                Label("有新版本 \(version)…", systemImage: "arrow.down.circle")
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
 struct MicrophonePicker: View {
     @Environment(AppModel.self) private var model
 

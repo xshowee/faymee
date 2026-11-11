@@ -2,7 +2,8 @@ import AppKit
 import FaymeeCore
 import SwiftUI
 
-/// 设置窗口：全局快捷键和实时字幕开关、区分说话人开关、声纹管理入口、纪要的自动生成开关、本机模型的下载与删除
+/// 设置窗口：全局快捷键和实时字幕开关、区分说话人开关、声纹管理入口、纪要的自动生成开关、本机模型的下载与删除、
+/// 自动更新（发布构建）
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -85,9 +86,14 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+
+            // 放在最后：发布构建多这一节，窗口高度不变，要往下滚才看得到
+            if model.updater.isEnabled {
+                UpdateSettings(updater: model.updater)
+            }
         }
         .formStyle(.grouped)
-        // grouped Form 自带滚动，不给高度会被压扁；内容最多时（已就绪 + 删除说明 + 错误）也放得下
+        // grouped Form 自带滚动，不给高度会被压扁；开发构建内容最多时（已就绪 + 删除说明 + 错误）也放得下
         .frame(width: 480, height: 730)
         .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
             Button("删除模型", role: .destructive) {
@@ -165,4 +171,25 @@ private extension ModelDownloadPhase {
         default: false
         }
     }
+}
+
+/// 设置里的“更新”一节：当前版本、自动检查开关、手动检查。只在发布构建显示
+private struct UpdateSettings: View {
+    @Bindable var updater: AppUpdater
+
+    var body: some View {
+        Section("更新") {
+            LabeledContent("当前版本 \(Self.version)") {
+                Button("检查更新…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
+            Toggle("自动检查更新", isOn: $updater.automaticallyChecks)
+            Text("每天在 GitHub 上查一次有没有新版本，只取版本信息，不上传任何会议内容。发现新版本时在菜单栏面板里提示，不会弹窗打断")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
 }

@@ -30,5 +30,13 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Faymee 需要使用麦克风录制会议。录音只保存在本机。</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUPublicEDKey</key>
+	<string>KlaJs7TgS9aqkzct5c57a6NPz91i6MR1gPUVEm0TxGU=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>
