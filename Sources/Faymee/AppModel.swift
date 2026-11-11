@@ -439,6 +439,19 @@ final class AppModel {
         return note
     }
 
+    /// 会后修改笔记的文字（转写稿里笔记行的“修改笔记…”）。规整后为空或没变时不改、不写盘。
+    /// 改动后纪要按标注哈希提示“会中标注有改动”
+    func editNote(_ annotationID: String, to text: String, in meetingID: String) {
+        guard var m = meeting(meetingID), m.editNote(annotationID, to: text) else { return }
+        update(m)
+    }
+
+    /// 会后删除一条标记或笔记（转写稿里旗子、笔记行的右键菜单）
+    func deleteAnnotation(_ annotationID: String, in meetingID: String) {
+        guard var m = meeting(meetingID), m.deleteAnnotation(annotationID) else { return }
+        update(m)
+    }
+
     /// 弹出记一笔的输入框（快捷键 ⌃⌥N、菜单栏面板的“记一笔”）。已经开着时只调到前面
     func beginNote() {
         guard let m = current else { return }

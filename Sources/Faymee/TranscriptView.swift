@@ -36,6 +36,11 @@ struct TranscriptSection: View {
     @State private var voiceprintNotice: VoiceprintNotice?
     /// 采纳姓名建议后，顺便问一句要不要记住这个声音（只给按钮，用户点了才登记）
     @State private var enrollOffer: EnrollOffer?
+    /// 正在修改的笔记和输入框里的文字
+    @State private var editingNote: TranscriptNote?
+    @State private var noteDraft = ""
+    /// 等确认删除的笔记（笔记是用户自己打的字，删了找不回来，先确认；标记直接删）
+    @State private var deletingNote: TranscriptNote?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -82,7 +87,8 @@ struct TranscriptSection: View {
                                    reveal: $reveal,
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
                                    onRestore: { id in update { $0.restore(sentence: id) } },
-                                   speakerActions: speakerActions, suggestions: suggestions)
+                                   speakerActions: speakerActions, suggestions: suggestions,
+                                   annotationActions: annotationActions)
                 }
             } else if let loadError {
                 placeholder(loadError)
@@ -142,6 +148,30 @@ struct TranscriptSection: View {
         } message: { _ in
             Text("完成前仍显示当前说话人。名字会沿用到时间上重合最多的新说话人，句子文字不变。")
         }
+        .alert("修改笔记", isPresented: $editingNote.isPresent(), presenting: editingNote) { note in
+            TextField(note.text, text: $noteDraft)
+            Button("保存") { model.editNote(note.id, to: noteDraft, in: meeting.id) }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("改完后纪要会提示“会中标注有改动”，可以重新生成纪要。清空等于不改，删除请用右键菜单。")
+        }
+        .confirmationDialog(deletingNote.map { "删除笔记“\($0.text)”？" } ?? "",
+                            isPresented: $deletingNote.isPresent(), presenting: deletingNote) { note in
+            Button("删除笔记", role: .destructive) { model.deleteAnnotation(note.id, in: meeting.id) }
+        } message: { _ in
+            Text("删除后不能恢复。")
+        }
+    }
+
+    /// 转写稿里的旗子和笔记行：改、删都写会议（meeting.json），与转写稿无关，所以转写中也能改，重新转写也不影响
+    private var annotationActions: AnnotationActions {
+        AnnotationActions(
+            onEditNote: { note in
+                noteDraft = note.text
+                editingNote = note
+            },
+            onDeleteNote: { note in deletingNote = note },
+            onDeleteMark: { mark in model.deleteAnnotation(mark.id, in: meeting.id) })
     }
 
     private var speakerStatus: SpeakerStatus {
@@ -476,6 +506,13 @@ struct SpeakerActions {
     var onRename: (_ speakerID: String) -> Void
 }
 
+/// 转写稿里旗子（标记）和笔记行的右键操作。点击播放由列表自己处理
+struct AnnotationActions {
+    var onEditNote: (TranscriptNote) -> Void
+    var onDeleteNote: (TranscriptNote) -> Void
+    var onDeleteMark: (TranscriptMark) -> Void
+}
+
 /// 列表里谁有键盘焦点：列表本身（⌘A/⌘C）或正在编辑的句子
 private enum TranscriptFocus: Hashable {
     case list
@@ -498,6 +535,8 @@ private struct TranscriptList: View {
     var speakerActions: SpeakerActions?
     /// 姓名建议挂在这个人第一次开口的段首
     var suggestions = NameSuggestionActions()
+    /// 旗子、笔记行的修改和删除
+    var annotationActions: AnnotationActions
     @State private var following = true
     /// 纪要点出处后短暂高亮的条目，和哪次请求高亮的（连点两次时，第一次的计时不清掉第二次的高亮）
     @State private var revealed: Int?
@@ -513,13 +552,36 @@ private struct TranscriptList: View {
         // 段首和可选的说话人整份算一次，不在每行里重算
         let turns = transcript.speakerTurns
         let choices = transcript.speakerList.map { SpeakerChoice(id: $0.speaker.id, name: $0.speaker.displayName) }
+        // 笔记按时间插在条目之间（同复制全文），标记的旗子挂在最近的句子旁
+        let notes = meeting.transcriptNotes
+        let rows = transcript.rows(notes: notes)
+        let marks = transcript.markedItems(meeting.transcriptMarks)
+        let timeWidth = timeWidth(lastNote: notes.last)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(transcript.items.indices, id: \.self) { i in
-                        row(i, turn: turns[i], isFirst: i == 0, choices: choices,
-                            isCurrent: i == current, isRevealed: i == revealed)
-                            .id(i)
+                    ForEach(rows, id: \.self) { r in
+                        switch r {
+                        case let .item(i):
+                            // 滚动锚点仍是条目下标：播放跟随、出处定位都按下标滚
+                            row(i, turn: turns[i], isFirst: i == 0, choices: choices,
+                                isCurrent: i == current, isRevealed: i == revealed, marks: marks[i] ?? [],
+                                timeWidth: timeWidth)
+                                .id(i)
+                        case let .note(note):
+                            TranscriptNoteRow(note: note, timeWidth: timeWidth,
+                                              onPlay: { play(from: note.offset) },
+                                              onEdit: {
+                                                  commitEdit()
+                                                  annotationActions.onEditNote(note)
+                                              },
+                                              onDelete: {
+                                                  commitEdit()
+                                                  annotationActions.onDeleteNote(note)
+                                              })
+                                .background(allSelected ? Color(nsColor: .selectedTextBackgroundColor) : .clear)
+                                .id(note.id)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -594,7 +656,8 @@ private struct TranscriptList: View {
     }
 
     @ViewBuilder private func row(_ i: Int, turn: SpeakerTurn?, isFirst: Bool, choices: [SpeakerChoice],
-                                  isCurrent: Bool, isRevealed: Bool) -> some View {
+                                  isCurrent: Bool, isRevealed: Bool, marks: [TranscriptMark],
+                                  timeWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let turn {
                 HStack(spacing: 8) {
@@ -617,10 +680,12 @@ private struct TranscriptList: View {
                     isEditable: isEditable,
                     speakerMenu: speakerMenu(for: s, choices: choices),
                     isEditing: editingID == s.id, draft: $draft, focus: $focus,
-                    onSeek: {
+                    marks: marks,
+                    onSeek: { play(from: s.start) },
+                    onPlayMark: { mark in play(from: mark.offset) },
+                    onDeleteMark: { mark in
                         commitEdit()
-                        following = true
-                        playback?.play(from: s.start)
+                        annotationActions.onDeleteMark(mark)
                     },
                     onTap: commitEdit,
                     onBeginEdit: { beginEdit(s) },
@@ -701,9 +766,16 @@ private struct TranscriptList: View {
         focus = .list
     }
 
-    /// 时间列宽度，录音超过一小时时要放得下 h:mm:ss
-    private var timeWidth: CGFloat {
-        (transcript.items.last?.start ?? 0) >= 3600 ? 60 : 42
+    /// 点时间、旗子、笔记行：结束编辑，恢复跟随，从这里播放
+    private func play(from time: TimeInterval) {
+        commitEdit()
+        following = true
+        playback?.play(from: time)
+    }
+
+    /// 时间列宽度，录音超过一小时时要放得下 h:mm:ss（笔记可能排在最后一条之后）
+    private func timeWidth(lastNote: TranscriptNote?) -> CGFloat {
+        max(transcript.items.last?.start ?? 0, lastNote?.offset ?? 0) >= 3600 ? 60 : 42
     }
 
     private func scroll(_ proxy: ScrollViewProxy, to i: Int) {
@@ -742,7 +814,11 @@ private struct TranscriptSentenceRow: View {
     var isEditing: Bool
     @Binding var draft: String
     var focus: FocusState<TranscriptFocus?>.Binding
+    /// 挂在这句旁的标记（离它最近的句子是这句），按时间先后
+    var marks: [TranscriptMark] = []
     var onSeek: () -> Void
+    var onPlayMark: (TranscriptMark) -> Void
+    var onDeleteMark: (TranscriptMark) -> Void
     /// 单击文本：结束别的句子的编辑（“点别处保存”）
     var onTap: () -> Void
     var onBeginEdit: () -> Void
@@ -779,6 +855,9 @@ private struct TranscriptSentenceRow: View {
                 if let original = sentence.original {
                     EditedMarker(original: original, canRestore: isEditable, onRestore: onRestore)
                 }
+                ForEach(marks, id: \.id) { mark in
+                    MarkFlag(mark: mark, onPlay: { onPlayMark(mark) }, onDelete: { onDeleteMark(mark) })
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -802,6 +881,13 @@ private struct TranscriptSentenceRow: View {
                     }
                     if let name = speakerMenu.restoreTo {
                         Button("恢复说话人（\(name)）", action: speakerMenu.onRestore)
+                    }
+                }
+                // 旗子很小，右键这句也能删它旁边的标记
+                if !marks.isEmpty {
+                    Divider()
+                    ForEach(marks, id: \.id) { mark in
+                        Button("删除标记（\(formatDuration(mark.offset))）") { onDeleteMark(mark) }
                     }
                 }
             }
@@ -868,6 +954,73 @@ struct TranscriptGapRow: View {
         .background(Color.orange.opacity(isCurrent ? 0.18 : 0.08), in: RoundedRectangle(cornerRadius: 5))
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
+    }
+}
+
+/// 会中标记的旗子，挂在离标记最近的句子末尾：点击从标记的时刻播放（不是句子开头），右键删除
+private struct MarkFlag: View {
+    var mark: TranscriptMark
+    var onPlay: () -> Void
+    var onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onPlay) {
+            Image(systemName: "flag.fill")
+                .font(.caption)
+                .foregroundStyle(Color.orange.opacity(hovering ? 1 : 0.8))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("会中标记（\(formatDuration(mark.offset))），点击从这里播放")
+        .contextMenu {
+            Button("从这里播放", action: onPlay)
+            Divider()
+            Button("删除标记", action: onDelete)
+        }
+    }
+}
+
+/// 会中笔记：不可编辑的一行，按时间插在句子之间，样式与句子、合盖空白都区分开。
+/// 点击从笔记的时刻播放；右键修改文字、删除
+private struct TranscriptNoteRow: View {
+    var note: TranscriptNote
+    var timeWidth: CGFloat
+    var onPlay: () -> Void
+    var onEdit: () -> Void
+    var onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(formatDuration(note.offset))
+                .monospacedDigit()
+                .foregroundStyle(hovering ? Color.accentColor : .secondary)
+                .frame(width: timeWidth, alignment: .leading)
+            Label {
+                Text("笔记：\(note.text)")
+            } icon: {
+                Image(systemName: "square.and.pencil")
+            }
+            .foregroundStyle(.purple)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.callout)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(Color.purple.opacity(hovering ? 0.14 : 0.08), in: RoundedRectangle(cornerRadius: 5))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onPlay)
+        .help("会中笔记，点击从这里播放；右键可修改或删除")
+        .contextMenu {
+            Button("从这里播放", action: onPlay)
+            Divider()
+            Button("修改笔记…", action: onEdit)
+            Button("删除笔记…", action: onDelete)
+        }
     }
 }
 

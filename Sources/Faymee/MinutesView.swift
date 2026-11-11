@@ -356,6 +356,18 @@ private struct MinutesItemRow: View {
                                             canRestore: isEditable, onRestore: onRestore)
                     }
                 }
+                // 「会中标注」的笔记条目：显示会上记的原话，方便核对 AI 有没有理解错
+                if let note = item.displayedNote {
+                    Label {
+                        Text("笔记：\(note)")
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
                 if hasMeta {
                     FlowLayout(spacing: 6) {
                         if isAction, let owner, !owner.isEmpty {
@@ -377,6 +389,12 @@ private struct MinutesItemRow: View {
                         if item.origin == .manual {
                             Label("手动添加", systemImage: "hand.point.up.left")
                                 .foregroundStyle(.tertiary)
+                        }
+                        // 数据里分不出是附近没有转写稿还是扩写没成功，说明里两种都提
+                        if item.origin == .note {
+                            Label("笔记原话，未扩写", systemImage: "text.quote")
+                                .foregroundStyle(.secondary)
+                                .help("会上记的笔记原话，没有扩写：笔记附近没有转写稿，或扩写没有成功")
                         }
                     }
                     .font(.caption)
@@ -416,7 +434,7 @@ private struct MinutesItemRow: View {
     }
 
     private var hasMeta: Bool {
-        !chips.isEmpty || item.isUnsourced || item.origin == .manual
+        !chips.isEmpty || item.isUnsourced || item.origin == .manual || item.origin == .note
             || (isAction && (owner != nil || item.due != nil || item.dueDate != nil))
     }
 }

@@ -244,6 +244,7 @@ private struct MeetingDetail: View {
         if let d = meeting.duration { parts.append("时长 \(formatDuration(d))") }
         let devices = Array(NSOrderedSet(array: meeting.segments.map(\.device))) as? [String] ?? []
         if !devices.isEmpty { parts.append(devices.joined(separator: "、")) }
+        if let annotations = meeting.annotationCountText { parts.append(annotations) }
         return parts.joined(separator: " · ")
     }
 }
