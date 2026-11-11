@@ -46,9 +46,16 @@ enum SentenceSplitter {
             let isPunctuation = trimmed.allSatisfy(\.isPunctuation)
             let isLong = token.end - token.start >= pause
 
-            // 两段之间真正的静音（时间不连续）总是断开。标点除外：它属于前面的话，
-            // 流式识别时上一段定稿结果没带句号、句号出现在下一段开头的情形就是这样
-            if !isPunctuation, let last = current.last, token.start - last.end >= pause { close() }
+            // 两段之间真正的静音（时间不连续）总是断开。静音后紧跟的标点属于前面的话，接上再断：
+            // 流式识别时上一段定稿结果没带句号、句号出现在下一段开头，就是这样
+            if let last = current.last, token.start - last.end >= pause {
+                if isPunctuation {
+                    current.append(token)
+                    close()
+                    continue
+                }
+                close()
+            }
             // 停顿并在这个字里，停顿在它前面
             if !isPunctuation, isLong, characterCount() >= minCharacters { close() }
 

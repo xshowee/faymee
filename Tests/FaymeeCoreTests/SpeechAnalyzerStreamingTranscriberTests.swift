@@ -3,14 +3,22 @@ import Foundation
 import Testing
 @testable import FaymeeCore
 
-/// 把录音按实时速度切成约 0.1 秒一块送入，返回收到的全部事件。格式保持文件原样（22050 Hz），格式转换也一并测到
+/// 边送边收到的事件。送音频的任务和收事件的任务都会碰它
+private final class Received: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [StreamingTranscriptionEvent] = []
+    func append(_ event: StreamingTranscriptionEvent) { lock.withLock { events.append(event) } }
+    var all: [StreamingTranscriptionEvent] { lock.withLock { events } }
+}
+
+/// 把录音按实时速度切成约 0.1 秒一块送入，返回收到的全部事件，以及送完音频、调用 finish() 之前已收到的事件。
+/// 格式保持文件原样（22050 Hz），格式转换也一并测到
 private func stream(_ url: URL, into transcription: any StreamingTranscription) async throws
-    -> [StreamingTranscriptionEvent] {
+    -> (all: [StreamingTranscriptionEvent], beforeFinish: [StreamingTranscriptionEvent]) {
     let file = try AVAudioFile(forReading: url)
+    let received = Received()
     let collected = Task {
-        var events: [StreamingTranscriptionEvent] = []
-        for await event in transcription.events { events.append(event) }
-        return events
+        for await event in transcription.events { received.append(event) }
     }
     let chunk = AVAudioFrameCount(file.processingFormat.sampleRate / 10)
     while file.framePosition < file.length {
@@ -19,8 +27,10 @@ private func stream(_ url: URL, into transcription: any StreamingTranscription) 
         transcription.append(buffer)
         try await Task.sleep(for: .milliseconds(100))
     }
+    let beforeFinish = received.all
     transcription.finish()
-    return await collected.value
+    await collected.value
+    return (received.all, beforeFinish)
 }
 
 /// 去掉标点和空白后按字比较：1 − 编辑距离 / 较长的字数
@@ -51,8 +61,10 @@ struct SpeechAnalyzerStreamingTranscriberContractTests {
         try await engine.prepare { _ in }
         let format = try AVAudioFile(forReading: url).processingFormat
 
-        let events = try await stream(url, into: engine.start(format: format, hotwords: ["飞书"]))
+        let (events, beforeFinish) = try await stream(url, into: engine.start(format: format, hotwords: ["飞书"]))
 
+        // 边说边出字：送完音频之前就已经有临时结果（不开 fastResults 时要等输入结束才出）
+        #expect(beforeFinish.contains { if case .volatile(let text, _) = $0 { !text.isEmpty } else { false } })
         let volatile = events.compactMap { if case .volatile(let text, _) = $0, !text.isEmpty { text } else { nil } }
         let sentences = events.compactMap { if case .sentence(let s) = $0 { s } else { nil } }
         let failures = events.compactMap { if case .failed(let reason) = $0 { reason } else { nil } }

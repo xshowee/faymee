@@ -73,28 +73,46 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
         try await analyzer.setContext(context)
         let (inputs, feed) = AsyncStream<AnalyzerInput>.makeStream()
 
-        try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                // 先开始读结果再启动分析
-                group.addTask { try await collect(module.results, output: output) }
-                try await analyzer.start(inputSequence: inputs)
-                // 取消时 AsyncStream 的迭代直接结束
-                for await chunk in audio {
-                    if let converted = try converter.convert(chunk.buffer) {
-                        feed.yield(AnalyzerInput(buffer: converted))
+        do {
+            try await withTaskCancellationHandler {
+                try await withThrowingTaskGroup(of: Part.self) { group in
+                    // 先开始读结果再启动分析
+                    group.addTask {
+                        try await collect(module.results, output: output)
+                        return .results
+                    }
+                    try await analyzer.start(inputSequence: inputs)
+                    group.addTask {
+                        // 取消时 AsyncStream 的迭代直接结束
+                        for await chunk in audio {
+                            // 必须先转成分析器的格式：AnalyzerInput 收到不支持的格式（如 Float32）会直接崩溃
+                            if let converted = try converter.convert(chunk.buffer) {
+                                feed.yield(AnalyzerInput(buffer: converted))
+                            }
+                        }
+                        feed.finish()
+                        try Task.checkCancellation()
+                        try await analyzer.finalizeAndFinishThroughEndOfInput()
+                        return .input
+                    }
+                    // 任何一边出错都立即抛出，不等调用方 finish()；结果先结束（分析器自己停了）时也不再等音频
+                    for try await part in group where part == .results {
+                        group.cancelAll()
                     }
                 }
+            } onCancel: {
                 feed.finish()
-                try Task.checkCancellation()
-                try await analyzer.finalizeAndFinishThroughEndOfInput()
-                try await group.waitForAll()
+                Task { await analyzer.cancelAndFinishNow() }
             }
-        } onCancel: {
+        } catch {
             feed.finish()
-            Task { await analyzer.cancelAndFinishNow() }
+            await analyzer.cancelAndFinishNow()
+            throw error
         }
         try Task.checkCancellation()
     }
+
+    private enum Part { case results, input }
 
     /// 临时结果原样（拼上还没断完的半句）发出；定稿结果的字和留着的半句一起断句，
     /// 断完的句子发出，末尾没说完的半句留给下一段定稿结果，期间仍作为临时文字显示
@@ -131,8 +149,8 @@ private final class SpeechAnalyzerStreamingTranscription: StreamingTranscription
 }
 
 /// 把采集的格式转换成分析器要的格式（如 48 kHz Float32 → 16 kHz Int16）。
-/// 重采样有内部状态，同一次转写里一直用同一个转换器
-private final class Converter {
+/// 重采样有内部状态，同一次转写里一直用同一个转换器，只在送音频的任务里用
+private final class Converter: @unchecked Sendable {
     private let converter: AVAudioConverter?
     private let output: AVAudioFormat
 
