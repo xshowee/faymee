@@ -78,6 +78,11 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     /// 区分说话人的状态，nil 表示从未区分（含 v0.3 及更早的旧会议）。说话人在 transcript.json 里。
     /// 区分说话人失败不影响转写状态：转写稿照常保存，只是没有说话人
     public var diarization: DiarizationState?
+    /// 会中标注（标记、笔记），按创建先后排列。可选是为了兼容 v0.4 及更早的旧 meeting.json，
+    /// 没有标注时不写；读写请用 `annotationList`，新建用 `addMark`、`addNote`
+    public var annotations: [Annotation]?
+    /// 用过的最大标注编号（`a3` → 3），删掉的编号不复用。从没标注过时为 nil，不写
+    public var lastAnnotationNumber: Int?
 
     public var lidGaps: [Gap] {
         get { gaps ?? [] }
