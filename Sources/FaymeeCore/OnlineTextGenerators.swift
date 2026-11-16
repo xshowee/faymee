@@ -56,6 +56,8 @@ enum OnlineTokenEstimator {
 private enum OnlineTextSupport {
     static let requestTimeout: TimeInterval = 300
     static let connectionTestTimeout: TimeInterval = 30
+    static let connectionTestPrompt = "OK"
+    static let connectionTestMaxTokens = 16
 
     static func endpointURL(baseURL: String, appendingPath path: String) throws -> URL {
         var trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -101,29 +103,34 @@ private enum OnlineTextSupport {
     }
 
     static func extractNormalizedText(_ raw: String) throws -> String {
-        let stripped = LlamaTextGenerator.stripThink(raw)
+        let stripped = stripLeadingThinkBlock(raw)
         let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw OnlineAPIError.emptyResponse }
         return trimmed
     }
 
-    static func extractErrorMessage(from object: [String: Any]) -> String? {
-        let candidates: [String?] = [
-            (object["error"] as? [String: Any])?["message"] as? String,
-            object["error"] as? String,
-            object["message"] as? String,
-        ]
-        for candidate in candidates {
-            if let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
-                return String(trimmed.prefix(240))
+    static func decodeArrayField(_ key: String, from data: Data) throws -> [[String: Any]] {
+        let json = try decodeJSONObject(from: data)
+        return try decodeArrayField(key, from: json)
+    }
+
+    static func decodeArrayField(_ key: String, from json: [String: Any]) throws -> [[String: Any]] {
+        guard let array = json[key] as? [[String: Any]] else {
+            if let errorMessage = OnlineAPIError.extractServerMessage(from: json) {
+                throw OnlineAPIError.remoteTaskFailed(errorMessage)
             }
+            throw OnlineAPIError.invalidResponse("响应缺少 \(key) 字段")
         }
-        return nil
+        return array
     }
 }
 
+private protocol ConnectionProbable: TextGenerator {
+    func probeConnection() async throws
+}
+
 /// OpenAI Chat Completions 兼容协议适配器（覆盖 DeepSeek、阿里云百炼、OpenAI 及自定义网关）
-public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
+public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
@@ -176,12 +183,8 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
         try Task.checkCancellation()
         try config.validateReady()
 
-        let url = try OnlineTextSupport.endpointURL(baseURL: config.trimmedBaseURL, appendingPath: "/chat/completions")
-        var headers: [String: String] = [:]
-        let apiKey = config.trimmedAPIKey
-        if !apiKey.isEmpty {
-            headers["Authorization"] = "Bearer \(apiKey)"
-        }
+        let url = try endpointURL()
+        let headers = authHeaders()
 
         var response = try await OnlineTextSupport.postJSON(
             url: url,
@@ -191,7 +194,7 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
             transport: transport
         )
 
-        if response.status == 400 {
+        if response.status == 400, !OnlineAPIError.isModelNotFoundError(data: response.data) {
             try Task.checkCancellation()
             response = try await OnlineTextSupport.postJSON(
                 url: url,
@@ -203,17 +206,7 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
         }
 
         try response.checkSuccess()
-        let json = try OnlineTextSupport.decodeJSONObject(from: response.data)
-
-        guard let choices = json["choices"] as? [[String: Any]] else {
-            if let errorMessage = OnlineTextSupport.extractErrorMessage(from: json) {
-                throw OnlineAPIError.remoteTaskFailed(errorMessage)
-            }
-            throw OnlineAPIError.invalidResponse("响应缺少 choices 字段")
-        }
-        guard let first = choices.first, let message = first["message"] as? [String: Any] else {
-            throw OnlineAPIError.emptyResponse
-        }
+        let message = try firstMessage(from: response.data)
 
         let contentText: String
         if let string = message["content"] as? String {
@@ -228,6 +221,49 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
         }
 
         return try OnlineTextSupport.extractNormalizedText(contentText)
+    }
+
+    func probeConnection() async throws {
+        try Task.checkCancellation()
+        try config.validateReady()
+
+        let response = try await OnlineTextSupport.postJSON(
+            url: try endpointURL(),
+            headers: authHeaders(),
+            payload: buildPayload(
+                system: "",
+                prompt: OnlineTextSupport.connectionTestPrompt,
+                maxTokens: OnlineTextSupport.connectionTestMaxTokens,
+                includeResponseFormat: false
+            ),
+            timeout: requestTimeout,
+            transport: transport
+        )
+        try response.checkSuccess()
+        let message = try firstMessage(from: response.data)
+        let hasText = message["content"] is String
+            || (message["content"] as? [[String: Any]])?.contains(where: { $0["text"] is String }) == true
+        let hasReasoning = message["reasoning_content"] is String
+        guard hasText || hasReasoning else {
+            throw OnlineAPIError.emptyResponse
+        }
+    }
+
+    private func endpointURL() throws -> URL {
+        try OnlineTextSupport.endpointURL(baseURL: config.trimmedBaseURL, appendingPath: "/chat/completions")
+    }
+
+    private func authHeaders() -> [String: String] {
+        let apiKey = config.trimmedAPIKey
+        return apiKey.isEmpty ? [:] : ["Authorization": "Bearer \(apiKey)"]
+    }
+
+    private func firstMessage(from data: Data) throws -> [String: Any] {
+        let choices = try OnlineTextSupport.decodeArrayField("choices", from: data)
+        guard let first = choices.first, let message = first["message"] as? [String: Any] else {
+            throw OnlineAPIError.emptyResponse
+        }
+        return message
     }
 
     private func buildPayload(system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool) -> [String: Any] {
@@ -250,7 +286,7 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, Sendable {
 }
 
 /// Anthropic Messages 原生协议适配器
-public final class AnthropicTextGenerator: TextGenerator, Sendable {
+public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
@@ -304,13 +340,63 @@ public final class AnthropicTextGenerator: TextGenerator, Sendable {
         try Task.checkCancellation()
         try config.validateReady()
 
-        let url = try OnlineTextSupport.endpointURL(baseURL: config.trimmedBaseURL, appendingPath: "/messages")
+        let response = try await OnlineTextSupport.postJSON(
+            url: try endpointURL(),
+            headers: authHeaders(),
+            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens),
+            timeout: requestTimeout,
+            transport: transport
+        )
+        try response.checkSuccess()
+
+        let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
+        let text = blocks.compactMap { block -> String? in
+            if let type = block["type"] as? String, type != "text" { return nil }
+            return block["text"] as? String
+        }.joined()
+
+        return try OnlineTextSupport.extractNormalizedText(text)
+    }
+
+    func probeConnection() async throws {
+        try Task.checkCancellation()
+        try config.validateReady()
+
+        let response = try await OnlineTextSupport.postJSON(
+            url: try endpointURL(),
+            headers: authHeaders(),
+            payload: buildPayload(
+                system: "",
+                prompt: OnlineTextSupport.connectionTestPrompt,
+                maxTokens: OnlineTextSupport.connectionTestMaxTokens
+            ),
+            timeout: requestTimeout,
+            transport: transport
+        )
+        try response.checkSuccess()
+
+        let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
+        guard !blocks.isEmpty,
+              blocks.contains(where: { $0["text"] is String || $0["thinking"] is String })
+        else {
+            throw OnlineAPIError.emptyResponse
+        }
+    }
+
+    private func endpointURL() throws -> URL {
+        try OnlineTextSupport.endpointURL(baseURL: config.trimmedBaseURL, appendingPath: "/messages")
+    }
+
+    private func authHeaders() -> [String: String] {
         var headers = ["anthropic-version": Self.apiVersion]
         let apiKey = config.trimmedAPIKey
         if !apiKey.isEmpty {
             headers["x-api-key"] = apiKey
         }
+        return headers
+    }
 
+    private func buildPayload(system: String, prompt: String, maxTokens: Int) -> [String: Any] {
         var payload: [String: Any] = [
             "model": config.trimmedModel,
             "max_tokens": maxTokens,
@@ -319,35 +405,15 @@ public final class AnthropicTextGenerator: TextGenerator, Sendable {
         if !system.isEmpty {
             payload["system"] = system
         }
-
-        let response = try await OnlineTextSupport.postJSON(
-            url: url,
-            headers: headers,
-            payload: payload,
-            timeout: requestTimeout,
-            transport: transport
-        )
-        try response.checkSuccess()
-
-        let json = try OnlineTextSupport.decodeJSONObject(from: response.data)
-        guard let blocks = json["content"] as? [[String: Any]] else {
-            if let errorMessage = OnlineTextSupport.extractErrorMessage(from: json) {
-                throw OnlineAPIError.remoteTaskFailed(errorMessage)
-            }
-            throw OnlineAPIError.invalidResponse("响应缺少 content 字段")
-        }
-
-        let text = blocks.compactMap { block -> String? in
-            if let type = block["type"] as? String, type != "text" { return nil }
-            return block["text"] as? String
-        }.joined()
-
-        return try OnlineTextSupport.extractNormalizedText(text)
+        return payload
     }
 }
 
 /// Google Gemini 原生 generateContent 协议适配器
-public final class GeminiTextGenerator: TextGenerator, Sendable {
+public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+    private static let safetyFinishReasons: Set<String> = [
+        "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII",
+    ]
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
@@ -400,57 +466,21 @@ public final class GeminiTextGenerator: TextGenerator, Sendable {
         try Task.checkCancellation()
         try config.validateReady()
 
-        let url = try generateContentURL()
-        var headers: [String: String] = [:]
-        let apiKey = config.trimmedAPIKey
-        if !apiKey.isEmpty {
-            headers["x-goog-api-key"] = apiKey
-        }
-
-        var payload: [String: Any] = [
-            "contents": [
-                [
-                    "role": "user",
-                    "parts": [["text": prompt]],
-                ]
-            ],
-            "generationConfig": [
-                "maxOutputTokens": maxTokens,
-                "responseMimeType": "application/json",
-            ],
-        ]
-        if !system.isEmpty {
-            payload["systemInstruction"] = ["parts": [["text": system]]]
-        }
-
         let response = try await OnlineTextSupport.postJSON(
-            url: url,
-            headers: headers,
-            payload: payload,
+            url: try generateContentURL(),
+            headers: authHeaders(),
+            payload: buildPayload(
+                system: system,
+                prompt: prompt,
+                maxTokens: maxTokens,
+                responseMimeType: "application/json"
+            ),
             timeout: requestTimeout,
             transport: transport
         )
         try response.checkSuccess()
 
-        let json = try OnlineTextSupport.decodeJSONObject(from: response.data)
-        if let promptFeedback = json["promptFeedback"] as? [String: Any],
-           let blockReason = promptFeedback["blockReason"] as? String,
-           !blockReason.isEmpty
-        {
-            throw OnlineAPIError.remoteTaskFailed("内容被安全策略拦截（\(blockReason)）")
-        }
-
-        guard let candidates = json["candidates"] as? [[String: Any]] else {
-            if let errorMessage = OnlineTextSupport.extractErrorMessage(from: json) {
-                throw OnlineAPIError.remoteTaskFailed(errorMessage)
-            }
-            throw OnlineAPIError.invalidResponse("响应缺少 candidates 字段")
-        }
-        guard let first = candidates.first else {
-            throw OnlineAPIError.emptyResponse
-        }
-
-        let parts = ((first["content"] as? [String: Any])?["parts"] as? [[String: Any]]) ?? []
+        let (parts, finishReason) = try firstCandidateParts(from: response.data)
         let rawText = parts.compactMap { part -> String? in
             if (part["thought"] as? Bool) == true { return nil }
             return part["text"] as? String
@@ -458,13 +488,87 @@ public final class GeminiTextGenerator: TextGenerator, Sendable {
 
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty,
-           let finishReason = first["finishReason"] as? String,
-           ["SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"].contains(finishReason)
+           let finishReason,
+           Self.safetyFinishReasons.contains(finishReason)
         {
             throw OnlineAPIError.remoteTaskFailed("内容被安全策略拦截（\(finishReason)）")
         }
 
         return try OnlineTextSupport.extractNormalizedText(rawText)
+    }
+
+    func probeConnection() async throws {
+        try Task.checkCancellation()
+        try config.validateReady()
+
+        let response = try await OnlineTextSupport.postJSON(
+            url: try generateContentURL(),
+            headers: authHeaders(),
+            payload: buildPayload(
+                system: "",
+                prompt: OnlineTextSupport.connectionTestPrompt,
+                maxTokens: OnlineTextSupport.connectionTestMaxTokens,
+                responseMimeType: nil
+            ),
+            timeout: requestTimeout,
+            transport: transport
+        )
+        try response.checkSuccess()
+
+        let (parts, finishReason) = try firstCandidateParts(from: response.data)
+        if let finishReason, Self.safetyFinishReasons.contains(finishReason) {
+            throw OnlineAPIError.remoteTaskFailed("内容被安全策略拦截（\(finishReason)）")
+        }
+        guard parts.contains(where: { $0["text"] is String || $0["thought"] is String }) else {
+            throw OnlineAPIError.emptyResponse
+        }
+    }
+
+    private func authHeaders() -> [String: String] {
+        let apiKey = config.trimmedAPIKey
+        return apiKey.isEmpty ? [:] : ["x-goog-api-key": apiKey]
+    }
+
+    private func buildPayload(
+        system: String,
+        prompt: String,
+        maxTokens: Int,
+        responseMimeType: String?
+    ) -> [String: Any] {
+        var generationConfig: [String: Any] = ["maxOutputTokens": maxTokens]
+        if let responseMimeType {
+            generationConfig["responseMimeType"] = responseMimeType
+        }
+        var payload: [String: Any] = [
+            "contents": [
+                [
+                    "role": "user",
+                    "parts": [["text": prompt]],
+                ]
+            ],
+            "generationConfig": generationConfig,
+        ]
+        if !system.isEmpty {
+            payload["systemInstruction"] = ["parts": [["text": system]]]
+        }
+        return payload
+    }
+
+    private func firstCandidateParts(from data: Data) throws -> (parts: [[String: Any]], finishReason: String?) {
+        let json = try OnlineTextSupport.decodeJSONObject(from: data)
+        if let promptFeedback = json["promptFeedback"] as? [String: Any],
+           let blockReason = promptFeedback["blockReason"] as? String,
+           !blockReason.isEmpty
+        {
+            throw OnlineAPIError.remoteTaskFailed("内容被安全策略拦截（\(blockReason)）")
+        }
+
+        let candidates = try OnlineTextSupport.decodeArrayField("candidates", from: json)
+        guard let first = candidates.first else {
+            throw OnlineAPIError.emptyResponse
+        }
+        let parts = ((first["content"] as? [String: Any])?["parts"] as? [[String: Any]]) ?? []
+        return (parts, first["finishReason"] as? String)
     }
 
     private func generateContentURL() throws -> URL {
@@ -534,11 +638,7 @@ public enum OnlineMinutesEngine {
             transport: transport,
             timeout: OnlineTextSupport.connectionTestTimeout
         )
-        _ = try await generator.generate(
-            system: "你是连接测试助手，只输出一行紧凑 json 对象，不要输出其他文字。",
-            prompt: #"请只回复 {"ok":true}"#,
-            maxTokens: 128
-        )
+        try await generator.probeConnection()
     }
 
     private static func makeGenerator(
@@ -546,7 +646,7 @@ public enum OnlineMinutesEngine {
         config: OnlineEndpointConfig,
         transport: any HTTPTransport,
         timeout: TimeInterval
-    ) -> any TextGenerator {
+    ) -> any ConnectionProbable {
         switch provider.protocolKind {
         case .openAICompatible:
             OpenAICompatibleTextGenerator(

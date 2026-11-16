@@ -36,10 +36,7 @@ public final class OnlineEngineCoordinator {
     @ObservationIgnored private weak var transcription: TranscriptionPipeline?
     @ObservationIgnored private weak var minutes: MinutesPipeline?
 
-    @ObservationIgnored private var observedTranscription: ObservedSpec<OnlineTranscriptionProvider>
-    @ObservationIgnored private var observedMinutes: ObservedSpec<OnlineMinutesProvider>
-    @ObservationIgnored private var appliedTranscription: EffectiveSpec<OnlineTranscriptionProvider>
-    @ObservationIgnored private var appliedMinutes: EffectiveSpec<OnlineMinutesProvider>
+    @ObservationIgnored private var specs: SpecSnapshots
 
     @ObservationIgnored private var pendingSyncTask: Task<Void, Never>?
     @ObservationIgnored private let transcriptionTestRunner = ConnectionTestRunner()
@@ -59,55 +56,21 @@ public final class OnlineEngineCoordinator {
         self.makeMinutes = makeMinutes
         self.syncDebounce = syncDebounce
         self.dashScopeTestPollInterval = dashScopeTestPollInterval
-        self.observedTranscription = ObservedSpec(
-            mode: settings.transcriptionMode,
-            provider: settings.transcriptionProvider,
-            config: settings.activeTranscriptionConfig
-        )
-        self.observedMinutes = ObservedSpec(
-            mode: settings.minutesMode,
-            provider: settings.minutesProvider,
-            config: settings.activeMinutesConfig
-        )
-        self.appliedTranscription = EffectiveSpec(
-            mode: settings.transcriptionMode,
-            provider: settings.transcriptionProvider,
-            config: settings.activeTranscriptionConfig
-        )
-        self.appliedMinutes = EffectiveSpec(
-            mode: settings.minutesMode,
-            provider: settings.minutesProvider,
-            config: settings.activeMinutesConfig
-        )
+        self.specs = SpecSnapshots(settings: settings)
     }
 
     /// 绑定管线并订阅配置变化；调用前管线应已按当前 `settings` 初始化，避免启动时重复创建引擎
     public func bind(transcription: TranscriptionPipeline, minutes: MinutesPipeline) {
         self.transcription = transcription
         self.minutes = minutes
-        observedTranscription = ObservedSpec(
-            mode: settings.transcriptionMode,
-            provider: settings.transcriptionProvider,
-            config: settings.activeTranscriptionConfig
-        )
-        observedMinutes = ObservedSpec(
-            mode: settings.minutesMode,
-            provider: settings.minutesProvider,
-            config: settings.activeMinutesConfig
-        )
-        appliedTranscription = EffectiveSpec(
-            mode: settings.transcriptionMode,
-            provider: settings.transcriptionProvider,
-            config: settings.activeTranscriptionConfig
-        )
-        appliedMinutes = EffectiveSpec(
-            mode: settings.minutesMode,
-            provider: settings.minutesProvider,
-            config: settings.activeMinutesConfig
-        )
+        syncObservedAndAppliedSpecs()
         settings.onChange = { [weak self] in
             self?.handleSettingsChanged()
         }
+    }
+
+    private func syncObservedAndAppliedSpecs() {
+        specs = SpecSnapshots(settings: settings)
     }
 
     /// 立即同步尚未落地的配置改动（取消输入防抖）
@@ -120,8 +83,8 @@ public final class OnlineEngineCoordinator {
             provider: settings.transcriptionProvider,
             config: settings.activeTranscriptionConfig
         )
-        if nextT != appliedTranscription {
-            appliedTranscription = nextT
+        if nextT != specs.appliedTranscription {
+            specs.appliedTranscription = nextT
             let resolved = makeTranscription(settings, transport)
             transcription?.setEngine(transcriber: resolved.transcriber, engine: resolved.name, isReady: resolved.isReady)
         }
@@ -131,8 +94,8 @@ public final class OnlineEngineCoordinator {
             provider: settings.minutesProvider,
             config: settings.activeMinutesConfig
         )
-        if nextM != appliedMinutes {
-            appliedMinutes = nextM
+        if nextM != specs.appliedMinutes {
+            specs.appliedMinutes = nextM
             let resolved = makeMinutes(settings, transport)
             minutes?.setEngine(
                 generator: resolved.generator,
@@ -205,11 +168,11 @@ public final class OnlineEngineCoordinator {
             provider: settings.transcriptionProvider,
             config: settings.activeTranscriptionConfig
         )
-        if nextT != observedTranscription {
-            if nextT.mode != observedTranscription.mode || nextT.provider != observedTranscription.provider {
+        if nextT != specs.observedTranscription {
+            if nextT.mode != specs.observedTranscription.mode || nextT.provider != specs.observedTranscription.provider {
                 discreteChange = true
             }
-            observedTranscription = nextT
+            specs.observedTranscription = nextT
             transcriptionTestRunner.reset { transcriptionTestState = $0 }
         }
 
@@ -218,11 +181,11 @@ public final class OnlineEngineCoordinator {
             provider: settings.minutesProvider,
             config: settings.activeMinutesConfig
         )
-        if nextM != observedMinutes {
-            if nextM.mode != observedMinutes.mode || nextM.provider != observedMinutes.provider {
+        if nextM != specs.observedMinutes {
+            if nextM.mode != specs.observedMinutes.mode || nextM.provider != specs.observedMinutes.provider {
                 discreteChange = true
             }
-            observedMinutes = nextM
+            specs.observedMinutes = nextM
             minutesTestRunner.reset { minutesTestState = $0 }
         }
 
@@ -244,6 +207,31 @@ public final class OnlineEngineCoordinator {
     }
 }
 
+private struct SpecSnapshots {
+    var observedTranscription: ObservedSpec<OnlineTranscriptionProvider>
+    var observedMinutes: ObservedSpec<OnlineMinutesProvider>
+    var appliedTranscription: EffectiveSpec<OnlineTranscriptionProvider>
+    var appliedMinutes: EffectiveSpec<OnlineMinutesProvider>
+
+    @MainActor
+    init(settings: OnlineModelSettings) {
+        let transcription = ObservedSpec(
+            mode: settings.transcriptionMode,
+            provider: settings.transcriptionProvider,
+            config: settings.activeTranscriptionConfig
+        )
+        let minutes = ObservedSpec(
+            mode: settings.minutesMode,
+            provider: settings.minutesProvider,
+            config: settings.activeMinutesConfig
+        )
+        observedTranscription = transcription
+        observedMinutes = minutes
+        appliedTranscription = EffectiveSpec(transcription)
+        appliedMinutes = EffectiveSpec(minutes)
+    }
+}
+
 private struct ObservedSpec<Provider: Equatable>: Equatable {
     var mode: EngineMode
     var provider: Provider
@@ -253,6 +241,10 @@ private struct ObservedSpec<Provider: Equatable>: Equatable {
 private enum EffectiveSpec<Provider: Equatable>: Equatable {
     case local
     case online(provider: Provider, config: OnlineEndpointConfig)
+
+    init(_ observed: ObservedSpec<Provider>) {
+        self.init(mode: observed.mode, provider: observed.provider, config: observed.config)
+    }
 
     init(mode: EngineMode, provider: Provider, config: OnlineEndpointConfig) {
         switch mode {

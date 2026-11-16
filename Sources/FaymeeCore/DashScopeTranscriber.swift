@@ -76,7 +76,7 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         let ossURL = try await uploadToOSS(audio: audio, policy: policy)
         progress(0.40)
 
-        let normalizedHotwords = Self.normalizeHotwords(hotwords)
+        let normalizedHotwords = Hotwords.normalize(hotwords)
         let taskID = try await submitTranscriptionTask(
             apiBase: apiBase,
             model: model,
@@ -173,7 +173,7 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
             .text(name: "x-oss-forbid-overwrite", value: policy.xOssForbidOverwrite),
             .text(name: "key", value: key),
             .text(name: "success_action_status", value: "200"),
-            .file(name: "file", fileURL: audio, fileName: uniqueFileName, mimeType: Self.mimeType(forExtension: suffix)),
+            .file(name: "file", fileURL: audio, fileName: uniqueFileName, mimeType: AudioMIMEType.forExtension(suffix)),
         ]
 
         let response = try await transport.send(HTTPRequest(
@@ -213,7 +213,9 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
             vocabularyID: vocabularyID
         )
 
-        if response.status == 400 && (contextText != nil || vocabularyID != nil) {
+        if response.status == 400,
+           contextText != nil || vocabularyID != nil,
+           !OnlineAPIError.isModelNotFoundError(data: response.data) {
             let fallbackResponse = try await sendTaskSubmission(
                 apiBase: apiBase,
                 model: model,
@@ -237,73 +239,90 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         hotwords: [String]
     ) async throws -> String? {
         try Task.checkCancellation()
-        let fingerprint = Self.hotwordsFingerprint(model: model, hotwords: hotwords)
+        let fingerprint = Self.hotwordsFingerprint(apiBase: apiBase, model: model, hotwords: hotwords)
         let cached = cacheLock.withLock { vocabularyCache }
         if let cached, cached.fingerprint == fingerprint {
             return cached.vocabularyID
         }
 
-        let entries: [[String: Any]] = hotwords.map { word in
-            ["text": word, "weight": 4]
+        let entries: [[String: Any]] = hotwords.map { ["text": $0, "weight": 4] }
+
+        if let existingID = cached?.vocabularyID {
+            let updateResp = try await sendVocabularyRequest(
+                apiBase: apiBase,
+                apiKey: apiKey,
+                input: [
+                    "action": "update_vocabulary",
+                    "vocabulary_id": existingID,
+                    "vocabulary": entries,
+                ]
+            )
+            if updateResp.status == 400 {
+                cacheLock.withLock {
+                    if vocabularyCache?.vocabularyID == existingID {
+                        vocabularyCache = nil
+                    }
+                }
+            } else {
+                try updateResp.checkSuccess()
+                let resolvedID = extractVocabularyID(from: updateResp.data, context: "更新热词响应") ?? existingID
+                cacheLock.withLock {
+                    vocabularyCache = VocabularyCache(fingerprint: fingerprint, vocabularyID: resolvedID)
+                }
+                return resolvedID
+            }
         }
 
-        let input: [String: Any]
-        if let existingID = cached?.vocabularyID {
-            input = [
-                "action": "update_vocabulary",
-                "vocabulary_id": existingID,
-                "vocabulary": entries,
-            ]
-        } else {
-            input = [
+        let createResp = try await sendVocabularyRequest(
+            apiBase: apiBase,
+            apiKey: apiKey,
+            input: [
                 "action": "create_vocabulary",
                 "target_model": model,
                 "prefix": "faymee",
                 "vocabulary": entries,
             ]
+        )
+        if createResp.status == 400 {
+            return nil
         }
+        try createResp.checkSuccess()
 
+        guard let createdID = extractVocabularyID(from: createResp.data, context: "创建热词表响应") else {
+            throw OnlineAPIError.invalidResponse("定制热词接口未返回 vocabulary_id")
+        }
+        cacheLock.withLock {
+            vocabularyCache = VocabularyCache(fingerprint: fingerprint, vocabularyID: createdID)
+        }
+        return createdID
+    }
+
+    private func sendVocabularyRequest(
+        apiBase: URL,
+        apiKey: String,
+        input: [String: Any]
+    ) async throws -> HTTPResponse {
+        try Task.checkCancellation()
         let payload: [String: Any] = [
             "model": "speech-biasing",
             "input": input,
         ]
         let bodyData = try JSONSerialization.data(withJSONObject: payload)
         let url = apiBase.appendingPathComponent("services/audio/asr/customization")
-        let response = try await transport.send(HTTPRequest(
+        return try await transport.send(HTTPRequest(
             method: "POST",
             url: url,
             headers: authHeaders(apiKey: apiKey, contentType: "application/json"),
             body: .data(bodyData),
             timeout: 60
         ))
-        if response.status == 400 {
-            return nil
-        }
-        try response.checkSuccess()
+    }
 
-        let resolvedID: String
-        if let existingID = cached?.vocabularyID {
-            if let json = try? parseJSONObject(from: response.data, context: "更新热词响应"),
-               let output = json["output"] as? [String: Any],
-               let returnedID = Self.nonEmptyString(output["vocabulary_id"]) {
-                resolvedID = returnedID
-            } else {
-                resolvedID = existingID
-            }
-        } else {
-            let json = try parseJSONObject(from: response.data, context: "创建热词表响应")
-            guard let output = json["output"] as? [String: Any],
-                  let createdID = Self.nonEmptyString(output["vocabulary_id"])
-            else {
-                throw OnlineAPIError.invalidResponse("定制热词接口未返回 vocabulary_id")
-            }
-            resolvedID = createdID
-        }
-
-        cacheLock.withLock {
-            vocabularyCache = VocabularyCache(fingerprint: fingerprint, vocabularyID: resolvedID)
-        }
-        return resolvedID
+    private func extractVocabularyID(from data: Data, context: String) -> String? {
+        guard let json = try? parseJSONObject(from: data, context: context),
+              let output = json["output"] as? [String: Any]
+        else { return nil }
+        return Self.nonEmptyString(output["vocabulary_id"])
     }
 
     private func sendTaskSubmission(
@@ -317,15 +336,14 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         try Task.checkCancellation()
         let url = apiBase.appendingPathComponent("services/audio/asr/transcription")
         let isQwen = Self.isQwenModel(model)
-        var input: [String: Any] = isQwen ? ["file_url": ossURL] : ["file_urls": [ossURL]]
-        if isQwen, let contextText {
-            input["context"] = contextText
-        }
+        let input: [String: Any] = isQwen ? ["file_url": ossURL] : ["file_urls": [ossURL]]
         var payload: [String: Any] = [
             "model": model,
             "input": input,
         ]
-        if !isQwen, let vocabularyID {
+        if isQwen, let contextText {
+            payload["parameters"] = ["corpus": ["text": contextText]]
+        } else if !isQwen, let vocabularyID {
             payload["parameters"] = ["vocabulary_id": vocabularyID]
         }
         let bodyData = try JSONSerialization.data(withJSONObject: payload)
@@ -348,7 +366,7 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         guard let output = json["output"] as? [String: Any],
               let taskID = Self.nonEmptyString(output["task_id"])
         else {
-            if let message = extractErrorMessage(from: json) {
+            if let message = OnlineAPIError.extractServerMessage(from: json) {
                 throw OnlineAPIError.remoteTaskFailed(message)
             }
             throw OnlineAPIError.invalidResponse("提交转写任务未返回 task_id")
@@ -417,7 +435,7 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         if let results = output["results"] as? [[String: Any]], let first = results.first {
             if let subtaskStatus = Self.nonEmptyString(first["subtask_status"])?.uppercased(),
                subtaskStatus == "FAILED" {
-                let detail = extractErrorMessage(from: first) ?? "子任务转写失败"
+                let detail = OnlineAPIError.extractServerMessage(from: first) ?? "子任务转写失败"
                 throw OnlineAPIError.remoteTaskFailed(detail)
             }
             if let urlString = Self.nonEmptyString(first["transcription_url"]),
@@ -438,28 +456,18 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
     }
 
     private func extractTaskFailureMessage(output: [String: Any], root: [String: Any]) -> String {
-        if let msg = extractErrorMessage(from: output) {
+        if let msg = OnlineAPIError.extractServerMessage(from: output) {
             return msg
         }
         if let results = output["results"] as? [[String: Any]],
            let first = results.first,
-           let msg = extractErrorMessage(from: first) {
+           let msg = OnlineAPIError.extractServerMessage(from: first) {
             return msg
         }
-        if let msg = extractErrorMessage(from: root) {
+        if let msg = OnlineAPIError.extractServerMessage(from: root) {
             return msg
         }
         return "云端转写任务执行失败"
-    }
-
-    private func extractErrorMessage(from dict: [String: Any]) -> String? {
-        if let message = Self.nonEmptyString(dict["message"]) {
-            return message
-        }
-        if let code = Self.nonEmptyString(dict["code"]) {
-            return code
-        }
-        return nil
     }
 
     private func fetchAndParseTranscript(from url: URL) async throws -> [TranscribedSentence] {
@@ -550,20 +558,8 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
         model.lowercased().contains("qwen")
     }
 
-    private static func normalizeHotwords(_ hotwords: [String]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for word in hotwords {
-            let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty && seen.insert(trimmed).inserted {
-                result.append(trimmed)
-            }
-        }
-        return result
-    }
-
-    private static func hotwordsFingerprint(model: String, hotwords: [String]) -> String {
-        let joined = ([model] + hotwords).joined(separator: "\0")
+    private static func hotwordsFingerprint(apiBase: URL, model: String, hotwords: [String]) -> String {
+        let joined = ([apiBase.absoluteString, model] + hotwords).joined(separator: "\0")
         let digest = SHA256.hash(data: Data(joined.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -621,20 +617,5 @@ public final class DashScopeTranscriber: Transcriber, @unchecked Sendable {
             return num.stringValue
         }
         return nil
-    }
-
-    private static func mimeType(forExtension ext: String) -> String {
-        switch ext.lowercased() {
-        case "wav": "audio/wav"
-        case "m4a": "audio/mp4"
-        case "mp3": "audio/mpeg"
-        case "flac": "audio/flac"
-        case "ogg": "audio/ogg"
-        case "opus": "audio/opus"
-        case "aac": "audio/aac"
-        case "mp4": "video/mp4"
-        case "webm": "audio/webm"
-        default: "application/octet-stream"
-        }
     }
 }

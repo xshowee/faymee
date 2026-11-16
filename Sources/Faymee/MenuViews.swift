@@ -20,13 +20,13 @@ struct MenuBarLabel: View {
                 Image(systemName: indicator.symbolName)
             }
         }
-        // 点了“生成纪要需要先下载模型”的通知：打开设置里的模型下载。菜单栏图标 App 启动就在，
-        // 冷启动时请求可能比它先置上，所以 initial: true
-        .onChange(of: model.isModelDownloadRequested, initial: true) {
-            guard model.isModelDownloadRequested else { return }
+        // 点了“生成纪要需要先下载模型”或“需要先配置在线模型”的通知：打开设置窗口。
+        // 菜单栏图标 App 启动就在，冷启动时请求可能比它先置上，所以 initial: true
+        .onChange(of: model.isSettingsRequested, initial: true) {
+            guard model.isSettingsRequested else { return }
             openWindow(id: "settings")
             NSApp.activate()
-            model.modelDownloadRequestHandled()
+            model.settingsRequestHandled()
         }
     }
 }

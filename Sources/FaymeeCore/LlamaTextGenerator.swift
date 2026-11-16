@@ -208,7 +208,7 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         stats.totalSeconds = Date().timeIntervalSince(start)
         lastStats = stats
         // 中文一个字可能拆在两个 token 里，所以先攒字节、最后再解码
-        return Self.stripThink(String(decoding: bytes, as: UTF8.self))
+        return stripLeadingThinkBlock(String(decoding: bytes, as: UTF8.self))
     }
 
     /// llama_decode 的返回值：0 成功，1 KV 放不下，2 被 abort 回调中止，其余为错误
@@ -271,15 +271,6 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
             n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
         }
         return buffer.prefix(Int(max(n, 0))).map { UInt8(bitPattern: $0) }
-    }
-
-    /// 预填了空 think 块，正常不会再有；保险起见去掉开头的 `<think>…</think>`
-    static func stripThink(_ text: String) -> String {
-        guard let open = text.range(of: "<think>"),
-              text[..<open.lowerBound].allSatisfy(\.isWhitespace),
-              let close = text.range(of: "</think>", range: open.upperBound..<text.endIndex)
-        else { return text }
-        return String(text[close.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 每个进程初始化一次：Metal 设备和内嵌的 shader 在这里准备（App 第一次或更新后第一次约 6 秒），

@@ -119,6 +119,28 @@ import Testing
         #expect(ready.sourceIdentifier == "openai/gpt-transcribe")
     }
 
+    @Test func sourceIdentifier在模型为空时只返回providerID不带斜杠() {
+        let emptyModel = OnlineEndpointConfig(
+            baseURL: "https://api.openai.com/v1",
+            model: "",
+            apiKey: "sk-test",
+            requiresHTTPS: true,
+            requiresAPIKey: true,
+            providerID: "openai"
+        )
+        #expect(emptyModel.sourceIdentifier == "openai")
+
+        let whitespaceModel = OnlineEndpointConfig(
+            baseURL: "http://localhost:8000/v1",
+            model: "   ",
+            apiKey: "",
+            requiresHTTPS: false,
+            requiresAPIKey: false,
+            providerID: "openai-compatible"
+        )
+        #expect(whitespaceModel.sourceIdentifier == "openai-compatible")
+    }
+
     @Test func 无效URL被拦截() {
         for bad in ["", "   ", "api.openai.com/v1", "ftp://example.com/v1", "https://", "http:///v1", "https://bad host/v1"] {
             let config = OnlineEndpointConfig(
@@ -311,6 +333,127 @@ import Testing
             settings.minutesModel = "claude-haiku-4-5"
             settings.minutesAPIKey = "sk-ant-123"
             #expect(changeCount == 10)
+        }
+    }
+
+    @Test func APIKey在初始化时载入内存缓存_后续读取不再同步查询钥匙串() {
+        let suiteName = "com.faymee.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let spy = SpyCredentialStore([.dashScope: "sk-dash-init", .openAI: "sk-oa-init"])
+        let settings = OnlineModelSettings(defaults: defaults, credentials: spy)
+        let readsAfterInit = spy.totalReads
+        #expect(readsAfterInit == CredentialSlot.allCases.count)
+
+        for _ in 0..<5 {
+            _ = settings.transcriptionAPIKey
+            _ = settings.minutesAPIKey
+            _ = settings.activeTranscriptionConfig
+            _ = settings.activeMinutesConfig
+            _ = settings.transcriptionConfig(for: .openAI)
+            _ = settings.minutesConfig(for: .dashScope)
+        }
+        #expect(spy.totalReads == readsAfterInit)
+        #expect(settings.transcriptionAPIKey == "sk-dash-init")
+
+        settings.transcriptionProvider = .openAI
+        #expect(settings.transcriptionAPIKey == "sk-oa-init")
+        settings.transcriptionAPIKey = "sk-oa-updated"
+        settings.transcriptionAPIKey = "sk-oa-updated"
+        #expect(spy.writeCounts[.openAI] == 1)
+        #expect(spy.totalReads == readsAfterInit)
+        #expect(settings.transcriptionAPIKey == "sk-oa-updated")
+        settings.minutesProvider = .openAI
+        #expect(settings.minutesAPIKey == "sk-oa-updated")
+    }
+
+    @Test func 钥匙串保存错误按槽位隔离_转写与纪要互不干扰() {
+        let suiteName = "com.faymee.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let spy = SpyCredentialStore(failingSlots: [.dashScope, .anthropic])
+        let settings = OnlineModelSettings(defaults: defaults, credentials: spy)
+        settings.transcriptionProvider = .dashScope
+        settings.minutesProvider = .openAI
+
+        // 转写侧（dashScope）保存失败：只暴露转写错误，纪要侧（openAI）保持无错误
+        settings.transcriptionAPIKey = "sk-bad"
+        #expect(settings.transcriptionCredentialError != nil)
+        #expect(settings.minutesCredentialError == nil)
+        #expect(settings.transcriptionAPIKey == "")
+
+        // 纪要侧（openAI）正常保存成功：不清除转写侧（dashScope）的错误
+        settings.minutesAPIKey = "sk-oa-good"
+        #expect(settings.minutesCredentialError == nil)
+        #expect(settings.transcriptionCredentialError != nil)
+
+        // 纪要切到 anthropic 并写入失败：两侧各自保留独立错误
+        settings.minutesProvider = .anthropic
+        settings.minutesAPIKey = "sk-ant-bad"
+        #expect(settings.minutesCredentialError != nil)
+        #expect(settings.transcriptionCredentialError != nil)
+
+        // 切换服务商时只显示当前槽位对应的错误
+        settings.transcriptionProvider = .openAI
+        #expect(settings.transcriptionCredentialError == nil)
+        settings.transcriptionProvider = .dashScope
+        #expect(settings.transcriptionCredentialError != nil)
+
+        // 修复 dashScope 槽位后只清除 dashScope 错误，anthropic 错误仍保留
+        spy.setFailing(false, for: .dashScope)
+        settings.transcriptionAPIKey = "sk-dash-recovered"
+        #expect(settings.transcriptionCredentialError == nil)
+        #expect(settings.minutesCredentialError != nil)
+        #expect(settings.transcriptionAPIKey == "sk-dash-recovered")
+    }
+}
+
+private final class SpyCredentialStore: CredentialStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [CredentialSlot: String]
+    private var failingSlots: Set<CredentialSlot>
+    private(set) var readCounts: [CredentialSlot: Int] = [:]
+    private(set) var writeCounts: [CredentialSlot: Int] = [:]
+
+    init(_ initial: [CredentialSlot: String] = [:], failingSlots: Set<CredentialSlot> = []) {
+        self.storage = initial
+        self.failingSlots = failingSlots
+    }
+
+    var totalReads: Int {
+        lock.withLock { readCounts.values.reduce(0, +) }
+    }
+
+    func setFailing(_ failing: Bool, for slot: CredentialSlot) {
+        lock.withLock {
+            if failing {
+                failingSlots.insert(slot)
+            } else {
+                failingSlots.remove(slot)
+            }
+        }
+    }
+
+    func string(for slot: CredentialSlot) -> String {
+        lock.withLock {
+            readCounts[slot, default: 0] += 1
+            return storage[slot] ?? ""
+        }
+    }
+
+    func setString(_ value: String, for slot: CredentialSlot) throws {
+        try lock.withLock {
+            writeCounts[slot, default: 0] += 1
+            if failingSlots.contains(slot) {
+                throw CredentialStoreError.keychainStatus(-25299)
+            }
+            if value.isEmpty {
+                storage.removeValue(forKey: slot)
+            } else {
+                storage[slot] = value
+            }
         }
     }
 }

@@ -142,6 +142,32 @@ private func makeOpenAIConfig(
         #expect(transport.recordedRequests.count == 2)
     }
 
+    @Test func 服务端400明确为模型不存在时不剥离response_format重试_提及参数不支持仍重试() async throws {
+        // 1) model_not_found -> 不重试，立即报错
+        let missingTransport = FakeHTTPTransport()
+        try missingTransport.enqueue(
+            json: ["error": ["code": "model_not_found", "message": "The model `bad-model-id` does not exist"]],
+            status: 400
+        )
+        let missingGen = OpenAICompatibleTextGenerator(config: makeOpenAIConfig(model: "bad-model-id"), transport: missingTransport)
+        await #expect(throws: OnlineAPIError.badRequest(400, "The model `bad-model-id` does not exist")) {
+            _ = try await missingGen.generate(system: "s", prompt: "p", maxTokens: 128)
+        }
+        #expect(missingTransport.recordedRequests.count == 1)
+
+        // 2) 参数不支持即使同时提到 model，也应剥离 response_format 重试
+        let paramTransport = FakeHTTPTransport()
+        try paramTransport.enqueue(
+            json: ["error": ["code": "invalid_request_error", "message": "Model does not support response_format"]],
+            status: 400
+        )
+        try paramTransport.enqueue(json: ["choices": [["message": ["content": #"{"overview":[]}"#]]]])
+        let paramGen = OpenAICompatibleTextGenerator(config: makeOpenAIConfig(), transport: paramTransport)
+        let output = try await paramGen.generate(system: "s", prompt: "p", maxTokens: 128)
+        #expect(output == #"{"overview":[]}"#)
+        #expect(paramTransport.recordedRequests.count == 2)
+    }
+
     @Test func HTTP错误状态_空内容与损坏JSON均转换为对应OnlineAPIError() async throws {
         let transport = FakeHTTPTransport()
         try transport.enqueue(json: ["error": ["message": "Invalid key"]], status: 401)
@@ -375,10 +401,10 @@ private func makeGeminiConfig(
             is GeminiTextGenerator)
     }
 
-    @Test func 连接测试对三套协议发送极短消息与极小输出上限并在合法响应下通过() async throws {
-        // 1) OpenAI 兼容（含自定义免密 http://localhost）
+    @Test func 连接测试对三套协议发送纯文本极短探测请求并在合法响应下通过() async throws {
+        // 1) OpenAI 兼容（含自定义免密 http://localhost）：prompt="OK", max_tokens=16, timeout=30, 无 response_format
         let openAITransport = FakeHTTPTransport()
-        try openAITransport.enqueue(json: ["choices": [["message": ["content": #"{"ok":true}"#]]]])
+        try openAITransport.enqueue(json: ["choices": [["message": ["content": "OK"]]]])
         let customConfig = makeOpenAIConfig(
             baseURL: "http://localhost:11434/v1",
             model: "qwen2.5:14b",
@@ -388,11 +414,15 @@ private func makeGeminiConfig(
             providerID: "openai-compatible"
         )
         try await OnlineMinutesEngine.testConnection(provider: .custom, config: customConfig, transport: openAITransport)
-        let openAIBody = try #require(openAITransport.recordedRequests.first?.bodyJSONObject())
-        let openAIMaxTokens = try #require(openAIBody["max_tokens"] as? Int)
-        #expect(openAIMaxTokens > 0 && openAIMaxTokens <= 256)
+        let openAIRecorded = try #require(openAITransport.recordedRequests.first)
+        #expect(openAIRecorded.request.timeout == 30)
+        let openAIBody = try #require(openAIRecorded.bodyJSONObject())
+        #expect(openAIBody["max_tokens"] as? Int == 16)
+        #expect(openAIBody["response_format"] == nil)
+        let openAIMessages = try #require(openAIBody["messages"] as? [[String: String]])
+        #expect(openAIMessages == [["role": "user", "content": "OK"]])
 
-        // 2) Anthropic
+        // 2) Anthropic：prompt="OK", max_tokens=16, timeout=30
         let anthropicTransport = FakeHTTPTransport()
         try anthropicTransport.enqueue(json: ["content": [["type": "text", "text": "OK"]]])
         try await OnlineMinutesEngine.testConnection(
@@ -400,22 +430,124 @@ private func makeGeminiConfig(
             config: makeAnthropicConfig(),
             transport: anthropicTransport
         )
-        let anthropicBody = try #require(anthropicTransport.recordedRequests.first?.bodyJSONObject())
-        let anthropicMaxTokens = try #require(anthropicBody["max_tokens"] as? Int)
-        #expect(anthropicMaxTokens > 0 && anthropicMaxTokens <= 256)
+        let anthropicRecorded = try #require(anthropicTransport.recordedRequests.first)
+        #expect(anthropicRecorded.request.timeout == 30)
+        let anthropicBody = try #require(anthropicRecorded.bodyJSONObject())
+        #expect(anthropicBody["max_tokens"] as? Int == 16)
+        #expect(anthropicBody["system"] == nil)
+        let anthropicMessages = try #require(anthropicBody["messages"] as? [[String: String]])
+        #expect(anthropicMessages == [["role": "user", "content": "OK"]])
 
-        // 3) Gemini
+        // 3) Gemini：prompt="OK", maxOutputTokens=16, timeout=30, 无 responseMimeType
         let geminiTransport = FakeHTTPTransport()
-        try geminiTransport.enqueue(json: ["candidates": [["content": ["parts": [["text": #"{"ok":true}"#]]]]]])
+        try geminiTransport.enqueue(json: ["candidates": [["content": ["parts": [["text": "OK"]]]]]])
         try await OnlineMinutesEngine.testConnection(
             provider: .gemini,
             config: makeGeminiConfig(),
             transport: geminiTransport
         )
-        let geminiBody = try #require(geminiTransport.recordedRequests.first?.bodyJSONObject())
+        let geminiRecorded = try #require(geminiTransport.recordedRequests.first)
+        #expect(geminiRecorded.request.timeout == 30)
+        let geminiBody = try #require(geminiRecorded.bodyJSONObject())
+        #expect(geminiBody["systemInstruction"] == nil)
         let genConfig = try #require(geminiBody["generationConfig"] as? [String: Any])
-        let geminiMaxTokens = try #require(genConfig["maxOutputTokens"] as? Int)
-        #expect(geminiMaxTokens > 0 && geminiMaxTokens <= 256)
+        #expect(genConfig["maxOutputTokens"] as? Int == 16)
+        #expect(genConfig["responseMimeType"] == nil)
+        let geminiContents = try #require(geminiBody["contents"] as? [[String: Any]])
+        let geminiParts = try #require(geminiContents.first?["parts"] as? [[String: String]])
+        #expect(geminiParts == [["text": "OK"]])
+    }
+
+    @Test func 连接测试支持三套协议推理模型仅输出思考内容_并拦截畸形或空结构响应() async throws {
+        // 1) OpenAI 兼容（如 deepseek-reasoner）：16 token 全耗在 reasoning_content、content 为空或 null 时均通过
+        let openAIReasoning = FakeHTTPTransport()
+        try openAIReasoning.enqueue(json: [
+            "choices": [["message": ["role": "assistant", "content": "", "reasoning_content": "Let me think..."]]]
+        ])
+        try openAIReasoning.enqueue(json: [
+            "choices": [["message": ["role": "assistant", "content": NSNull(), "reasoning_content": "Thinking only"]]]
+        ])
+        try openAIReasoning.enqueue(json: [
+            "choices": [["message": ["role": "assistant", "content": ""]]]
+        ])
+        let dsConfig = makeOpenAIConfig(
+            baseURL: "https://api.deepseek.com/v1",
+            model: "deepseek-reasoner",
+            apiKey: "sk-ds",
+            providerID: "deepseek"
+        )
+        for _ in 0..<3 {
+            try await OnlineMinutesEngine.testConnection(provider: .deepSeek, config: dsConfig, transport: openAIReasoning)
+        }
+
+        // OpenAI 缺失 choices、空 choices 或 message 既无 content 字符串也无 reasoning_content 字符串时报错
+        let openAIBad = FakeHTTPTransport()
+        try openAIBad.enqueue(json: ["choices": []])
+        try openAIBad.enqueue(json: ["choices": [["message": ["role": "assistant"]]]])
+        try openAIBad.enqueue(json: ["choices": [["message": ["content": NSNull()]]]])
+        openAIBad.enqueue(text: "not json", status: 200)
+        for _ in 0..<4 {
+            await #expect(throws: OnlineAPIError.self) {
+                try await OnlineMinutesEngine.testConnection(provider: .deepSeek, config: dsConfig, transport: openAIBad)
+            }
+        }
+
+        // 2) Anthropic 扩展思考：只有 thinking 块没有 text 块时也通过
+        let anthropicThinking = FakeHTTPTransport()
+        try anthropicThinking.enqueue(json: [
+            "id": "msg_think",
+            "content": [["type": "thinking", "thinking": "Internal reasoning within 16 tokens"]],
+        ])
+        try await OnlineMinutesEngine.testConnection(
+            provider: .anthropic,
+            config: makeAnthropicConfig(),
+            transport: anthropicThinking
+        )
+
+        // Anthropic 空 content 或无 text/thinking 块时报错
+        let anthropicBad = FakeHTTPTransport()
+        try anthropicBad.enqueue(json: ["content": []])
+        try anthropicBad.enqueue(json: ["content": [["type": "tool_use", "id": "t1"]]])
+        for _ in 0..<2 {
+            await #expect(throws: OnlineAPIError.self) {
+                try await OnlineMinutesEngine.testConnection(
+                    provider: .anthropic,
+                    config: makeAnthropicConfig(),
+                    transport: anthropicBad
+                )
+            }
+        }
+
+        // 3) Gemini 推理模型（如 gemini-2.5-pro）：parts 只有 thought 标记分片或 thought 字符串时也通过
+        let geminiThought = FakeHTTPTransport()
+        try geminiThought.enqueue(json: [
+            "candidates": [[
+                "content": ["parts": [["text": "Thinking tokens used up", "thought": true]]],
+                "finishReason": "MAX_TOKENS",
+            ]]
+        ])
+        try geminiThought.enqueue(json: [
+            "candidates": [[
+                "content": ["parts": [["thought": "Thinking string payload"]]],
+                "finishReason": "MAX_TOKENS",
+            ]]
+        ])
+        let proConfig = makeGeminiConfig(model: "gemini-2.5-pro")
+        for _ in 0..<2 {
+            try await OnlineMinutesEngine.testConnection(provider: .gemini, config: proConfig, transport: geminiThought)
+        }
+
+        // Gemini 空候选、安全拦截、空 parts 或缺少 text/thought 字符串时报错
+        let geminiBad = FakeHTTPTransport()
+        try geminiBad.enqueue(json: ["candidates": []])
+        try geminiBad.enqueue(json: ["promptFeedback": ["blockReason": "SAFETY"]])
+        try geminiBad.enqueue(json: ["candidates": [["finishReason": "SAFETY", "content": ["parts": [["text": "blocked"]]]]]])
+        try geminiBad.enqueue(json: ["candidates": [["content": ["parts": []]]]])
+        for _ in 0..<4 {
+            await #expect(throws: OnlineAPIError.self) {
+                try await OnlineMinutesEngine.testConnection(provider: .gemini, config: proConfig, transport: geminiBad)
+            }
+        }
     }
 
     @Test func 连接测试在配置无效_401_404与网络异常时抛出可读中文错误() async throws {

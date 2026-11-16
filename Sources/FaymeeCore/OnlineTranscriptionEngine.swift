@@ -64,3 +64,24 @@ public enum OnlineTranscriptionEngine {
         }
     }
 }
+
+/// 在线语音转写共用的音频文件 MIME 类型推断
+enum AudioMIMEType {
+    static func forURL(_ url: URL) -> String {
+        forExtension(url.pathExtension)
+    }
+
+    static func forExtension(_ ext: String) -> String {
+        switch ext.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "wav": "audio/wav"
+        case "m4a", "mp4": "audio/mp4"
+        case "mp3", "mpeg", "mpga": "audio/mpeg"
+        case "flac": "audio/flac"
+        case "ogg": "audio/ogg"
+        case "opus": "audio/opus"
+        case "aac": "audio/aac"
+        case "webm": "audio/webm"
+        default: "application/octet-stream"
+        }
+    }
+}

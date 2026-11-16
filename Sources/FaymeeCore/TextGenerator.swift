@@ -32,3 +32,12 @@ extension TextGenerator {
         try await generate(system: system, prompt: prompt, maxTokens: maxTokens)
     }
 }
+
+/// 去掉模型输出开头的 `<think>…</think>` 推理块，保留后续正文
+func stripLeadingThinkBlock(_ text: String) -> String {
+    guard let open = text.range(of: "<think>"),
+          text[..<open.lowerBound].allSatisfy(\.isWhitespace),
+          let close = text.range(of: "</think>", range: open.upperBound..<text.endIndex)
+    else { return text }
+    return String(text[close.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+}

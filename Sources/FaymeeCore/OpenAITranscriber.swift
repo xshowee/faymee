@@ -301,7 +301,7 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
                 capabilities = current
                 return response
             }
-            if response.status == 400 {
+            if response.status == 400, !OnlineAPIError.isModelNotFoundError(data: response.data) {
                 lastResponse = response
                 for next in nextFallbacks(after: current, responseData: response.data)
                     where !attempted.contains(next) && !queue.contains(next) {
@@ -350,13 +350,7 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
     }
 
     private static func buildPrompt(from hotwords: [String]) -> String? {
-        var seen = Set<String>()
-        var terms: [String] = []
-        for raw in hotwords {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            terms.append(trimmed)
-        }
+        let terms = Hotwords.normalize(hotwords)
         guard !terms.isEmpty else { return nil }
 
         var selected: [String] = []
@@ -440,7 +434,7 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
             name: "file",
             fileURL: audioURL,
             fileName: audioURL.lastPathComponent,
-            mimeType: mimeType(for: audioURL)
+            mimeType: AudioMIMEType.forURL(audioURL)
         ))
         return try await transport.send(HTTPRequest(
             method: "POST",
@@ -454,9 +448,13 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
         guard !data.isEmpty else {
             throw OnlineAPIError.emptyResponse
         }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["text"] is String || json["segments"] is [[String: Any]]
-        else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw OnlineAPIError.invalidResponse("服务端响应格式不是有效的转写结果")
+        }
+        guard json["text"] is String || json["segments"] is [[String: Any]] else {
+            if let message = OnlineAPIError.extractServerMessage(from: json) {
+                throw OnlineAPIError.remoteTaskFailed(message)
+            }
             throw OnlineAPIError.invalidResponse("服务端响应格式不是有效的转写结果")
         }
     }
@@ -471,18 +469,6 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
     private static func authHeaders(for config: OnlineEndpointConfig) -> [String: String] {
         let key = config.trimmedAPIKey
         return key.isEmpty ? [:] : ["Authorization": "Bearer \(key)"]
-    }
-
-    private static func mimeType(for url: URL) -> String {
-        switch url.pathExtension.lowercased() {
-        case "wav": "audio/wav"
-        case "m4a", "mp4": "audio/mp4"
-        case "mp3", "mpeg", "mpga": "audio/mpeg"
-        case "ogg": "audio/ogg"
-        case "flac": "audio/flac"
-        case "webm": "audio/webm"
-        default: "application/octet-stream"
-        }
     }
 
     private static func resolveResponse(
@@ -517,6 +503,10 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
         }
 
         guard let text = plainText else {
+            if let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any],
+               let message = OnlineAPIError.extractServerMessage(from: json) {
+                throw OnlineAPIError.remoteTaskFailed(message)
+            }
             throw OnlineAPIError.invalidResponse("转写响应缺少文本内容")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -557,7 +547,7 @@ public final class OpenAITranscriber: Transcriber, @unchecked Sendable {
             cursor = end
         }
         guard !result.isEmpty else { return nil }
-        if result.count > 1 && result.allSatisfy({ $0.end == 0 }) {
+        if result.allSatisfy({ $0.end <= 0 }) {
             return nil
         }
         return result

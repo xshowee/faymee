@@ -342,6 +342,56 @@ private func makeConfig(
         #expect(sentences[1].start >= 2.5)
     }
 
+    @Test func 单条起止均为0的segments回退到本地时间轴对齐() async throws {
+        let wavURL = try makeTestWAV(segments: [(4.0, 0.2)])
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: [
+            "text": "第一句话。第二句话。",
+            "segments": [
+                ["start": 0, "end": 0, "text": "第一句话。第二句话。"],
+            ],
+        ])
+
+        let ref = FakeReferenceTranscriber([
+            TranscribedSentence(start: 0.4, end: 1.6, text: "第一句话"),
+            TranscribedSentence(start: 2.2, end: 3.6, text: "第二句话"),
+        ])
+
+        let transcriber = OpenAITranscriber(config: makeConfig(), transport: transport, referenceTranscriber: ref)
+        let sentences = try await transcriber.transcribe(audio: wavURL, hotwords: []) { _ in }
+
+        #expect(ref.calls.count == 1)
+        #expect(sentences.map(\.text) == ["第一句话。", "第二句话。"])
+        try #require(sentences.count == 2)
+        #expect(sentences.allSatisfy { $0.end > $0.start })
+        #expect(sentences[0].start >= 0.35 && sentences[0].end <= 1.7)
+        #expect(sentences[1].start >= 2.1 && sentences[1].end <= 3.7)
+    }
+
+    @Test func 英文ASCII句号切分句子并保留小数版本号() async throws {
+        let wavURL = try makeTestWAV(segments: [(4.0, 0.2)])
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        // 1) 参考转写对齐路径
+        let refTransport = FakeHTTPTransport()
+        try refTransport.enqueue(json: ["text": "Hello world. Next v2.3 sentence."])
+        let ref = FakeReferenceTranscriber([
+            TranscribedSentence(start: 0.2, end: 3.8, text: "Hello world Next v23 sentence"),
+        ])
+        let withRef = OpenAITranscriber(config: makeConfig(), transport: refTransport, referenceTranscriber: ref)
+        let refSentences = try await withRef.transcribe(audio: wavURL, hotwords: []) { _ in }
+        #expect(refSentences.map(\.text) == ["Hello world.", "Next v2.3 sentence."])
+
+        // 2) 静音比例回退路径
+        let fallbackTransport = FakeHTTPTransport()
+        try fallbackTransport.enqueue(json: ["text": "Hello world. Next v2.3 sentence."])
+        let withoutRef = OpenAITranscriber(config: makeConfig(), transport: fallbackTransport, referenceTranscriber: nil)
+        let fallbackSentences = try await withoutRef.transcribe(audio: wavURL, hotwords: []) { _ in }
+        #expect(fallbackSentences.map(\.text) == ["Hello world.", "Next v2.3 sentence."])
+    }
+
     @Test func 参考转写器缺失或报错时回退到音频静音检测与字数比例对齐() async throws {
         // 录音结构：1s 静音 | 3s 说话(1..4) | 1.5s 静音(4..5.5) | 3.5s 说话(5.5..9) | 1s 静音(9..10)
         let silenceAudio = try makeTestWAV(segments: [

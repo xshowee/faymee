@@ -5,10 +5,20 @@ public enum Hotwords {
     /// 去掉每行首尾空白（含全角空格），丢弃空行，按首次出现的顺序去重。
     /// 去重区分大小写：引擎按热词原样输出，“iOS”和“IOS”可能是用户有意写的两种形式
     public static func parse(_ text: String) -> [String] {
+        normalize(text.components(separatedBy: .newlines))
+    }
+
+    /// 去掉每个词条首尾空白、丢弃空词条，并按首次出现顺序区分大小写去重
+    public static func normalize(_ hotwords: [String]) -> [String] {
         var seen = Set<String>()
-        return text.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        var result: [String] = []
+        for word in hotwords {
+            let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && seen.insert(trimmed).inserted {
+                result.append(trimmed)
+            }
+        }
+        return result
     }
 }
 

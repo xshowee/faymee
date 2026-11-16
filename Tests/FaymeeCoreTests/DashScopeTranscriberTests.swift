@@ -202,6 +202,7 @@ import Testing
         let submitInput = try #require(submitJSON["input"] as? [String: Any])
         #expect(submitInput["file_url"] as? String == "oss://\(ossKey)")
         #expect(submitInput["context"] == nil)
+        #expect(submitJSON["parameters"] == nil)
 
         // 4) 轮询与结果下载（预签名 URL 不附带 Bearer 头）
         #expect(reqs[3].request.url.absoluteString == "https://dashscope.aliyuncs.com/api/v1/tasks/task-101")
@@ -253,8 +254,8 @@ import Testing
         #expect(uploadKeys[0] != uploadKeys[1])
     }
 
-    @Test func qwen模型通过context传入热词并在服务端400拒收时自动剥离重提() async throws {
-        // 1) 正常传 context
+    @Test func qwen模型通过corpus传入热词并在服务端400拒收时自动剥离重提() async throws {
+        // 1) 正常传 parameters.corpus.text
         let happy = FakeHTTPTransport()
         try happy.enqueue(json: [
             "data": [
@@ -281,23 +282,30 @@ import Testing
         )
         let res1 = try await {
             var sentences: [TranscribedSentence] = []
-            try await Self.withTempAudioFile { url in
+            try await Self.withTempAudioFile(ext: "mp4") { url in
                 sentences = try await qwenTranscriber.transcribe(audio: url, hotwords: [" Faymee ", "", "Faymee", "百炼"]) { _ in }
             }
             return sentences
         }()
         #expect(res1 == [TranscribedSentence(start: 0, end: 1, text: "Faymee 测试。")])
 
-        // 不应调用 customization 接口
+        // 不应调用 customization 接口，且 .mp4 应使用 audio/mp4 MIME
         #expect(!happy.recordedRequests.contains { $0.request.url.path.contains("customization") })
+        let uploadedMP4 = try #require(happy.recordedRequests[1].multipartFile(named: "file"))
+        #expect(uploadedMP4.mimeType == "audio/mp4")
+
         let submit1 = happy.recordedRequests[2]
-        let submit1Input = try #require(submit1.bodyJSONObject()?["input"] as? [String: Any])
+        let submit1Body = try #require(submit1.bodyJSONObject())
+        let submit1Input = try #require(submit1Body["input"] as? [String: Any])
         #expect(submit1Input["file_url"] as? String != nil)
-        let contextText = try #require(submit1Input["context"] as? String)
+        #expect(submit1Input["context"] == nil)
+        let submit1Params = try #require(submit1Body["parameters"] as? [String: Any])
+        let submit1Corpus = try #require(submit1Params["corpus"] as? [String: Any])
+        let contextText = try #require(submit1Corpus["text"] as? String)
         #expect(contextText.contains("Faymee"))
         #expect(contextText.contains("百炼"))
 
-        // 2) 服务端拒收 context 返回 HTTP 400 -> 自动剥离 context 重提一次
+        // 2) 服务端拒收 corpus 返回 HTTP 400 -> 自动剥离 parameters.corpus 重提一次
         let fallback = FakeHTTPTransport()
         try fallback.enqueue(json: [
             "data": [
@@ -307,7 +315,7 @@ import Testing
             ],
         ])
         fallback.enqueue(HTTPResponse(status: 200))
-        try fallback.enqueue(json: ["code": "InvalidParameter", "message": "context is not supported"], status: 400)
+        try fallback.enqueue(json: ["code": "InvalidParameter", "message": "corpus is not supported"], status: 400)
         try fallback.enqueue(json: ["output": ["task_id": "t-qwen-2", "task_status": "PENDING"]])
         try fallback.enqueue(json: [
             "output": [
@@ -334,9 +342,13 @@ import Testing
 
         let submitAttempts = fallback.recordedRequests.filter { $0.request.url.path.hasSuffix("/asr/transcription") }
         #expect(submitAttempts.count == 2)
-        let firstInput = try #require(submitAttempts[0].bodyJSONObject()?["input"] as? [String: Any])
-        let secondInput = try #require(submitAttempts[1].bodyJSONObject()?["input"] as? [String: Any])
-        #expect(firstInput["context"] as? String == "Faymee")
+        let firstBody = try #require(submitAttempts[0].bodyJSONObject())
+        let firstParams = try #require(firstBody["parameters"] as? [String: Any])
+        let firstCorpus = try #require(firstParams["corpus"] as? [String: Any])
+        #expect(firstCorpus["text"] as? String == "Faymee")
+        let secondBody = try #require(submitAttempts[1].bodyJSONObject())
+        let secondInput = try #require(secondBody["input"] as? [String: Any])
+        #expect(secondBody["parameters"] == nil)
         #expect(secondInput["context"] == nil)
         #expect(secondInput["file_url"] as? String != nil)
     }
@@ -573,6 +585,163 @@ import Testing
                 _ = try await transcriber3.transcribe(audio: url, hotwords: ["术语"]) { _ in }
             }
         }
+    }
+
+    @Test func updateVocabulary返回400时清空过期缓存并重试createVocabulary一次_双400则退回nil() async throws {
+        let fake = FakeHTTPTransport()
+        func enqueuePolicyAndUpload() throws {
+            try fake.enqueue(json: [
+                "data": [
+                    "policy": "p", "signature": "s",
+                    "upload_host": "https://oss.example.com", "upload_dir": "dir",
+                    "oss_access_key_id": "ak",
+                ],
+            ])
+            fake.enqueue(HTTPResponse(status: 200))
+        }
+        func enqueueTaskCycle(taskID: String, text: String) throws {
+            try fake.enqueue(json: ["output": ["task_id": taskID, "task_status": "PENDING"]])
+            try fake.enqueue(json: [
+                "output": [
+                    "task_id": taskID,
+                    "task_status": "SUCCEEDED",
+                    "results": [["transcription_url": "https://oss.example.com/\(taskID).json"]],
+                ],
+            ])
+            try fake.enqueue(json: ["transcripts": [["sentences": [["begin_time": 0, "end_time": 500, "text": text]]]]])
+        }
+
+        // 1) 首次创建词表 -> vocab-stale
+        try enqueuePolicyAndUpload()
+        try fake.enqueue(json: ["output": ["vocabulary_id": "vocab-stale"]])
+        try enqueueTaskCycle(taskID: "t1", text: "第一轮。")
+
+        // 2) 热词变更：update_vocabulary 返回 400（过期词表） -> 清空缓存并重试 create_vocabulary -> vocab-fresh
+        try enqueuePolicyAndUpload()
+        try fake.enqueue(json: ["code": "InvalidParameter", "message": "vocabulary_id not found"], status: 400)
+        try fake.enqueue(json: ["output": ["vocabulary_id": "vocab-fresh"]])
+        try enqueueTaskCycle(taskID: "t2", text: "重建成功。")
+
+        // 3) 相同热词再次转写应命中新建缓存，不再请求 customization
+        try enqueuePolicyAndUpload()
+        try enqueueTaskCycle(taskID: "t3", text: "命中新缓存。")
+
+        // 4) 热词再变更：update_vocabulary 返回 400 且重试 create_vocabulary 也返回 400 -> 清空缓存并退回无词表提交
+        try enqueuePolicyAndUpload()
+        try fake.enqueue(json: ["code": "InvalidParameter", "message": "vocabulary expired"], status: 400)
+        try fake.enqueue(json: ["code": "InvalidParameter", "message": "create failed"], status: 400)
+        try enqueueTaskCycle(taskID: "t4", text: "双400降级。")
+
+        // 5) 缓存已被清空，再次调用仍会重新发起 create_vocabulary 而不是跳过或用旧 ID
+        try enqueuePolicyAndUpload()
+        try fake.enqueue(json: ["output": ["vocabulary_id": "vocab-recovered"]])
+        try enqueueTaskCycle(taskID: "t5", text: "恢复创建。")
+
+        let transcriber = DashScopeTranscriber(
+            config: Self.makeConfig(model: "paraformer-v2"),
+            transport: fake,
+            pollInterval: .milliseconds(1)
+        )
+        try await Self.withTempAudioFile { url in
+            let r1 = try await transcriber.transcribe(audio: url, hotwords: ["Faymee"]) { _ in }
+            #expect(r1.map(\.text) == ["第一轮。"])
+
+            let r2 = try await transcriber.transcribe(audio: url, hotwords: ["Faymee", "百炼"]) { _ in }
+            #expect(r2.map(\.text) == ["重建成功。"])
+
+            let r3 = try await transcriber.transcribe(audio: url, hotwords: ["Faymee", "百炼"]) { _ in }
+            #expect(r3.map(\.text) == ["命中新缓存。"])
+
+            let r4 = try await transcriber.transcribe(audio: url, hotwords: ["Faymee", "纪要"]) { _ in }
+            #expect(r4.map(\.text) == ["双400降级。"])
+
+            let r5 = try await transcriber.transcribe(audio: url, hotwords: ["Faymee", "纪要"]) { _ in }
+            #expect(r5.map(\.text) == ["恢复创建。"])
+        }
+
+        let customActions = fake.recordedRequests
+            .filter { $0.request.url.path.hasSuffix("/asr/customization") }
+            .compactMap { ($0.bodyJSONObject()?["input"] as? [String: Any])?["action"] as? String }
+        #expect(customActions == [
+            "create_vocabulary",
+            "update_vocabulary",
+            "create_vocabulary",
+            "update_vocabulary",
+            "create_vocabulary",
+            "create_vocabulary",
+        ])
+
+        let submitVocabIDs = fake.recordedRequests
+            .filter { $0.request.url.path.hasSuffix("/asr/transcription") }
+            .map { ($0.bodyJSONObject()?["parameters"] as? [String: Any])?["vocabulary_id"] as? String }
+        #expect(submitVocabIDs == ["vocab-stale", "vocab-fresh", "vocab-fresh", nil, "vocab-recovered"])
+    }
+
+    @Test func 任务提交400明确为模型不存在时不剥离热词重试_通用参数错误仍重试() async throws {
+        // 1) ModelNotFound -> 立即抛出 badRequest，不剥离热词重试
+        let missingTransport = FakeHTTPTransport()
+        try missingTransport.enqueue(json: [
+            "data": [
+                "policy": "p", "signature": "s",
+                "upload_host": "https://oss.example.com", "upload_dir": "dir",
+                "oss_access_key_id": "ak",
+            ],
+        ])
+        missingTransport.enqueue(HTTPResponse(status: 200))
+        try missingTransport.enqueue(json: ["code": "ModelNotFound", "message": "Model not found"], status: 400)
+
+        let missingTranscriber = DashScopeTranscriber(
+            config: Self.makeConfig(model: "qwen3-nonexistent"),
+            transport: missingTransport,
+            pollInterval: .milliseconds(1)
+        )
+        await #expect(throws: OnlineAPIError.badRequest(400, "Model not found")) {
+            try await Self.withTempAudioFile { url in
+                _ = try await missingTranscriber.transcribe(audio: url, hotwords: ["Faymee"]) { _ in }
+            }
+        }
+        let missingSubmits = missingTransport.recordedRequests.filter { $0.request.url.path.hasSuffix("/asr/transcription") }
+        #expect(missingSubmits.count == 1)
+
+        // 2) 参数不支持即便提及 model（如 "Model does not support corpus"）仍应剥离热词重试
+        let unsupportedParamTransport = FakeHTTPTransport()
+        try unsupportedParamTransport.enqueue(json: [
+            "data": [
+                "policy": "p", "signature": "s",
+                "upload_host": "https://oss.example.com", "upload_dir": "dir",
+                "oss_access_key_id": "ak",
+            ],
+        ])
+        unsupportedParamTransport.enqueue(HTTPResponse(status: 200))
+        try unsupportedParamTransport.enqueue(
+            json: ["code": "InvalidParameter", "message": "Model does not support corpus"],
+            status: 400
+        )
+        try unsupportedParamTransport.enqueue(json: ["output": ["task_id": "t-ok", "task_status": "PENDING"]])
+        try unsupportedParamTransport.enqueue(json: [
+            "output": [
+                "task_id": "t-ok",
+                "task_status": "SUCCEEDED",
+                "result": ["transcription_url": "https://oss.example.com/ok.json"],
+            ],
+        ])
+        try unsupportedParamTransport.enqueue(json: ["transcripts": [["sentences": [["begin_time": 0, "end_time": 500, "text": "成功。"]]]]])
+
+        let paramTranscriber = DashScopeTranscriber(
+            config: Self.makeConfig(model: "qwen3-asr-flash-filetrans"),
+            transport: unsupportedParamTransport,
+            pollInterval: .milliseconds(1)
+        )
+        let result = try await {
+            var out: [TranscribedSentence] = []
+            try await Self.withTempAudioFile { url in
+                out = try await paramTranscriber.transcribe(audio: url, hotwords: ["Faymee"]) { _ in }
+            }
+            return out
+        }()
+        #expect(result.map(\.text) == ["成功。"])
+        let paramSubmits = unsupportedParamTransport.recordedRequests.filter { $0.request.url.path.hasSuffix("/asr/transcription") }
+        #expect(paramSubmits.count == 2)
     }
 
     @Test func 服务端任务FAILED_子任务失败与HTTP异常转换为对应OnlineAPIError() async throws {

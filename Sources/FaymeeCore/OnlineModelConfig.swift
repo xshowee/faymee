@@ -232,7 +232,8 @@ public struct OnlineEndpointConfig: Hashable, Sendable {
     }
 
     public var sourceIdentifier: String {
-        "\(providerID)/\(trimmedModel)"
+        let model = trimmedModel
+        return model.isEmpty ? providerID : "\(providerID)/\(model)"
     }
 
     public func validateReady() throws {
@@ -294,6 +295,14 @@ public final class OnlineModelSettings {
 
     public private(set) var lastCredentialError: String?
 
+    public var transcriptionCredentialError: String? {
+        credentialErrors[transcriptionProvider.credentialSlot]
+    }
+
+    public var minutesCredentialError: String? {
+        credentialErrors[minutesProvider.credentialSlot]
+    }
+
     @ObservationIgnored public var onChange: (() -> Void)?
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -303,7 +312,8 @@ public final class OnlineModelSettings {
     private var transcriptionModels: [OnlineTranscriptionProvider: String]
     private var minutesBaseURLs: [OnlineMinutesProvider: String]
     private var minutesModels: [OnlineMinutesProvider: String]
-    private var credentialRevision: Int = 0
+    private var apiKeys: [CredentialSlot: String]
+    private var credentialErrors: [CredentialSlot: String] = [:]
 
     public init(defaults: UserDefaults, credentials: any CredentialStore) {
         self.defaults = defaults
@@ -320,6 +330,11 @@ public final class OnlineModelSettings {
         self.transcriptionModels = Self.loadPresetMap(defaults: defaults, scope: Keys.transcriptionScope, field: Keys.modelField)
         self.minutesBaseURLs = Self.loadPresetMap(defaults: defaults, scope: Keys.minutesScope, field: Keys.baseURLField)
         self.minutesModels = Self.loadPresetMap(defaults: defaults, scope: Keys.minutesScope, field: Keys.modelField)
+        var loadedKeys: [CredentialSlot: String] = [:]
+        for slot in CredentialSlot.allCases {
+            loadedKeys[slot] = credentials.string(for: slot)
+        }
+        self.apiKeys = loadedKeys
     }
 
     public var transcriptionBaseURL: String {
@@ -391,19 +406,21 @@ public final class OnlineModelSettings {
     }
 
     private func apiKey(for slot: CredentialSlot) -> String {
-        _ = credentialRevision
-        return credentials.string(for: slot)
+        apiKeys[slot] ?? ""
     }
 
     private func setAPIKey(_ newValue: String, for slot: CredentialSlot) {
-        guard credentials.string(for: slot) != newValue else { return }
+        guard (apiKeys[slot] ?? "") != newValue else { return }
         do {
             try credentials.setString(newValue, for: slot)
+            apiKeys[slot] = newValue
+            credentialErrors[slot] = nil
             lastCredentialError = nil
-            credentialRevision += 1
             onChange?()
         } catch {
-            lastCredentialError = error.localizedDescription
+            let message = error.localizedDescription
+            credentialErrors[slot] = message
+            lastCredentialError = message
         }
     }
 

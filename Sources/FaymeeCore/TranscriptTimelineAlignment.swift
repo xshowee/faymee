@@ -6,7 +6,7 @@ import Foundation
 /// 2) 参考转写不可用或无有效锚点时，按音频能量检测静音停顿并按字数比例分配时间轴。
 enum TranscriptTimelineAlignment {
     static let pauseThreshold: TimeInterval = SentenceSplitter.pause
-    private static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
+    private static let terminators: Set<Character> = ["。", "！", "？", "；", ".", "!", "?", ";", "…"]
 
     static func align(
         onlineText: String,

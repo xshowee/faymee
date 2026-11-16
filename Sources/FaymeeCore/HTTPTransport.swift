@@ -53,6 +53,88 @@ public enum OnlineAPIError: LocalizedError, Equatable, Sendable {
         }
         return prefix
     }
+
+    /// 从服务端返回的 HTTP 响应体（JSON 或纯文本）中提取简短可读错误信息
+    public static func extractServerMessage(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let extracted = extractServerMessage(from: json) {
+            return extracted
+        }
+        if let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !text.isEmpty,
+           !text.lowercased().hasPrefix("<!doctype html"),
+           !text.lowercased().hasPrefix("<html")
+        {
+            return String(text.prefix(240))
+        }
+        return nil
+    }
+
+    static func extractServerMessage(from json: [String: Any]) -> String? {
+        let nestedError = json["error"] as? [String: Any]
+        let candidates: [String?] = [
+            nestedError?["message"] as? String,
+            json["error"] as? String,
+            json["message"] as? String,
+            json["detail"] as? String,
+            json["msg"] as? String,
+            nestedError?["code"] as? String,
+            json["code"] as? String,
+        ]
+        for candidate in candidates {
+            if let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+                return String(trimmed.prefix(240))
+            }
+        }
+        return nil
+    }
+
+    /// 判断 HTTP 400 响应是否明确且仅表示模型不存在（此时剥离可选参数重试毫无意义）
+    static func isModelNotFoundError(data: Data) -> Bool {
+        guard !data.isEmpty else { return false }
+        let rawText = String(data: data, encoding: .utf8) ?? ""
+        let loweredRaw = rawText.lowercased()
+
+        let parameterMarkers = [
+            "response_format", "json_object", "corpus", "vocabulary",
+            "context", "not support", "unsupported parameter",
+        ]
+        if parameterMarkers.contains(where: { loweredRaw.contains($0) }) {
+            return false
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let nestedError = json["error"] as? [String: Any]
+            let code = ((nestedError?["code"] as? String) ?? (json["code"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if ["model_not_found", "modelnotfound", "model.notfound", "model_not_exist", "modelnotexist"].contains(code) {
+                return true
+            }
+            if let param = (nestedError?["param"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !param.isEmpty, param != "model" {
+                return false
+            }
+        }
+
+        let message = (extractServerMessage(from: data) ?? rawText).lowercased()
+        let missingModelPhrases = [
+            "model_not_found",
+            "modelnotfound",
+            "model not found",
+            "model not exist",
+            "model does not exist",
+            "no such model",
+            "unknown model",
+            "模型不存在",
+        ]
+        if missingModelPhrases.contains(where: { message.contains($0) }) {
+            return true
+        }
+        return message.contains("model") && (message.contains("does not exist") || message.contains("not found"))
+    }
 }
 
 /// multipart/form-data 请求体中的单个字段
@@ -270,7 +352,7 @@ public struct HTTPResponse: Equatable, Sendable {
     /// 校验状态码属于 2xx，否则提取响应体中的可读错误并抛出对应的 `OnlineAPIError`
     public func checkSuccess() throws {
         if (200..<300).contains(status) { return }
-        let message = Self.extractErrorMessage(from: data)
+        let message = OnlineAPIError.extractServerMessage(from: data)
         switch status {
         case 401, 403:
             throw OnlineAPIError.unauthorized(status, message)
@@ -285,32 +367,5 @@ public struct HTTPResponse: Equatable, Sendable {
         default:
             throw OnlineAPIError.invalidResponse("收到意外的 HTTP 状态码 \(status)")
         }
-    }
-
-    private static func extractErrorMessage(from data: Data) -> String? {
-        guard !data.isEmpty else { return nil }
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let candidates: [String?] = [
-                (json["error"] as? [String: Any])?["message"] as? String,
-                json["error"] as? String,
-                json["message"] as? String,
-                json["detail"] as? String,
-                json["msg"] as? String,
-            ]
-            for candidate in candidates {
-                if let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
-                    return String(trimmed.prefix(240))
-                }
-            }
-        }
-        if let text = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !text.isEmpty,
-           !text.lowercased().hasPrefix("<!doctype html"),
-           !text.lowercased().hasPrefix("<html")
-        {
-            return String(text.prefix(240))
-        }
-        return nil
     }
 }
