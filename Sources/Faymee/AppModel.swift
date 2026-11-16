@@ -98,6 +98,23 @@ final class AppModel {
     /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
     @ObservationIgnored let modelDownloader = MinutesEngine.makeDownloader()
 
+    /// 在线转写与在线纪要设置，API Key 存于系统钥匙串；默认保持纯本机模式
+    @ObservationIgnored let onlineSettings = OnlineModelSettings(
+        defaults: .standard,
+        credentials: KeychainCredentialStore()
+    )
+    @ObservationIgnored private let httpTransport = URLSessionHTTPTransport()
+    @ObservationIgnored private lazy var onlineCoordinator = OnlineEngineCoordinator(
+        settings: onlineSettings,
+        transport: httpTransport,
+        makeTranscription: { TranscriptionEngine.make(settings: $0, transport: $1) },
+        makeMinutes: { MinutesEngine.make(settings: $0, transport: $1) },
+        syncDebounce: .milliseconds(500)
+    )
+
+    var transcriptionTestState: ConnectionTestState { onlineCoordinator.transcriptionTestState }
+    var minutesTestState: ConnectionTestState { onlineCoordinator.minutesTestState }
+
     /// “转写完成后自动生成纪要”，记在 UserDefaults，默认打开，设置窗口里可以改
     var autoGenerateMinutes: Bool {
         didSet {
@@ -160,10 +177,11 @@ final class AppModel {
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
-        let engine = TranscriptionEngine.make()
+        let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport)
         let diarization = DiarizationEngine.make()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, diarizer: diarization.diarizer,
+                                             engine: engine.name, isEngineReady: engine.isReady,
+                                             diarizer: diarization.diarizer,
                                              voiceprints: VoiceprintStore(), host: self)
         pipeline.voiceprintThreshold = diarization.voiceprintThreshold
         pipeline.isSuspended = true
@@ -177,8 +195,10 @@ final class AppModel {
     /// 手动生成调 enqueue；会议的纪要状态在 meeting.minutes 里，由本类作为 MinutesHost 写入。
     /// 和转写管线互相让行（coordinate），录音、整理、启动恢复期间和转写一起暂停
     @ObservationIgnored private(set) lazy var minutes: MinutesPipeline = {
-        let engine = MinutesEngine.make()
-        let pipeline = MinutesPipeline(store: store, generator: engine.generator, model: engine.name, host: self)
+        let engine = MinutesEngine.make(settings: onlineSettings, transport: httpTransport)
+        let pipeline = MinutesPipeline(store: store, generator: engine.generator, model: engine.name,
+                                       requiresPower: engine.requiresPower, isOnlineEngine: engine.isOnline,
+                                       host: self)
         pipeline.isSuspended = true
         pipeline.isOnPower = SystemState.isOnPower
         pipeline.autoGenerate = autoGenerateMinutes
@@ -222,6 +242,7 @@ final class AppModel {
         modelDownloader.onAvailabilityChange = { [weak self] in self?.minutes.modelAvailabilityChanged() }
         Notifier.onAction = { [weak self] in self?.handleNoticeAction($0) }
         Notifier.setUp()
+        onlineCoordinator.bind(transcription: transcription, minutes: minutes)
         Task {
             await recoverInterrupted()
             transcription.restore(meetings)
@@ -667,6 +688,24 @@ final class AppModel {
               let notice = MeetingNotice.minutes(outcome, meetingTitle: m.title, isRecording: isRecording)
         else { return }
         Notifier.post(notice)
+    }
+
+    // MARK: - 在线模型配置与连接测试
+
+    func testTranscriptionConnection() {
+        onlineCoordinator.testTranscriptionConnection()
+    }
+
+    func testMinutesConnection() {
+        onlineCoordinator.testMinutesConnection()
+    }
+
+    func flushOnlineSettingsSync() {
+        onlineCoordinator.flushSync()
+    }
+
+    func cancelInFlightConnectionTests() {
+        onlineCoordinator.cancelInFlightConnectionTests()
     }
 
     // MARK: - 纪要模型

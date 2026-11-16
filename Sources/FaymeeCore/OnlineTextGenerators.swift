@@ -500,6 +500,27 @@ public enum OnlineMinutesEngine {
         )
     }
 
+    @MainActor
+    public static func makeEngine(
+        settings: OnlineModelSettings,
+        transport: any HTTPTransport,
+        local: () -> (generator: any TextGenerator, name: String)
+    ) -> (generator: any TextGenerator, name: String, requiresPower: Bool, isOnline: Bool) {
+        switch settings.minutesMode {
+        case .local:
+            let resolved = local()
+            return (resolved.generator, resolved.name, true, false)
+        case .online:
+            let config = settings.activeMinutesConfig
+            let generator = makeGenerator(
+                provider: settings.minutesProvider,
+                config: config,
+                transport: transport
+            )
+            return (generator, config.sourceIdentifier, false, true)
+        }
+    }
+
     public static func testConnection(
         provider: OnlineMinutesProvider,
         config: OnlineEndpointConfig,

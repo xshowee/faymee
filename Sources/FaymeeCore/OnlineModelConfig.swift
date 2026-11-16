@@ -324,14 +324,14 @@ public final class OnlineModelSettings {
 
     public var transcriptionBaseURL: String {
         get { transcriptionBaseURLs[transcriptionProvider] ?? transcriptionProvider.defaultBaseURL }
-        set { updatePresetValue(newValue, current: transcriptionBaseURL, provider: transcriptionProvider,
-                                scope: Keys.transcriptionScope, field: Keys.baseURLField, map: &transcriptionBaseURLs) }
+        set { setPresetValue(newValue, current: transcriptionBaseURL, provider: transcriptionProvider,
+                             scope: Keys.transcriptionScope, field: Keys.baseURLField, at: \.transcriptionBaseURLs) }
     }
 
     public var transcriptionModel: String {
         get { transcriptionModels[transcriptionProvider] ?? transcriptionProvider.defaultModel }
-        set { updatePresetValue(newValue, current: transcriptionModel, provider: transcriptionProvider,
-                                scope: Keys.transcriptionScope, field: Keys.modelField, map: &transcriptionModels) }
+        set { setPresetValue(newValue, current: transcriptionModel, provider: transcriptionProvider,
+                             scope: Keys.transcriptionScope, field: Keys.modelField, at: \.transcriptionModels) }
     }
 
     public var transcriptionAPIKey: String {
@@ -341,14 +341,14 @@ public final class OnlineModelSettings {
 
     public var minutesBaseURL: String {
         get { minutesBaseURLs[minutesProvider] ?? minutesProvider.defaultBaseURL }
-        set { updatePresetValue(newValue, current: minutesBaseURL, provider: minutesProvider,
-                                scope: Keys.minutesScope, field: Keys.baseURLField, map: &minutesBaseURLs) }
+        set { setPresetValue(newValue, current: minutesBaseURL, provider: minutesProvider,
+                             scope: Keys.minutesScope, field: Keys.baseURLField, at: \.minutesBaseURLs) }
     }
 
     public var minutesModel: String {
         get { minutesModels[minutesProvider] ?? minutesProvider.defaultModel }
-        set { updatePresetValue(newValue, current: minutesModel, provider: minutesProvider,
-                                scope: Keys.minutesScope, field: Keys.modelField, map: &minutesModels) }
+        set { setPresetValue(newValue, current: minutesModel, provider: minutesProvider,
+                             scope: Keys.minutesScope, field: Keys.modelField, at: \.minutesModels) }
     }
 
     public var minutesAPIKey: String {
@@ -407,16 +407,16 @@ public final class OnlineModelSettings {
         }
     }
 
-    private func updatePresetValue<Provider: RawRepresentable & Hashable>(
+    private func setPresetValue<Provider: RawRepresentable & Hashable>(
         _ newValue: String,
         current: String,
         provider: Provider,
         scope: String,
         field: String,
-        map: inout [Provider: String]
+        at keyPath: ReferenceWritableKeyPath<OnlineModelSettings, [Provider: String]>
     ) where Provider.RawValue == String {
         guard newValue != current else { return }
-        map[provider] = newValue
+        self[keyPath: keyPath][provider] = newValue
         defaults.set(newValue, forKey: Keys.preset(scope: scope, provider: provider.rawValue, field: field))
         onChange?()
     }
