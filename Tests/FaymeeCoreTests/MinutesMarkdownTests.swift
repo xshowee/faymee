@@ -288,6 +288,33 @@ private let example = minutes([
 
         """)
     }
+
+    @Test func 在线模型生成的纪要与转写稿导出Markdown保持纯净无水印() {
+        let items: [TranscriptItem] = [
+            .sentence(TranscriptSentence(id: "s1", start: 5, end: 9, text: "我们先过一下上周的待办")),
+        ]
+        let localTranscript = Transcript(engine: "apple/speechanalyzer", createdAt: start, hotwords: [], items: items)
+        let onlineTranscript = Transcript(engine: "openai/gpt-transcribe", createdAt: start, hotwords: [], items: items)
+        let sections = [
+            MinutesSection(kind: .overview, title: "概要", items: [
+                MinutesItem(id: "o1", text: "回顾了上周待办", refs: [MinutesRef(id: "s1", start: 5)]),
+            ]),
+        ]
+        let source = MinutesSource(transcriptCreatedAt: start, textHash: localTranscript.textHash)
+        let localMinutes = Minutes(model: "llama/qwen3-4b-q4km", template: "general", createdAt: start,
+                                   source: source, sections: sections)
+        let onlineMinutes = Minutes(model: "deepseek/deepseek-chat", template: "general", createdAt: start,
+                                    source: source, sections: sections)
+
+        let copyOnly = onlineMinutes.markdown(meeting: meeting(), transcript: onlineTranscript, timeZone: shanghai)
+        let withTranscript = onlineMinutes.markdown(meeting: meeting(), transcript: onlineTranscript,
+                                                    attachingTranscript: true, timeZone: shanghai)
+        #expect(copyOnly == localMinutes.markdown(meeting: meeting(), transcript: localTranscript, timeZone: shanghai))
+        #expect(withTranscript == localMinutes.markdown(meeting: meeting(), transcript: localTranscript,
+                                                        attachingTranscript: true, timeZone: shanghai))
+        #expect(!withTranscript.contains("deepseek"))
+        #expect(!withTranscript.contains("gpt-transcribe"))
+    }
 }
 
 /// 区分过说话人时的复制纪要与导出（spec 54–57、「待办负责人关联说话人」）

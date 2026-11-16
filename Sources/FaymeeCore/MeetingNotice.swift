@@ -6,6 +6,8 @@ public struct MeetingNotice: Hashable, Sendable {
     public enum Action: String, Hashable, Sendable {
         /// 打开设置里的模型下载
         case openModelDownload
+        /// 打开设置窗口（配置在线模型）
+        case openSettings
 
         /// userInfo 里存动作的键
         public static let userInfoKey = "faymee.action"
@@ -49,6 +51,9 @@ public struct MeetingNotice: Hashable, Sendable {
             case .queued(waitingFor: .model):
                 return MeetingNotice(title: "转写完成", body: "\(meetingTitle)\n生成纪要需要先下载模型",
                                      action: .openModelDownload)
+            case .queued(waitingFor: .onlineConfig):
+                return MeetingNotice(title: "转写完成", body: "\(meetingTitle)\n生成纪要需要先配置在线模型",
+                                     action: .openSettings)
             case .queued(waitingFor: .power):
                 return MeetingNotice(title: "转写完成", body: "\(meetingTitle)\n接通电源后生成纪要")
             case .queued(waitingFor: .transcription), .queued(waitingFor: nil):

@@ -5,6 +5,7 @@ import SwiftUI
 /// 纪要和转写稿由 MeetingDetail 读盘后传进来；这里改完纪要写盘并写回 minutes，点出处时间交给 onJump
 struct MinutesPanel: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     var meeting: Meeting
     @Binding var minutes: Minutes?
     /// 纪要文件读取失败的原因
@@ -34,12 +35,24 @@ struct MinutesPanel: View {
                 if let minutes {
                     Text(MinutesTemplate(key: minutes.template)?.name ?? minutes.template)
                         .foregroundStyle(.secondary)
+                    if let modelLabel = minutes.onlineModelLabel {
+                        Text(modelLabel)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 if status == .queued(.model) {
                     // 不静默下载：在这里说明要下多大的模型，用户点“下载”才开始
                     ModelDownloadControls(style: .minutes)
                 } else {
-                    StatusView(status: status) { regenerate(status) }
+                    StatusView(status: status) {
+                        if status.opensSettings {
+                            openWindow(id: "settings")
+                            NSApp.activate()
+                        } else {
+                            regenerate(status)
+                        }
+                    }
                 }
                 Spacer()
                 actions(status)

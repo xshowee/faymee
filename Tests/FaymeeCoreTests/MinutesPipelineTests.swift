@@ -162,10 +162,12 @@ private final class Fixture {
     let engine: FakeGenerator
     let pipeline: MinutesPipeline
 
-    init(_ engine: FakeGenerator = FakeGenerator()) {
+    init(_ engine: FakeGenerator = FakeGenerator(), model: String = "fake/generator",
+         requiresPower: Bool = true, isOnlineEngine: Bool = false) {
         host = FakeHost(store: store)
         self.engine = engine
-        pipeline = MinutesPipeline(store: store, generator: engine, model: "fake/generator", host: host)
+        pipeline = MinutesPipeline(store: store, generator: engine, model: model,
+                                   requiresPower: requiresPower, isOnlineEngine: isOnlineEngine, host: host)
     }
 
     /// 和纪要管线协调好的转写管线，同 App 里的接法
@@ -995,5 +997,204 @@ private final class Fixture {
         #expect(f.pipeline.followUp(for: "m2") == .notQueued)
         f.engine.block = false
         try await f.drain()
+    }
+}
+
+@MainActor @Suite struct MinutesEngineHotswapTests {
+    @Test func 在线纪要未配置好时等待配置在线模型_补齐后在电池下自动开始() async throws {
+        let online = FakeGenerator()
+        online.isDownloaded = false
+        let f = Fixture(online, model: "deepseek/deepseek-chat", requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
+        f.addMeeting("m1")
+
+        #expect(f.pipeline.isOnlineEngine)
+        #expect(!f.pipeline.requiresPower)
+        #expect(f.pipeline.enqueue("m1", now: true))
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.waitReason(for: "m1") == .onlineConfig)
+        #expect(f.pipeline.followUp(for: "m1") == .queued(waitingFor: .onlineConfig))
+        #expect(online.events.isEmpty)
+
+        online.isDownloaded = true
+        f.pipeline.modelAvailabilityChanged()
+        try await f.drain()
+
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        #expect(minutes.model == "deepseek/deepseek-chat")
+        #expect(f.host.meetings["m1"]?.minutes == MinutesState(status: .done))
+    }
+
+    @Test func 在线纪要切到电池供电时转写完成立即自动生成() async throws {
+        let online = FakeGenerator()
+        let f = Fixture(online, model: "anthropic/claude-sonnet-4-5", requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
+        let (transcription, transcriber) = f.makeTranscription()
+        transcriber.text = String(repeating: "张三下周三之前把报价单发给客户。", count: 4)
+        var followUp: MinutesFollowUp?
+        transcription.onFinish = { id, _ in
+            f.pipeline.transcriptionFinished(id)
+            followUp = f.pipeline.followUp(for: id)
+        }
+        f.addMeeting("m1", transcript: nil)
+
+        transcription.enqueue("m1")
+        try await f.until { followUp != nil }
+        #expect(followUp == .queued(waitingFor: .transcription))
+
+        try await f.until { transcription.isIdle }
+        try await f.drain()
+
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        #expect(minutes.model == "anthropic/claude-sonnet-4-5")
+        #expect(online.events == ["transcribe", "load", "generate", "unload"])
+    }
+
+    @Test func 运行期从本机切到在线_当前场用旧引擎跑完并卸载_下一场用新引擎() async throws {
+        let local = FakeGenerator()
+        local.block = true
+        let online = FakeGenerator()
+        let f = Fixture(local, model: "llama/qwen3-4b-q4km", requiresPower: true, isOnlineEngine: false)
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueue("m2")
+        var started = local.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setEngine(generator: online, model: "deepseek/deepseek-chat",
+                           requiresPower: false, isOnlineEngine: true)
+        #expect(f.pipeline.activeID == "m1")
+        #expect(local.unloads == 0)
+        #expect(online.events.isEmpty)
+
+        local.block = false
+        try await f.drain()
+
+        #expect(try f.store.loadMinutes("m1")?.model == "llama/qwen3-4b-q4km")
+        #expect(try f.store.loadMinutes("m2")?.model == "deepseek/deepseek-chat")
+        #expect(local.events == ["load", "generate", "unload"])
+        #expect(online.events == ["load", "generate", "unload"])
+
+        // 切回后已释放的旧本机引擎不再重复 unload
+        f.pipeline.setEngine(generator: local, model: "llama/qwen3-4b-q4km",
+                           requiresPower: true, isOnlineEngine: false)
+        #expect(local.unloads == 1)
+    }
+
+    @Test func 本机引擎被取消且尚未退出时切换在线_等旧任务退出后再卸载并启动新引擎() async throws {
+        let local = SlowToCancelGenerator(hangsIn: .generate)
+        let online = FakeGenerator()
+        let f = Fixture()
+        let pipeline = MinutesPipeline(store: f.store, generator: local, model: "llama/qwen3-4b-q4km",
+                                       requiresPower: true, isOnlineEngine: false, host: f.host)
+        f.addMeeting("m1")
+
+        pipeline.enqueue("m1")
+        try await f.until { local.continuation != nil }
+
+        pipeline.isSuspended = true
+        pipeline.setEngine(generator: online, model: "openai/gpt-4.1-mini",
+                           requiresPower: false, isOnlineEngine: true)
+        #expect(local.unloads == 0)
+        #expect(pipeline.isEngineInUse)
+
+        pipeline.isSuspended = false
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(online.events.isEmpty)
+        #expect(local.unloads == 0)
+
+        local.continuation?.resume(returning: oneOverview)
+        try await f.until { pipeline.isIdle }
+
+        #expect(local.unloads == 1)
+        #expect(online.events == ["load", "generate", "unload"])
+        #expect(try f.store.loadMinutes("m1")?.model == "openai/gpt-4.1-mini")
+    }
+
+    @Test func 从在线切回本机_电池下后续任务恢复等待接通电源() async throws {
+        let online = FakeGenerator()
+        online.block = true
+        let local = FakeGenerator()
+        let f = Fixture(online, model: "deepseek/deepseek-chat", requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueue("m2")
+        var started = online.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setEngine(generator: local, model: "llama/qwen3-4b-q4km",
+                           requiresPower: true, isOnlineEngine: false)
+        online.block = false
+        try await f.until { f.host.meetings["m1"]?.minutes?.status == .done }
+
+        #expect(try f.store.loadMinutes("m1")?.model == "deepseek/deepseek-chat")
+        #expect(f.pipeline.queue == ["m2"])
+        #expect(f.pipeline.waitReason(for: "m2") == .power)
+        #expect(local.events.isEmpty)
+
+        f.pipeline.isOnPower = true
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m2")?.model == "llama/qwen3-4b-q4km")
+    }
+
+    @Test func 在线纪要失败时保留旧纪要且不回退到本机引擎() async throws {
+        let local = FakeGenerator()
+        let online = FakeGenerator()
+        online.loadError = EngineError()
+        let f = Fixture(local, model: "llama/qwen3-4b-q4km", requiresPower: true, isOnlineEngine: false)
+        f.addMeeting("m1")
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+        let url = f.store.directory("m1").appendingPathComponent("minutes.json")
+        let before = try Data(contentsOf: url)
+
+        f.pipeline.setEngine(generator: online, model: "deepseek/deepseek-chat",
+                           requiresPower: false, isOnlineEngine: true)
+        f.pipeline.enqueue("m1")
+        try await f.drain()
+
+        #expect(local.generations == 1)
+        #expect(online.loads == 1)
+        #expect(online.generations == 0)
+        #expect(try Data(contentsOf: url) == before)
+        #expect(f.host.meetings["m1"]?.minutes == MinutesState(status: .failed, error: "内存不足，关闭一些应用后重试"))
+    }
+
+    @Test func 在线纪要录音暂停放回队首_恢复后电池下继续完成_且不被挂起的未配置转写阻塞() async throws {
+        let online = FakeGenerator()
+        online.block = true
+        let f = Fixture(online, model: "gemini/gemini-2.5-flash", requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
+        let (transcription, _) = f.makeTranscription()
+        transcription.engineAvailabilityChanged(false)
+
+        f.addMeeting("parked-t", transcript: nil)
+        f.host.setTranscription(TranscriptionState(status: .queued), for: "parked-t")
+        transcription.enqueue("parked-t")
+        #expect(transcription.waitReason(for: "parked-t") == .onlineConfig)
+        #expect(transcription.isIdle)
+
+        f.addMeeting("m1")
+        f.pipeline.enqueue("m1")
+        var started = online.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.isSuspended = true
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.queue == ["m1"])
+
+        online.block = false
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(try f.store.loadMinutes("m1")?.model == "gemini/gemini-2.5-flash")
+        #expect(f.host.meetings["m1"]?.minutes == MinutesState(status: .done))
     }
 }

@@ -35,7 +35,7 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
         calls.append((audio, hotwords))
         startedContinuation.yield()
         progress(0.5)
-        if block { try await Task.sleep(for: .seconds(3600)) }
+        while block { try await Task.sleep(for: .milliseconds(5)) }
         if let transcribeError { throw transcribeError }
         return sentences
     }
@@ -148,11 +148,12 @@ private final class Fixture {
     private(set) var finished: [(id: String, outcome: TranscriptionOutcome)] = []
 
     init(_ engine: FakeTranscriber = FakeTranscriber(), diarizer: FakeDiarizer? = nil,
-         voiceprints: VoiceprintStore? = nil) {
+         voiceprints: VoiceprintStore? = nil, isEngineReady: Bool = true) {
         host = FakeHost(store: store)
         self.engine = engine
         self.diarizer = diarizer
-        pipeline = TranscriptionPipeline(store: store, transcriber: engine, engine: "fake/1", diarizer: diarizer,
+        pipeline = TranscriptionPipeline(store: store, transcriber: engine, engine: "fake/1",
+                                         isEngineReady: isEngineReady, diarizer: diarizer,
                                          voiceprints: voiceprints, host: host)
         pipeline.onFinish = { [unowned self] in self.finished.append(($0, $1)) }
     }
@@ -1225,5 +1226,175 @@ private final class Library {
         #expect(t.speakers.map(\.name) == [nil, "张三"])
         #expect(t.speakers.map(\.nameSource) == [nil, .voiceprint])
         #expect(t.speakers.map(\.personID) == [nil, "p-new"])
+    }
+}
+
+@MainActor @Suite struct TranscriptionEngineHotswapTests {
+    @Test func 在线引擎未就绪时完整转写保持排队_就绪后自动开始() async throws {
+        let engine = FakeTranscriber([.init(start: 0, end: 5, text: "配置完成")])
+        let f = Fixture(engine, isEngineReady: false)
+        let m = f.addMeeting()
+
+        #expect(!f.pipeline.isEngineReady)
+        #expect(f.pipeline.enqueue(m.id))
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(f.pipeline.activeID == nil)
+        #expect(f.pipeline.queue == [m.id])
+        #expect(f.pipeline.waitReason(for: m.id) == .onlineConfig)
+        #expect(f.pipeline.isIdle)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .queued))
+        #expect(engine.calls.isEmpty)
+
+        f.pipeline.engineAvailabilityChanged(true)
+        #expect(f.pipeline.isEngineReady)
+        #expect(f.pipeline.waitReason(for: m.id) == nil)
+        try await f.drain()
+
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(try f.store.loadTranscript(m.id)?.sentences.map(\.text) == ["配置完成"])
+    }
+
+    @Test func 引擎未就绪时只区分说话人照常执行_不被前面排队的转写阻塞() async throws {
+        let engine = FakeTranscriber([.init(start: 0, end: 5, text: "新转写")])
+        let diarizer = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        let f = Fixture(engine, diarizer: diarizer, isEngineReady: false)
+        let idleChanges = LockBox<[Bool]>([])
+        f.pipeline.onIdleChange = { idleChanges.value.append($0) }
+
+        let parked = f.addMeeting("parked")
+        let diarizeOnly = f.addTranscribedMeeting("diarize-only")
+
+        #expect(f.pipeline.enqueue(parked.id))
+        #expect(f.pipeline.waitReason(for: parked.id) == .onlineConfig)
+        #expect(f.pipeline.isIdle)
+
+        #expect(f.pipeline.enqueueDiarization(diarizeOnly.id))
+        #expect(f.pipeline.waitReason(for: diarizeOnly.id) == nil)
+        #expect(!f.pipeline.isIdle)
+
+        try await f.drain()
+
+        #expect(engine.calls.isEmpty)
+        #expect(diarizer.calls.count == 1)
+        #expect(f.host.meetings[diarizeOnly.id]?.diarization == DiarizationState(status: .done))
+        #expect(f.pipeline.queue == [parked.id])
+        #expect(f.pipeline.waitReason(for: parked.id) == .onlineConfig)
+        #expect(f.pipeline.isIdle)
+        #expect(idleChanges.value == [false, true])
+    }
+
+    @Test func 运行期切换引擎不中断进行中任务_下一场起用新引擎并写新标识() async throws {
+        let local = FakeTranscriber([.init(start: 0, end: 5, text: "本机转写")])
+        local.block = true
+        let online = FakeTranscriber([.init(start: 0, end: 5, text: "在线转写")])
+        let f = Fixture(local)
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueue("m2")
+        var started = local.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setEngine(transcriber: online, engine: "openai/gpt-transcribe", isReady: true)
+        #expect(f.pipeline.activeID == "m1")
+        #expect(online.calls.isEmpty)
+
+        local.block = false
+        try await f.drain()
+
+        let t1 = try #require(try f.store.loadTranscript("m1"))
+        let t2 = try #require(try f.store.loadTranscript("m2"))
+        #expect(t1.engine == "fake/1")
+        #expect(t1.sentences.map(\.text) == ["本机转写"])
+        #expect(t2.engine == "openai/gpt-transcribe")
+        #expect(t2.sentences.map(\.text) == ["在线转写"])
+        #expect(local.calls.count == 1)
+        #expect(online.calls.count == 1)
+    }
+
+    @Test func 运行期切到未就绪在线引擎_当前场按旧引擎跑完_下一场排队等配置() async throws {
+        let local = FakeTranscriber([.init(start: 0, end: 5, text: "旧引擎完成")])
+        local.block = true
+        let online = FakeTranscriber([.init(start: 0, end: 5, text: "新引擎完成")])
+        let f = Fixture(local)
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueue("m2")
+        var started = local.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setEngine(transcriber: online, engine: "dashscope/qwen3-asr-flash-filetrans", isReady: false)
+        local.block = false
+        try await f.drain()
+
+        #expect(try f.store.loadTranscript("m1")?.engine == "fake/1")
+        #expect(f.pipeline.queue == ["m2"])
+        #expect(f.pipeline.waitReason(for: "m2") == .onlineConfig)
+        #expect(online.calls.isEmpty)
+
+        f.pipeline.engineAvailabilityChanged(true)
+        try await f.drain()
+
+        #expect(try f.store.loadTranscript("m2")?.engine == "dashscope/qwen3-asr-flash-filetrans")
+        #expect(try f.store.loadTranscript("m2")?.sentences.map(\.text) == ["新引擎完成"])
+    }
+
+    @Test func 在线转写失败时保留旧稿并记失败_不回退到旧引擎() async throws {
+        let local = FakeTranscriber([.init(start: 0, end: 5, text: "本机旧稿")])
+        let online = FakeTranscriber([.init(start: 0, end: 5, text: "不该出现")])
+        online.transcribeError = EngineError()
+        let f = Fixture(local)
+        let m = f.addMeeting()
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        f.pipeline.setEngine(transcriber: online, engine: "openai/gpt-transcribe", isReady: true)
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(local.calls.count == 1)
+        #expect(online.calls.count == 1)
+        #expect(try f.store.loadTranscript(m.id)?.engine == "fake/1")
+        #expect(try f.store.loadTranscript(m.id)?.sentences.map(\.text) == ["本机旧稿"])
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .failed, error: "模型加载失败"))
+        #expect(f.finished.last?.outcome == .failed("模型加载失败"))
+    }
+
+    @Test func 引擎未就绪时启动恢复保持转写排队并照常恢复只区分说话人() async throws {
+        let engine = FakeTranscriber([.init(start: 0, end: 5, text: "恢复转写")])
+        let diarizer = FakeDiarizer(twoPeopleSegments)
+        let f = Fixture(engine, diarizer: diarizer, isEngineReady: false)
+        f.pipeline.isSuspended = true
+
+        let pendingTranscription = f.addMeeting("pending-t", transcription: TranscriptionState(status: .running))
+        let pendingDiarization = f.addTranscribedMeeting("pending-d")
+        f.host.setDiarization(DiarizationState(status: .queued), for: pendingDiarization.id)
+
+        f.pipeline.restore([pendingTranscription, f.host.meetings[pendingDiarization.id]!])
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.host.meetings[pendingDiarization.id]?.diarization == DiarizationState(status: .done))
+        #expect(f.pipeline.queue == [pendingTranscription.id])
+        #expect(f.pipeline.waitReason(for: pendingTranscription.id) == .onlineConfig)
+        #expect(engine.calls.isEmpty)
+
+        f.pipeline.engineAvailabilityChanged(true)
+        try await f.drain()
+        #expect(f.host.meetings[pendingTranscription.id]?.transcription == TranscriptionState(status: .done))
+    }
+}
+
+private final class LockBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+    init(_ value: Value) { storage = value }
+    var value: Value {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
     }
 }

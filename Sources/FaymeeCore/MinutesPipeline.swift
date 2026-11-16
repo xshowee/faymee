@@ -28,6 +28,8 @@ public enum MinutesActivity: Hashable, Sendable {
 public enum MinutesWaitReason: Hashable, Sendable {
     /// 等待下载模型
     case model
+    /// 等待配置在线模型
+    case onlineConfig
     /// 等待接通电源（自动生成的任务用电池时不开始）
     case power
     /// 等待转写完成（转写队列不空时不开始新的纪要）
@@ -72,8 +74,12 @@ public final class MinutesPipeline {
     public private(set) var isTranscriptionBusy = false {
         didSet { if !isTranscriptionBusy && oldValue { startNext() } }
     }
-    /// 模型文件是否已下载。`TextGenerator.isDownloaded` 不可观察，在 `modelAvailabilityChanged()` 时刷新
+    /// 模型文件是否已下载（在线引擎时表示在线配置是否就绪）。`TextGenerator.isDownloaded` 不可观察，在 `modelAvailabilityChanged()` 时刷新
     public private(set) var isModelDownloaded: Bool
+    /// 当前引擎是否要求接通电源才自动开始（本机模型为 true，在线模型为 false）
+    public private(set) var requiresPower: Bool
+    /// 当前是否使用在线纪要引擎（决定未就绪时提示“等待配置在线模型”还是“等待下载模型”）
+    public private(set) var isOnlineEngine: Bool
     /// “转写完成后自动生成纪要”开关，见 `transcriptionFinished(_:)`
     public var autoGenerate = true
 
@@ -97,8 +103,8 @@ public final class MinutesPipeline {
     }
 
     @ObservationIgnored private let store: MeetingStore
-    @ObservationIgnored private let generator: any TextGenerator
-    @ObservationIgnored private let model: String
+    @ObservationIgnored private var generator: any TextGenerator
+    @ObservationIgnored private var model: String
     @ObservationIgnored private weak var host: MinutesHost?
     @ObservationIgnored private var task: Task<Void, Never>?
     /// 被取消、可能还没退出的任务。下一个任务等它退出再用引擎，不并发调用引擎；
@@ -109,16 +115,21 @@ public final class MinutesPipeline {
     @ObservationIgnored private var cancelCount = 0
     /// 每开始或取消一次生成加一。取消后引擎可能不理会、照常返回，靠它丢弃过期的结果和进度
     @ObservationIgnored private var generation = 0
-    /// 调过 load、还没 unload。只在真加载过时释放
-    @ObservationIgnored private var isLoaded = false
+    /// 当前调过 load、还没 unload 的引擎实例。只在真加载过时释放
+    @ObservationIgnored private var loadedGenerator: (any TextGenerator)?
+    /// 正在生成的任务使用的引擎（运行期热切换后，可能与当前 `generator` 不同）
+    @ObservationIgnored private var activeGenerator: (any TextGenerator)?
     /// `isEngineInUse` 变化时调用，见 `coordinate(with:)`
     @ObservationIgnored private var onEngineUseChange: ((Bool) -> Void)?
 
     /// - Parameter model: 写进纪要的引擎标识，如 "llama/qwen3-4b-q4km"
-    public init(store: MeetingStore, generator: any TextGenerator, model: String, host: MinutesHost) {
+    public init(store: MeetingStore, generator: any TextGenerator, model: String,
+                requiresPower: Bool = true, isOnlineEngine: Bool = false, host: MinutesHost) {
         self.store = store
         self.generator = generator
         self.model = model
+        self.requiresPower = requiresPower
+        self.isOnlineEngine = isOnlineEngine
         self.host = host
         isModelDownloaded = generator.isDownloaded
     }
@@ -131,11 +142,11 @@ public final class MinutesPipeline {
     }
 
     /// 某场排队中的会议在等什么；不在排队、或只是排在别的会议后面（含录音中暂停）时为 nil。
-    /// 几项同时成立时按需要用户处理的先后：模型、电源、转写
+    /// 几项同时成立时按需要用户处理的先后：模型/在线配置、电源、转写
     public func waitReason(for id: String) -> MinutesWaitReason? {
         guard let job = jobs.first(where: { $0.id == id }) else { return nil }
-        if !isModelDownloaded { return .model }
-        if !isOnPower && !job.now { return .power }
+        if !isModelDownloaded { return isOnlineEngine ? .onlineConfig : .model }
+        if requiresPower && !isOnPower && !job.now { return .power }
         if isTranscriptionBusy { return .transcription }
         return nil
     }
@@ -162,6 +173,26 @@ public final class MinutesPipeline {
     /// 模型下载完成或被删除时调用：刷新 `isModelDownloaded`，下载好了就开始排队的任务
     public func modelAvailabilityChanged() {
         isModelDownloaded = generator.isDownloaded
+        startNext()
+    }
+
+    /// 运行期热切换纪要引擎：进行中的任务继续用启动时的旧引擎与旧标识跑完落盘；
+    /// 从本机引擎切走且旧引擎未被占用时立即调用 `unload()` 释放内存，若正在占用则等任务退出后再释放
+    public func setEngine(generator: any TextGenerator, model: String,
+                          requiresPower: Bool, isOnlineEngine: Bool) {
+        let oldGenerator = self.generator
+        let oldIsOnline = self.isOnlineEngine
+        self.generator = generator
+        self.model = model
+        self.requiresPower = requiresPower
+        self.isOnlineEngine = isOnlineEngine
+        isModelDownloaded = generator.isDownloaded
+
+        if !oldIsOnline, !isSameGenerator(oldGenerator, generator),
+           activeID == nil, cancelled == nil,
+           let loaded = loadedGenerator, isSameGenerator(loaded, oldGenerator) {
+            releaseModel()
+        }
         startNext()
     }
 
@@ -227,7 +258,7 @@ public final class MinutesPipeline {
     /// 下一个能开始的任务在 jobs 里的位置
     private var nextJob: Int? {
         guard !isSuspended, !isTranscriptionBusy, isModelDownloaded else { return nil }
-        return jobs.firstIndex { isOnPower || $0.now }
+        return jobs.firstIndex { !requiresPower || isOnPower || $0.now }
     }
 
     /// 开始下一个能开始的任务。一个都开始不了、也没有被取消的任务还在用模型时，释放模型
@@ -245,9 +276,15 @@ public final class MinutesPipeline {
         let generator = generator
         let model = model
         let previous = cancelled
+        if previous == nil {
+            if let loaded = loadedGenerator, !isSameGenerator(loaded, generator) {
+                releaseModel()
+            }
+            loadedGenerator = generator
+        }
         activeJob = job
+        activeGenerator = generator
         activity = .loading(0)
-        isLoaded = true
         host?.setMinutes(MinutesState(status: .running), for: job.id)
         // 以开始时的转写稿为准。从磁盘读：与之后读回比较的值一致，不受小数秒影响。
         // 会中标注以开始时宿主里的会议为准（`m`），和转写稿快照一起算出区间
@@ -264,8 +301,9 @@ public final class MinutesPipeline {
             await previous?.value
             let result: Result<Minutes, Error>
             do {
-                guard let transcript = try snapshot.get() else { throw MinutesPipelineError.noTranscript }
                 try Task.checkCancellation()
+                self?.markLoaded(generator, token: token)
+                guard let transcript = try snapshot.get() else { throw MinutesPipelineError.noTranscript }
                 try await generator.load { report(.loading($0)) }
                 report(.generating(0))
                 // createdAt 取整秒：写盘会丢掉小数秒，免得回调里的纪要和读回的不相等
@@ -301,9 +339,11 @@ public final class MinutesPipeline {
                 outcome = .failed(error.localizedDescription)
             }
         }
-        // 下一场开始不了就先释放模型，再让给转写（清掉 activeJob 会放开转写）
-        if nextJob == nil { releaseModel() }
+        let switchedEngine = activeGenerator.map { !isSameGenerator($0, generator) } ?? false
+        // 下一场开始不了（或已切换引擎）就先释放旧模型，再让给转写（清掉 activeJob 会放开转写）
+        if nextJob == nil || switchedEngine { releaseModel() }
         activity = nil
+        activeGenerator = nil
         activeJob = nil
         startNext()
         if let outcome { onFinish?(id, outcome) }
@@ -320,16 +360,26 @@ public final class MinutesPipeline {
         }
         self.task = nil
         generation += 1
+        activeGenerator = nil
         activeJob = nil
         activity = nil
     }
 
-    /// 被取消的任务退出了，不再用模型：没有别的任务在跑、也开始不了时释放模型
+    /// 被取消的任务退出了，不再用模型：没有别的任务在跑（或当前引擎已换）、也开始不了时释放模型
     private func cancelledTaskExited(_ mine: Int) {
         // 之后又取消过别的任务，等那个退出（它会先等这个退出）
         guard mine == cancelCount else { return }
+        let canKeepLoaded = if let loaded = loadedGenerator {
+            if let active = activeGenerator {
+                isSameGenerator(loaded, active)
+            } else {
+                nextJob != nil && isSameGenerator(loaded, generator)
+            }
+        } else {
+            false
+        }
         // 先释放模型，再放开转写
-        if activeID == nil && nextJob == nil { releaseModel() }
+        if !canKeepLoaded { releaseModel() }
         cancelled = nil
         startNext()
     }
@@ -341,10 +391,20 @@ public final class MinutesPipeline {
         onEngineUseChange?(inUse)
     }
 
+    private func markLoaded(_ generator: any TextGenerator, token: Int) {
+        guard token == generation else { return }
+        loadedGenerator = generator
+    }
+
     private func releaseModel() {
-        guard isLoaded else { return }
-        isLoaded = false
-        generator.unload()
+        guard let loaded = loadedGenerator else { return }
+        loadedGenerator = nil
+        loaded.unload()
+    }
+
+    private func isSameGenerator(_ a: any TextGenerator, _ b: any TextGenerator) -> Bool {
+        type(of: a) is AnyObject.Type && type(of: b) is AnyObject.Type
+            && (a as AnyObject) === (b as AnyObject)
     }
 }
 

@@ -14,6 +14,7 @@ struct TranscriptReveal: Equatable {
 /// 转写稿由 MeetingDetail 读盘、和纪要共用（纪要要按最新的转写稿判断不同步），这里改完写回 transcript
 struct TranscriptSection: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     var meeting: Meeting
     var playback: Playback?
     @Binding var transcript: Transcript?
@@ -46,6 +47,11 @@ struct TranscriptSection: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("转写稿").font(.headline)
+                if let engineLabel = transcript?.onlineEngineLabel {
+                    Text(engineLabel)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 status
                 speakerStatusView
                 Spacer()
@@ -405,35 +411,30 @@ struct TranscriptSection: View {
     }
 
     @ViewBuilder private var status: some View {
-        if let activity = model.transcription.activity(for: meeting.id) {
-            switch activity {
-            case let .preparing(p):
-                progress("正在准备转写引擎（\(formatPercent(p))）", p)
-            case let .transcribing(p):
-                progress("转写中 \(formatPercent(p))", p)
-            case .diarizing:
-                // 由 speakerStatusView 显示
-                EmptyView()
-            }
-        } else {
-            switch meeting.transcription?.status {
-            case nil:
-                // v0.1 的旧会议不会自动转写
-                Button("转写") { model.transcription.enqueue(meeting.id) }
-            case .queued:
-                Text("排队中").foregroundStyle(.secondary)
-            case .running:
-                // 管线刚开始或刚被录音暂停的一瞬间，还没有进度
-                Text("转写中…").foregroundStyle(.secondary)
-            case .failed:
-                Label(meeting.transcription?.error ?? "转写失败", systemImage: "exclamationmark.triangle")
+        let status = TranscriptionStatus(state: meeting.transcription,
+                                         activity: model.transcription.activity(for: meeting.id),
+                                         waitReason: model.transcription.waitReason(for: meeting.id))
+        if let text = status.text {
+            if let p = status.progress {
+                progress(text, p)
+            } else if case .failed = status {
+                Label(text, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                     .lineLimit(2)
-                Button("重试") { retranscribe() }
-                    .disabled(isDiarizing)
-            case .done:
-                EmptyView()
+            } else {
+                Text(text).foregroundStyle(.secondary)
             }
+        }
+        if let action = status.actionTitle {
+            Button(action) {
+                if status.opensSettings {
+                    openWindow(id: "settings")
+                    NSApp.activate()
+                } else {
+                    retranscribe()
+                }
+            }
+            .disabled(!status.opensSettings && status != .notTranscribed && isDiarizing)
         }
     }
 

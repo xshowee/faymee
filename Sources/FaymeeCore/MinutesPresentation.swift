@@ -173,6 +173,7 @@ public enum MinutesStatus: Hashable, Sendable {
         case let .notGenerated(tooLittleText): tooLittleText ? "内容太少，未生成纪要" : nil
         case .queued(nil): "排队中"
         case .queued(.model): "等待下载模型"
+        case .queued(.onlineConfig): "等待配置在线模型"
         case .queued(.power): "等待接通电源"
         case .queued(.transcription): "等待转写完成"
         case let .loadingModel(p): "正在加载模型（\(formatPercent(p))）"
@@ -183,14 +184,20 @@ public enum MinutesStatus: Hashable, Sendable {
         }
     }
 
-    /// 状态旁的按钮。都是用户手动触发，入队时不等接通电源（`enqueue(_:now: true)`）
+    /// 状态旁的按钮。除“前往设置”外，都是用户手动触发生成，入队时不等接通电源（`enqueue(_:now: true)`）
     public var actionTitle: String? {
         switch self {
         case .notGenerated: "生成纪要"
+        case .queued(.onlineConfig): "前往设置"
         case .queued(.power): "现在生成"
         case .failed: "重试"
         default: nil
         }
+    }
+
+    /// 点击按钮是否打开设置窗口（等待配置在线模型时），而不是触发生成
+    public var opensSettings: Bool {
+        self == .queued(.onlineConfig)
     }
 
     public var progress: Double? {
@@ -207,6 +214,13 @@ public enum MinutesStatus: Hashable, Sendable {
         case .queued, .loadingModel, .generating: true
         default: false
         }
+    }
+}
+
+extension Minutes {
+    /// 在线纪要来源标识；本机模型（`llama/`）或为空时返回 nil，界面不显示
+    public var onlineModelLabel: String? {
+        model.isEmpty || model.hasPrefix("llama/") ? nil : model
     }
 }
 

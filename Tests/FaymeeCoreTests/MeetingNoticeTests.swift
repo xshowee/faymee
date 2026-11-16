@@ -45,6 +45,14 @@ private let transcript = Transcript(engine: "fake", createdAt: Date(timeInterval
                                         action: .openModelDownload))
     }
 
+    /// 纪要使用在线引擎但未配齐时：发通知并点击打开设置窗口
+    @Test func withoutOnlineConfigTellsToConfigureAndOpensSettings() {
+        let notice = MeetingNotice.transcription(.done(transcript), meetingTitle: "周会", isRecording: false,
+                                                 minutes: .queued(waitingFor: .onlineConfig))
+        #expect(notice == MeetingNotice(title: "转写完成", body: "周会\n生成纪要需要先配置在线模型",
+                                        action: .openSettings))
+    }
+
     /// 纪要不会自动生成（开关关、内容太少）时照旧，不附说明
     @Test func notQueuedNotifiesAsBefore() {
         let notice = MeetingNotice.transcription(.done(transcript), meetingTitle: "周会", isRecording: false,
@@ -53,7 +61,8 @@ private let transcript = Transcript(engine: "fake", createdAt: Date(timeInterval
         #expect(notice?.action == nil)
     }
 
-    @Test(arguments: [MinutesFollowUp.notQueued, .queued(waitingFor: .model), .queued(waitingFor: .power)])
+    @Test(arguments: [MinutesFollowUp.notQueued, .queued(waitingFor: .model),
+                      .queued(waitingFor: .onlineConfig), .queued(waitingFor: .power)])
     func silentWhileRecordingWhateverMinutesDo(_ followUp: MinutesFollowUp) {
         #expect(MeetingNotice.transcription(.done(transcript), meetingTitle: "周会", isRecording: true,
                                             minutes: followUp) == nil)
@@ -66,8 +75,10 @@ private let transcript = Transcript(engine: "fake", createdAt: Date(timeInterval
     }
 
     @Test func actionRoundTripsThroughUserInfo() {
-        let notice = MeetingNotice(title: "转写完成", body: "周会", action: .openModelDownload)
-        #expect(MeetingNotice.Action(userInfo: notice.userInfo) == .openModelDownload)
+        let download = MeetingNotice(title: "转写完成", body: "周会", action: .openModelDownload)
+        #expect(MeetingNotice.Action(userInfo: download.userInfo) == .openModelDownload)
+        let settings = MeetingNotice(title: "转写完成", body: "周会", action: .openSettings)
+        #expect(MeetingNotice.Action(userInfo: settings.userInfo) == .openSettings)
         #expect(MeetingNotice(title: "转写完成", body: "周会").userInfo.isEmpty)
         #expect(MeetingNotice.Action(userInfo: [:]) == nil)
     }

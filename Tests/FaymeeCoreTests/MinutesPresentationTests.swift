@@ -203,16 +203,19 @@ private func status(_ state: MinutesState?, activity: MinutesActivity? = nil, wa
     }
 
     @Test(arguments: [
-        (MinutesWaitReason?.none, "排队中", String?.none),
-        (.model, "等待下载模型", nil),
-        (.power, "等待接通电源", "现在生成"),
-        (.transcription, "等待转写完成", nil),
+        (MinutesWaitReason?.none, "排队中", String?.none, false),
+        (.model, "等待下载模型", nil, false),
+        (.onlineConfig, "等待配置在线模型", "前往设置", true),
+        (.power, "等待接通电源", "现在生成", false),
+        (.transcription, "等待转写完成", nil, false),
     ])
-    func 排队中显示在等什么_只有等电源时可以现在生成(_ wait: MinutesWaitReason?, _ text: String, _ action: String?) {
+    func 排队中显示在等什么_电源给现在生成_在线配置给前往设置(_ wait: MinutesWaitReason?, _ text: String,
+                                                       _ action: String?, _ opensSettings: Bool) {
         let s = status(MinutesState(status: .queued), wait: wait)
         #expect(s == .queued(wait))
         #expect(s.text == text)
         #expect(s.actionTitle == action)
+        #expect(s.opensSettings == opensSettings)
         #expect(s.progress == nil)
         #expect(s.isBusy)
     }
@@ -253,6 +256,30 @@ private func status(_ state: MinutesState?, activity: MinutesActivity? = nil, wa
         #expect(s == .done)
         #expect(s.text == nil)
         #expect(s.actionTitle == nil)
+        #expect(!s.opensSettings)
         #expect(!s.isBusy)
+    }
+
+    @Test func 其他非在线配置状态不跳转设置() {
+        #expect(!status(nil).opensSettings)
+        #expect(!status(nil, transcript: nil).opensSettings)
+        #expect(!status(MinutesState(status: .running), activity: .loading(0.5)).opensSettings)
+        #expect(!status(MinutesState(status: .running), activity: .generating(0.5)).opensSettings)
+        #expect(!status(MinutesState(status: .failed, error: "出错")).opensSettings)
+    }
+
+    @Test(arguments: [
+        ("", String?.none),
+        ("llama/qwen3-4b-q4km", nil),
+        ("llama/other", nil),
+        ("deepseek/deepseek-chat", "deepseek/deepseek-chat"),
+        ("anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
+        ("openai-compatible/qwen-32b", "openai-compatible/qwen-32b"),
+    ])
+    func 在线模型来源标识_本机或空返回空_在线原样返回(_ model: String, _ expected: String?) {
+        let minutes = Minutes(model: model, template: "general", createdAt: meetingStart,
+                              source: MinutesSource(transcriptCreatedAt: meetingStart, textHash: "sha256:x"),
+                              sections: [])
+        #expect(minutes.onlineModelLabel == expected)
     }
 }

@@ -631,7 +631,7 @@ final class AppModel {
 
     // MARK: - 转写、纪要通知
 
-    /// 用户点了“生成纪要需要先下载模型”的通知，等着打开设置里的模型下载。
+    /// 用户点了“生成纪要需要先下载模型”或“需要先配置在线模型”的通知，等着打开设置窗口。
     /// MenuBarLabel（App 启动就在）观察它：为 true 时打开设置窗口，再调 `modelDownloadRequestHandled()` 复位。
     /// 用留存的状态而不是一次性回调：点通知可能冷启动 App，那时还没有视图在监听
     private(set) var isModelDownloadRequested = false
@@ -642,7 +642,7 @@ final class AppModel {
 
     private func handleNoticeAction(_ action: MeetingNotice.Action) {
         switch action {
-        case .openModelDownload: openModelDownload()
+        case .openModelDownload, .openSettings: openModelDownload()
         }
     }
 
