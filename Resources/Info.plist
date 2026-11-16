@@ -28,6 +28,11 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Faymee 需要使用麦克风录制会议。录音只保存在本机。</string>
 	<key>SUEnableAutomaticChecks</key>
