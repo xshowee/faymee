@@ -7,6 +7,9 @@ public protocol TextGenerator {
     /// 一次调用能容纳的输入 + 输出长度（token），决定分段大小。
     /// 应已扣除引擎自己套的对话模板、思考等开销
     var contextTokens: Int { get }
+    /// 单次调用允许的最大输出长度（token），与 `contextTokens` 解耦。
+    /// 默认按 `contextTokens / 2` 计算，保持本机模型的既有预算行为
+    var maxOutputTokens: Int { get }
     /// 一段文字的 token 数，用分词器计算。分段时用它保证每段都在预算内
     func countTokens(_ text: String) -> Int
     /// 模型文件是否已下载。未下载时管线不开始，任务保持排队
@@ -23,6 +26,8 @@ public protocol TextGenerator {
 }
 
 extension TextGenerator {
+    public var maxOutputTokens: Int { contextTokens / 2 }
+
     public func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
         try await generate(system: system, prompt: prompt, maxTokens: maxTokens)
     }

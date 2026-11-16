@@ -33,7 +33,8 @@ public func generateMinutes(
     }
     let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty)
     let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
-    let budget = Budget(generator, system: system, outputTokens: generator.contextTokens * 2 / 5)
+    let budget = Budget(generator, system: system,
+                        outputTokens: min(generator.maxOutputTokens, generator.contextTokens * 2 / 5))
 
     let lineBudget = budget.promptTokens - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
     let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens,
@@ -61,7 +62,7 @@ public func generateMinutes(
     }
     let draft = drafts.count > 1
         ? try await merge(drafts, meeting: meeting, template: template, generator: generator,
-                          outputTokens: generator.contextTokens / 2)
+                          outputTokens: min(generator.maxOutputTokens, generator.contextTokens / 2))
         : drafts.first ?? [:]
     if segments.count > 1 { step() }
     // 转写稿一句都没有、也没有区间：同 v0.4 直接到 1

@@ -11,6 +11,8 @@ private let shanghai = TimeZone(identifier: "Asia/Shanghai")!
 /// 假引擎：按脚本依次返回固定输出，记录每次调用。countTokens 按字数计
 final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     let contextTokens: Int
+    private let maxOutputTokensOverride: Int?
+    var maxOutputTokens: Int { maxOutputTokensOverride ?? (contextTokens / 2) }
     var outputs: [String]
     /// 设了就在 generate 里抛出
     var error: Error?
@@ -20,8 +22,9 @@ final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     /// 每次调用收到的输出文法
     private(set) var grammars: [String?] = []
 
-    init(contextTokens: Int = 100_000, outputs: [String] = []) {
+    init(contextTokens: Int = 100_000, maxOutputTokens: Int? = nil, outputs: [String] = []) {
         self.contextTokens = contextTokens
+        self.maxOutputTokensOverride = maxOutputTokens
         self.outputs = outputs
     }
 
@@ -695,6 +698,59 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
 
         await #expect(throws: CancellationError.self) { try await generate(generator) }
         #expect(generator.calls.count == 1)
+    }
+
+    @Test func 大上下文窗口下输出上限受maxOutputTokens封顶_常规会议一次提取跳过合并() async throws {
+        let generator = ScriptedGenerator(contextTokens: 64_000, maxOutputTokens: 8_192)
+        generator.respond = echoingResponder
+
+        _ = try await generate(generator, transcript: longTranscript(count: 300))
+
+        #expect(generator.extractionCalls.count == 1)
+        #expect(generator.mergeCalls.isEmpty)
+        #expect(generator.calls.count == 1)
+        #expect(generator.calls[0].maxTokens == 8_192)
+        let protoGenerator: any TextGenerator = generator
+        #expect(protoGenerator.maxOutputTokens == 8_192)
+    }
+
+    @Test func 大上下文窗口下超长会议仍分段并分级合并_合并与提取均受maxOutputTokens封顶() async throws {
+        let generator = ScriptedGenerator(contextTokens: 64_000, maxOutputTokens: 8_192)
+        generator.respond = echoingResponder
+
+        _ = try await generate(generator, transcript: longTranscript(count: 1_500))
+
+        #expect(generator.extractionCalls.count >= 2)
+        #expect(generator.mergeCalls.count >= 1)
+        for call in generator.calls {
+            #expect(call.maxTokens == 8_192)
+            #expect(call.system.count + call.prompt.count + call.maxTokens <= 64_000)
+        }
+    }
+
+    @Test func 会中标注展开的输出上限同样受maxOutputTokens封顶() async throws {
+        let generator = ScriptedGenerator(contextTokens: 64_000, maxOutputTokens: 8_192)
+        generator.respond = { system, prompt in
+            if system.contains("标记了一段重点") {
+                return #"{"text": "标记内容展开", "refs": ["s1"]}"#
+            }
+            return echoingResponder(system, prompt)
+        }
+        let annotations = MinutesAnnotations(
+            spans: [AnnotationSpan(kind: .mark, annotationIDs: ["a1"], at: 5, start: 0, end: 20,
+                                   noteText: nil, sentenceIDs: ["s1", "s2"])],
+            hash: "h1"
+        )
+
+        let minutes = try await generateMinutes(
+            transcript: transcript, title: "产品周会", startedAt: date("2026-11-10T02:00:00Z"),
+            template: .general, annotations: annotations, generator: generator,
+            model: "fake/scripted", createdAt: date("2026-11-10T03:05:00Z"), timeZone: shanghai)
+
+        #expect(generator.calls.count == 2)
+        #expect(generator.calls.allSatisfy { $0.maxTokens == 8_192 })
+        let section = try #require(minutes.sections.first { $0.kind == .annotations })
+        #expect(section.items.map(\.text) == ["标记内容展开"])
     }
 }
 
