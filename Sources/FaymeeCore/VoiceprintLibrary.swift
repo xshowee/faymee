@@ -275,7 +275,15 @@ public struct VoiceprintStore {
         return try d.decode(VoiceprintLibrary.self, from: Data(contentsOf: url))
     }
 
+    /// 读改写互斥：界面的修改在主线程，重算声纹库在后台逐人写回，同一个文件不能交错读改写，否则一边的修改会丢
+    /// （刚删掉的人被写回来等）。整个进程一把锁，声纹库只有一份
+    private static let lock = NSRecursiveLock()
+
     public func save(_ library: VoiceprintLibrary) throws {
+        try Self.lock.withLock { try write(library) }
+    }
+
+    private func write(_ library: VoiceprintLibrary) throws {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -287,15 +295,19 @@ public struct VoiceprintStore {
     /// body 抛错时也不写
     @discardableResult
     public func update<T>(_ body: (inout VoiceprintLibrary) throws -> T) throws -> T {
-        var library = try load()
-        let result = try body(&library)
-        try save(library)
-        return result
+        try Self.lock.withLock {
+            var library = try load()
+            let result = try body(&library)
+            try write(library)
+            return result
+        }
     }
 
     /// 全部删除：直接删掉文件，不先读。文件坏了也能清除
     public func removeAll() throws {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        try Self.lock.withLock {
+            guard FileManager.default.fileExists(atPath: url.path) else { return }
+            try FileManager.default.removeItem(at: url)
+        }
     }
 }

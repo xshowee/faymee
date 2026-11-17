@@ -194,6 +194,55 @@ struct SherpaOnnxDiarizerContractTests {
         #expect(vectors[3] == nil)
     }
 
+    /// 端到端：打进 App 的模型区分、登记一人，换成“另一个”模型（同一文件当作下载的模型）后重算声纹库
+    @Test func 换模型后重算声纹库_真实录音() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meetings = MeetingStore(root: root.appendingPathComponent("Meetings", isDirectory: true))
+        let library = VoiceprintStore(url: root.appendingPathComponent("voiceprints.json"))
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let m = Meeting(id: "m1", title: "会议", startedAt: start, endedAt: start + 60, status: .done,
+                        recording: "recording.m4a", duration: 60)
+        try FileManager.default.createDirectory(at: meetings.directory("m1"), withIntermediateDirectories: true)
+        try meetings.save(m)
+        try FileManager.default.copyItem(at: try resource("two-speakers-zh"), to: meetings.recordingURL(m)!)
+
+        let bundled = SherpaOnnxDiarizer(modelDirectory: modelDirectory)
+        let plain = Transcript(engine: "test", createdAt: start, hotwords: [], items: truth.enumerated().map {
+            .sentence(.init(id: "s\($0.offset)", start: $0.element.start, end: $0.element.end, text: "句子"))
+        })
+        let result = try await bundled.diarize(audio: meetings.recordingURL(m)!, sentences: plain.sentenceSpans,
+                                               speakerCount: nil) { _ in }
+        var transcript = plain.withSpeakers(result, engine: bundled.engine, voiceprintModel: bundled.voiceprintModel,
+                                            createdAt: start)
+        let a = try #require(transcript.sentences.first?.speaker)
+        let i = try #require(transcript.diarization?.speakers.firstIndex { $0.id == a })
+        transcript.diarization!.speakers[i].name = "张三"
+        try meetings.saveTranscript(transcript, for: "m1")
+        try library.update { try $0.enroll(speaker: a, from: transcript, meetingID: "m1") }
+        let enrolled = try library.load().people[0].samples[0].voiceprint
+
+        let base = SherpaOnnxDiarizer.embeddingModel
+        let local = LocalModel(id: "test/downloaded-eres2net", directoryName: "downloaded-eres2net", files: [
+            ModelFile(path: base.name, size: base.size, sha256: base.sha256,
+                      downloadURLs: [URL(string: "https://example.com/\(base.name)")!]),
+        ])
+        let models = root.appendingPathComponent("Models", isDirectory: true)
+        try FileManager.default.createDirectory(at: local.directory(in: models), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.name), to: local.url(in: models))
+        let entry = CatalogModel(id: local.id, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
+                                 source: .download(local), name: "下载的", parameters: ModelParameters(matchThreshold: 0.7))
+        let extractor = try #require(SherpaOnnxDiarizer.engine(for: entry, bundleResources: nil, modelsRoot: models).diarizer)
+
+        let report = try await VoiceprintRecompute.run(voiceprints: library, meetings: meetings, extractor: extractor)
+
+        #expect(report == VoiceprintRecomputeReport(recomputed: 1, affected: [], isCancelled: false))
+        let person = try library.load().people[0]
+        #expect(person.voiceprintModel == "test/downloaded-eres2net")
+        // 同一个模型文件：重算出的声纹与登记时的几乎相同
+        #expect(try #require(person.samples.first).voiceprint.similarity(to: enrolled) > 0.99)
+    }
+
     @Test func 没有句子_没有说话人() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).caf")
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2))
