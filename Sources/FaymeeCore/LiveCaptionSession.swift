@@ -114,6 +114,8 @@ public final class LiveCaptionSession {
     @ObservationIgnored private let finalizer: SentenceFinalizer?
     /// 最近的音频，切出句子交给定稿。只在有定稿时记
     @ObservationIgnored private var audio = RecentAudio()
+    /// 已被定稿结果替换的句子
+    @ObservationIgnored private var finalized: Set<Int> = []
 
     /// 定稿时句子前后各多带的秒数
     static let finalizePadding: TimeInterval = 0.3
@@ -299,7 +301,11 @@ public final class LiveCaptionSession {
         finalizer.submit(id: id, samples: samples)
     }
 
-    /// 定稿结果替换对应的句子（按 id，晚到的也只换那一句）。那句已经被丢掉、结果为空时不换
+    /// 定稿结果替换对应的句子（按 id，晚到的也只换那一句）。那句已经被丢掉、结果为空时不换。
+    ///
+    /// 前一句紧挨着这句（两句各多带的音频重叠）且已定稿时，它的定稿常常带上这句开头的几个字
+    /// （X-ASR 的句子常常首尾相接，句末时间又比最后一个字晚约 0.3 秒）：从前一句去掉和这句开头相同的字，
+    /// 规矩同会后转写（`SentenceAssembly.droppingTextTwins`，最多 4 个字）。缩短补边会丢字（ticket 03），所以不缩
     private func replace(_ id: Int, with text: String) {
         guard !stopped, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let index = lines.firstIndex(where: { if case .sentence(let s) = $0 { s.id == id } else { false } }),
@@ -307,6 +313,17 @@ public final class LiveCaptionSession {
         else { return }
         caption.text = text
         lines[index] = .sentence(caption)
+        finalized.insert(id)
+        if index > 0, case .sentence(var previous) = lines[index - 1], finalized.contains(previous.id),
+           caption.start - previous.end < 2 * Self.finalizePadding {
+            let trimmed = SentenceAssembly.droppingTextTwins(of: SegmentRecognition(text: previous.text, tokens: nil),
+                                                             before: SegmentRecognition(text: text, tokens: nil)).text
+            // 前一句整句都是重复的字时不动，免得留下空行
+            if trimmed != previous.text, trimmed.contains(where: { !$0.isPunctuation && !$0.isWhitespace }) {
+                previous.text = trimmed
+                lines[index - 1] = .sentence(previous)
+            }
+        }
     }
 
     private func insertGap(from start: Date) {

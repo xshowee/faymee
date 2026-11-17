@@ -208,6 +208,39 @@ private final class Fixture {
         try await f.until { f.sentences == ["107-122"] }
     }
 
+    /// 前后两句紧挨着时，各多带的 0.3 秒会让前一句的定稿带上后一句开头的字（真实会议里 X-ASR 的句子常常首尾相接）：
+    /// 后一句定稿时，从前一句去掉和它开头相同的字（最多 4 个，同会后转写）
+    @Test func 紧挨着的两句_前一句定稿末尾重复后一句开头的字时去掉() async throws {
+        let f = Fixture()
+        let t = try await f.run(seconds: 10)
+        f.recognizer.text = { clip in
+            switch Int(clip.first ?? 0) {
+            case 7: "大家好，今天开会，所以。"
+            case 18: "所以先说预算。"
+            default: "后来的。"
+            }
+        }
+
+        t.sentence(1, 2.1, "大家好今天开会。")
+        t.sentence(2.1, 3, "所以先说预算。")
+        // 隔开 0.6 秒以上：两句的音频不重叠，不动
+        t.sentence(4, 5, "后来的。")
+        try await f.until { f.sentences.last == "后来的。" && f.sentences.first == "大家好，今天开会。" }
+        #expect(f.sentences == ["大家好，今天开会。", "所以先说预算。", "后来的。"])
+    }
+
+    @Test func 前一句没有定稿时不去掉重复的字() async throws {
+        let f = Fixture()
+        let t = try await f.run(seconds: 10)
+        f.recognizer.text = { clip in Int(clip.first ?? 0) == 7 ? "" : "所以先说预算。" }
+
+        t.sentence(1, 2.1, "大家好所以。")
+        t.sentence(2.1, 3, "所以先说预算。")
+        try await f.until { f.recognizer.clips.count == 2 }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(f.sentences == ["大家好所以。", "所以先说预算。"])
+    }
+
     /// 只留最近约 1 分钟的音频：句子开头已经不在了就不定稿
     @Test func 句子的音频已经不在缓存里时保留流式结果() async throws {
         let f = Fixture()

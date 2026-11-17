@@ -89,8 +89,9 @@ enum SentenceAssembly {
     /// 按文字去重时最多去掉几个字（补边重叠最多约 0.5 秒）
     static let maxTextTwins = 4
 
-    /// 前一段末尾与后一段开头相同的字（不分大小写，最多 `maxTextTwins` 个，取最长）从前一段去掉；逐字时间不留
-    private static func droppingTextTwins(of first: SegmentRecognition, before second: SegmentRecognition)
+    /// 前一段末尾与后一段开头相同的字（不分大小写，最多 `maxTextTwins` 个，取最长）从前一段去掉；逐字时间不留。
+    /// 实时字幕定稿的相邻两句也用它
+    static func droppingTextTwins(of first: SegmentRecognition, before second: SegmentRecognition)
         -> SegmentRecognition {
         let tail = units(first.text).filter(\.isContent).map { $0.character.lowercased() }
         let head = units(second.text).filter(\.isContent).map { $0.character.lowercased() }
