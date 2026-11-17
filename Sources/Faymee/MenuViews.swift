@@ -118,21 +118,21 @@ struct MenuContent: View {
         }
 
         if model.isLidGapOpen {
-            Label("已合盖，内置麦克风被断开，现在没有在录。请打开盖子，或改用外接麦克风。",
+            Label(LidAlert.closedStatus(capturingSystemSound: model.isCapturingSystemSound),
                   systemImage: "mic.slash.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         } else if model.isSilent {
-            Label("长时间没有声音，请检查麦克风。", systemImage: "exclamationmark.triangle.fill")
+            Label(SilenceWatch.statusText(includesSystemSound: model.isCapturingSystemSound),
+                  systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
 
-        let missed = model.current?.lidGaps.filter { $0.end != nil } ?? []
-        if !missed.isEmpty {
-            Text("本次有 \(missed.count) 段因合盖没有录到声音，可在会议记录里查看")
+        if let summary = model.current?.lidGapSummary {
+            Text(summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

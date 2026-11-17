@@ -37,8 +37,12 @@ final class SystemSoundCapture {
     private let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
     private let opened = OpenedSegments()
     private let watch = DeviceWatch()
+    private let level = SystemSoundLevel()
 
     var isRunning: Bool { procID != nil }
+
+    /// 上次取走以来系统声音的峰值电平（dBFS），没有数据为 -160。静音判断每秒取一次
+    func takeLevel() -> Float { level.take() }
 
     /// 运行中聚合设备失效（`kAudioDevicePropertyDeviceIsAlive` 变为 0），在主线程调用。
     /// 采集已经录不到了，调用方停掉它、按“运行中出错”重建
@@ -106,11 +110,13 @@ final class SystemSoundCapture {
                                        },
                                        onError: onError)
         self.writer = writer
+        let level = level
         try check("创建系统声音回调", AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue) {
             _, inputData, inputTime, _, _ in
             let time = inputTime.pointee
             let hostTime = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : mach_absolute_time()
             writer.push(inputData, format: format, hostTime: hostTime)
+            level.record(inputData, format: format)
         })
         try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
         watchDevice(format: asbd)

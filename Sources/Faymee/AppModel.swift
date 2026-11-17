@@ -9,10 +9,6 @@ private let systemSoundLog = Logger(subsystem: "com.faymee.app", category: "syst
 
 @MainActor @Observable
 final class AppModel {
-    /// 低于此电平视为没有声音（dBFS）。合盖后内置麦克风被硬件断开，读到的是全 0（-160）
-    static let silenceThreshold: Float = -65
-    /// 持续无声多久后告警
-    static let silenceAlertAfter: TimeInterval = 20
     /// 多久没收到音频数据视为采集停滞，重建引擎
     static let stallAfter: TimeInterval = 5
 
@@ -109,8 +105,8 @@ final class AppModel {
     @ObservationIgnored private let recorder = Recorder()
     @ObservationIgnored private let systemSound = SystemSoundCapture()
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var silentSince: Date?
-    @ObservationIgnored private var silenceNotified = false
+    /// “没有声音”的判断：麦克风电平随到随喂，系统声音电平每秒从采集取一次
+    @ObservationIgnored private var silence = SilenceWatch()
     @ObservationIgnored private var lastStallRestart = Date.distantPast
     /// 启动时的中断恢复和转写、纪要恢复是否已完成，之前不开始转写和纪要
     @ObservationIgnored private var launchRecovered = false {
@@ -313,8 +309,7 @@ final class AppModel {
         elapsed = 0
         isSilent = false
         hasRecordingError = false
-        silentSince = nil
-        silenceNotified = false
+        silence = SilenceWatch()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -509,13 +504,7 @@ final class AppModel {
     private func levelChanged(_ db: Float) {
         guard isRecording else { return }
         levelDB = db
-        if db < Self.silenceThreshold {
-            silentSince = silentSince ?? Date()
-        } else {
-            silentSince = nil
-            isSilent = false
-            silenceNotified = false
-        }
+        silence.micLevel(db, at: Date())
     }
 
     private func tick() {
@@ -527,15 +516,13 @@ final class AppModel {
         recheckSystemSoundAuthorization()
         retrySystemSoundIfDue(deviceChanged: false)
 
-        if let since = silentSince, Date().timeIntervalSince(since) >= Self.silenceAlertAfter {
-            isSilent = true
-            // 合盖导致的无声由 checkLid 处理，不重复提醒
-            if !silenceNotified && !isLidGapOpen {
-                silenceNotified = true
-                Notifier.post("Faymee 可能没录到声音",
-                              "已经 \(Int(Self.silenceAlertAfter)) 秒没有声音了。MacBook 合盖时内置麦克风会被断开，请检查麦克风。")
-            }
-        }
+        // 开着系统声音时两路都没声音才算；合盖导致的无声由 checkLid 处理，不重复提醒；看不到屏幕时先不发
+        let now = Date()
+        silence.systemSoundLevel(systemSound.takeLevel(), at: now)
+        let silent = silence.check(at: now, includesSystemSound: isCapturingSystemSound,
+                                   canNotify: !isLidGapOpen && SystemState.hasVisibleScreen)
+        isSilent = silent.isSilent
+        if let notice = silent.notice { Notifier.post(notice) }
 
         if recorder.secondsSinceLastBuffer > Self.stallAfter,
            Date().timeIntervalSince(lastStallRestart) > Self.stallAfter {
@@ -554,14 +541,14 @@ final class AppModel {
             m.lidGaps.append(Gap(start: Date(), reason: .lidClosed))
             update(m)
             if SystemState.hasVisibleScreen {
-                Notifier.post("内置麦克风已断开", "MacBook 合盖后内置麦克风无法收音，现在没有在录。请打开盖子，或改用外接麦克风。")
+                Notifier.post(LidAlert.closedNotice(capturingSystemSound: isCapturingSystemSound))
             }
         } else if !missing, let i = m.openGap {
             m.lidGaps[i].end = Date()
             update(m)
             // 合盖期间换成外接麦克风的话，用户正看着屏幕，不需要再提醒
             if SystemState.isLidClosed != true {
-                Notifier.post("合盖期间没有录到声音", formatTimeRange(m.lidGaps[i]))
+                Notifier.post(m.lidReopenedNotice(for: m.lidGaps[i]))
             }
         }
     }

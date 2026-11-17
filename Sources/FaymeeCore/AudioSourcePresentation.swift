@@ -36,27 +36,28 @@ extension Meeting {
     public var lidGapNotices: [LidGapNotice] {
         var notices: [LidGapNotice] = []
         for piece in lidGaps.flatMap(lidGapPieces) {
-            if let n = notices.firstIndex(where: { $0.title == piece.title }) {
+            if let n = notices.firstIndex(where: { $0.title == piece.kind.title }) {
                 notices[n].gaps.append(piece.gap)
             } else {
-                notices.append(LidGapNotice(title: piece.title, gaps: [piece.gap]))
+                notices.append(LidGapNotice(title: piece.kind.title, gaps: [piece.gap]))
             }
         }
         return notices
     }
 
-    /// 一段合盖在系统声音的开关切换、不可用的起止处拆开，并掉零碎的段，相邻同一说明的段接回一段
-    private func lidGapPieces(_ gap: Gap) -> [(title: String, gap: Gap)] {
+    /// 一段合盖在系统声音的开关切换、不可用的起止处拆开，并掉零碎的段，相邻同一说明的段接回一段。
+    /// 详情页的说明和录音中开盖的提醒、面板里的合盖摘要都按它分
+    func lidGapPieces(_ gap: Gap) -> [(kind: LidGapNotice.Kind, gap: Gap)] {
         let on = systemSoundPeriodList
         let unavailable = systemSoundUnavailablePeriodList
         let cuts = (on + unavailable).flatMap { [$0.start, $0.end].compactMap { $0 } }
             .filter { $0 > gap.start && $0 < (gap.end ?? .distantFuture) }
         let points = [gap.start] + Set(cuts).sorted()
-        var pieces: [(title: String, gap: Gap)] = points.enumerated().map { i, start in
-            let title = LidGapNotice.title(systemSoundOn: on.contains { $0.contains(start) },
-                                           unavailable: unavailable.contains { $0.contains(start) })
+        var pieces: [(kind: LidGapNotice.Kind, gap: Gap)] = points.enumerated().map { i, start in
+            let kind = LidGapNotice.Kind(systemSoundOn: on.contains { $0.contains(start) },
+                                         unavailable: unavailable.contains { $0.contains(start) })
             let end = i + 1 < points.count ? points[i + 1] : gap.end
-            return (title, Gap(start: start, end: end, reason: gap.reason))
+            return (kind, Gap(start: start, end: end, reason: gap.reason))
         }
         func isSliver(_ g: Gap) -> Bool {
             g.end.map { $0.timeIntervalSince(g.start) < Self.audioSourceEdgeTolerance } ?? false
@@ -73,9 +74,9 @@ extension Meeting {
             pieces.remove(at: i)
         }
         // 相邻同一说明的接回一段（切换点对说明没有影响，或中间零碎的段被并掉了）
-        var result: [(title: String, gap: Gap)] = []
+        var result: [(kind: LidGapNotice.Kind, gap: Gap)] = []
         for p in pieces {
-            if let last = result.last, last.title == p.title {
+            if let last = result.last, last.kind == p.kind {
                 result[result.count - 1].gap.end = p.gap.end
             } else {
                 result.append(p)
@@ -109,11 +110,29 @@ public struct LidGapNotice: Hashable, Sendable {
         self.gaps = gaps
     }
 
-    static func title(systemSoundOn: Bool, unavailable: Bool) -> String {
-        switch (systemSoundOn, unavailable) {
-        case (false, _): "以下时段因合盖，内置麦克风没有录到声音"
-        case (true, false): "以下时段因合盖，只录到系统声音"
-        case (true, true): "以下时段因合盖且系统声音不可用，没有录到声音"
+    /// 合盖时系统声音的状态，分组和文字按它定
+    enum Kind: Hashable, Sendable {
+        /// 系统声音关着：内置麦克风没有录到声音
+        case systemSoundOff
+        /// 开着且可用：只录到系统声音
+        case systemSoundOnly
+        /// 开着但不可用：两路都没录到
+        case nothing
+
+        init(systemSoundOn: Bool, unavailable: Bool) {
+            switch (systemSoundOn, unavailable) {
+            case (false, _): self = .systemSoundOff
+            case (true, false): self = .systemSoundOnly
+            case (true, true): self = .nothing
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .systemSoundOff: "以下时段因合盖，内置麦克风没有录到声音"
+            case .systemSoundOnly: "以下时段因合盖，只录到系统声音"
+            case .nothing: "以下时段因合盖且系统声音不可用，没有录到声音"
+            }
         }
     }
 }
