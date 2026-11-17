@@ -376,7 +376,7 @@ final class AppModel {
     // MARK: - 系统声音
     //
     // 线程：这里的状态（开关、可用性、会议）都只在主线程读写。查授权要起子进程，在后台线程等它退出；
-    // 建 tap 和聚合设备可能卡在授权框上，由 SystemSoundCapture 放到它自己的后台队列。两者都用 await 等，
+    // 建 IOProc 可能卡在授权框上，由 SystemSoundCapture 连同 tap、聚合设备放到它自己的后台队列。两者都用 await 等，
     // 结果回到主线程后先核对这次尝试还算不算数（systemSoundAttempt），再改状态
 
     /// 让录音中的系统声音跟上开关：打开时开一段时段、开始采集，关闭时停止采集、结束这段。

@@ -23,16 +23,17 @@ enum SystemSoundCaptureError: LocalizedError {
 /// - 麦克风不在这个 aggregate device 里，仍由 `Recorder` 采集：两者合在一起时，没有声音播放
 ///   整个设备就不运行，连麦克风也录不到。
 /// - 没有声音播放时可能完全没有回调，这是正常的，不当成停滞。
-/// - 授权未决定时，系统在建含 tap 的聚合设备时弹出“系统录音”授权框（说明文字是 Info.plist 的
-///   NSAudioCaptureUsageDescription），这个调用一直阻塞到用户点了按钮。所以建 tap 和聚合设备放在一个串行的
-///   后台队列上（同一时刻最多一个在等授权框），其余（IOProc、启动、监听、停止）在主线程，状态只在主线程读写。
+/// - 授权未决定时，系统在给含 tap 的聚合设备建 IOProc（`AudioDeviceCreateIOProcIDWithBlock`）时弹出
+///   “系统录音”授权框（说明文字是 Info.plist 的 NSAudioCaptureUsageDescription），这个调用一直阻塞到用户点了
+///   按钮；只建 tap 和聚合设备不弹。所以建 tap、聚合设备、IOProc 放在一个串行的后台队列上（同一时刻最多一个
+///   在等授权框），其余（启动、监听、停止）在主线程，状态只在主线程读写。
 /// - 写盘模块的回调在它自己的队列上，调用方自己切回主线程。
 @MainActor
 final class SystemSoundCapture {
     /// 私有 aggregate device 的 UID 前缀。它对本进程可见，麦克风列表要把它排除
     nonisolated static let aggregateUIDPrefix = "com.faymee.system-sound."
 
-    /// 建 tap 和聚合设备（可能卡在授权框上）、拆掉没用上的，都在这个串行队列上
+    /// 建 tap、聚合设备、IOProc（建 IOProc 可能卡在授权框上），拆掉没用上的，都在这个串行队列上
     private nonisolated static let setupQueue = DispatchQueue(label: "faymee.system-sound-setup", qos: .userInitiated)
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -40,13 +41,14 @@ final class SystemSoundCapture {
     /// 每次 start、stop 加一。后台建好时已经变了，说明这次建立已被停掉或换掉：建好的直接拆掉
     private var generation = 0
     private var procID: AudioDeviceIOProcID?
-    /// 为授权框保留的 tap 和聚合设备（见 `holdForAuthorizationPrompt`），没有为 nil
+    /// 为授权框保留的 tap、聚合设备和空 IOProc（见 `holdForAuthorizationPrompt`），没有为 nil
     private var promptHold: Created?
     /// 每次开始保留、拆掉加一，用法同 generation，和它分开：start、stop 不影响授权框
     private var promptGeneration = 0
     private var writer: SystemSoundWriter?
-    /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在往写盘模块交数据
-    private let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
+    /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在往写盘模块交数据。同一时刻最多一次
+    /// 采集在运行（为授权框保留的 IOProc 不启动，不会有回调），所以全类共用一个
+    private nonisolated static let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
     private let opened = OpenedSegments()
     private let watch = DeviceWatch()
     private let level = SystemSoundLevel()
@@ -71,26 +73,42 @@ final class SystemSoundCapture {
     /// 不算不可用
     var onFormatChanged: (@MainActor () -> Void)?
 
-    /// 开始采集，分片写进 directory。建 tap 和聚合设备在后台（授权未决定时会等用户回答授权框），
-    /// 其余回到主线程做。建不起来时抛错，已经建好的部分都拆掉；还没建好就被 stop（或又一次 start）换掉时抛
-    /// `CancellationError`，后台建好的直接拆掉。已经在采集时什么也不做
+    /// 开始采集，分片写进 directory。建 tap、聚合设备和 IOProc 在后台（授权未决定时建 IOProc 会等用户回答
+    /// 授权框），启动、监听回到主线程做。建不起来时抛错，已经建好的部分都拆掉；还没建好就被 stop（或又一次
+    /// start）换掉时抛 `CancellationError`，后台建好的直接拆掉。已经在采集时什么也不做
     func start(directory: URL,
                onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
                onError: @escaping @Sendable (String) -> Void) async throws {
         guard !isRunning else { return }
         generation += 1
         let generation = generation
-        let began = Date()
-        let created = try await Self.onSetupQueue { try Self.createTapAndAggregate() }
-        log.info("建 tap 和聚合设备用了 \(Self.milliseconds(since: began)) ms")
+        // host time 只在同一次采集内有效：每次（重新）建立都按此刻重新锚定
+        let opened = opened
+        let writer = SystemSoundWriter(directory: directory, clock: .system(),
+                                       onSegment: { segment in
+                                           opened.append(segment)
+                                           onSegment(segment)
+                                       },
+                                       onError: onError)
+        let level = level
+        let live = live
+        let created = try await Self.onSetupQueue {
+            try Self.create(for: "录音") { format in
+                Self.ioProc(writer: writer, format: format, level: level, live: live)
+            }
+        }
         guard generation == self.generation, !isRunning else {
+            // IOProc 没启动过，writer 没收到过数据
             Self.setupQueue.async { Self.destroy(created) }
+            writer.finish()
             throw CancellationError()
         }
         tapID = created.tapID
         aggregateID = created.aggregateID
+        procID = created.procID
+        self.writer = writer
         do {
-            try commit(format: created.format, directory: directory, onSegment: onSegment, onError: onError)
+            try commit(format: created.format)
         } catch {
             teardown()
             throw error
@@ -107,24 +125,26 @@ final class SystemSoundCapture {
         return opened.drain()
     }
 
-    /// 让系统弹出“系统录音”授权框（不在录音时第一次打开开关，spec 用户故事 6）：在后台建一次 tap 和只含 tap 的
-    /// 聚合设备，建好后保留，直到 `releaseAuthorizationPromptHold`。建完马上拆掉的话，授权框还开着，用户之后点的
-    /// “允许”不会被记住（ticket 15）。不录、不写盘，和 start / stop 互不影响。
-    /// 授权框可能在建聚合设备时弹出、等用户回答后才返回，也可能马上返回。建好并保留时返回 true；
+    /// 让系统弹出“系统录音”授权框（不在录音时第一次打开开关，spec 用户故事 6）：在后台建一次 tap、只含 tap 的
+    /// 聚合设备和一个空的 IOProc（不启动），建好后保留，直到 `releaseAuthorizationPromptHold`。授权框在建 IOProc
+    /// 时弹出，只建 tap 和聚合设备不弹；建完马上拆掉的话，授权框还开着，用户之后点的“允许”不会被记住
+    /// （ticket 15）。不录、不写盘，和 start / stop 互不影响。
+    /// 授权未决定时建 IOProc 一直等到用户回答才返回（在后台队列上等，不卡主线程）。建好并保留时返回 true；
     /// 建不起来（只记日志，开始录音时照常按建立失败处理）、或还没建好就被 release 掉时返回 false
     func holdForAuthorizationPrompt() async -> Bool {
         releaseAuthorizationPromptHold()
         let generation = promptGeneration
-        let began = Date()
         do {
-            let created = try await Self.onSetupQueue { try Self.createTapAndAggregate() }
+            let created = try await Self.onSetupQueue {
+                try Self.create(for: "弹出授权框") { _ in { _, _, _, _, _ in } }
+            }
             guard generation == promptGeneration else {
                 Self.setupQueue.async { Self.destroy(created) }
                 log.info("为弹出授权框建的系统声音采集还没建好就不要了，建好后拆掉")
                 return false
             }
             promptHold = created
-            log.info("已为弹出授权框建立系统声音采集并保留，建立用了 \(Self.milliseconds(since: began)) ms")
+            log.info("已为弹出授权框建立系统声音采集（含空 IOProc，不启动）并保留")
             return true
         } catch {
             log.error("为弹出授权框建立系统声音采集失败：\(error.localizedDescription, privacy: .public)")
@@ -144,11 +164,12 @@ final class SystemSoundCapture {
 
     // MARK: - 建立
 
-    /// 后台建好的 tap 和聚合设备
-    private struct Created: Sendable {
+    /// 后台建好的 tap、聚合设备和 IOProc
+    private struct Created: @unchecked Sendable {
         var tapID: AudioObjectID
         var aggregateID: AudioObjectID
         var format: AudioStreamBasicDescription
+        var procID: AudioDeviceIOProcID?
     }
 
     private nonisolated static func onSetupQueue<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
@@ -157,26 +178,10 @@ final class SystemSoundCapture {
         }
     }
 
-    /// 在主线程接着建：写盘模块、IOProc、启动、监听。出错时已建好的部分由调用方 teardown 拆掉
-    private func commit(format asbd: AudioStreamBasicDescription, directory: URL,
-                        onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
-                        onError: @escaping @Sendable (String) -> Void) throws {
+    /// 在主线程接着做：启动、监听。出错时已建好的部分由调用方 teardown 拆掉
+    private func commit(format asbd: AudioStreamBasicDescription) throws {
         var asbd = asbd
         guard let format = AVAudioFormat(streamDescription: &asbd) else { throw SystemSoundCaptureError.unsupportedFormat }
-
-        // host time 只在同一次采集内有效：每次（重新）建立都按此刻重新锚定
-        let opened = opened
-        let writer = SystemSoundWriter(directory: directory, clock: .system(),
-                                       onSegment: { segment in
-                                           opened.append(segment)
-                                           onSegment(segment)
-                                       },
-                                       onError: onError)
-        self.writer = writer
-        try Self.check("创建系统声音回调",
-                       AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue,
-                                                          Self.ioProc(writer: writer, format: format,
-                                                                      level: level, live: live)))
         let starting = Date()
         try Self.check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
         log.info("启动系统声音采集用了 \(Self.milliseconds(since: starting)) ms")
@@ -200,13 +205,25 @@ final class SystemSoundCapture {
         }
     }
 
-    /// 在 setupQueue 上建 tap 和只含它的私有聚合设备，带回 tap 的格式。授权未决定时建聚合设备会一直等到用户
-    /// 回答授权框。出错时把这里已建好的拆掉再抛错。不碰实例状态
-    private nonisolated static func createTapAndAggregate() throws -> Created {
+    /// 在 setupQueue 上建 tap、只含它的私有聚合设备和 IOProc（回调由 block 按 tap 的格式给出，在 ioQueue 上
+    /// 执行；这里不启动），带回 tap 的格式。授权未决定时建 IOProc 会一直等到用户回答授权框。
+    /// purpose 只用于日志。两步的耗时分开记，在这里量，不含在串行队列上排队的时间（授权框在哪一步等用户回答，
+    /// 要靠它在真机上看）。出错时把这里已建好的拆掉再抛错。不碰实例状态
+    private nonisolated static func create(for purpose: String,
+                                           block: (AVAudioFormat) -> AudioDeviceIOBlock) throws -> Created {
         var created = Created(tapID: AudioObjectID(kAudioObjectUnknown),
                               aggregateID: AudioObjectID(kAudioObjectUnknown), format: AudioStreamBasicDescription())
         do {
+            let began = Date()
             try createTapAndAggregate(into: &created)
+            log.info("\(purpose, privacy: .public)：建 tap 和聚合设备用了 \(milliseconds(since: began)) ms")
+            guard let format = AVAudioFormat(streamDescription: &created.format) else {
+                throw SystemSoundCaptureError.unsupportedFormat
+            }
+            let creatingProc = Date()
+            try check("创建系统声音回调",
+                      AudioDeviceCreateIOProcIDWithBlock(&created.procID, created.aggregateID, ioQueue, block(format)))
+            log.info("\(purpose, privacy: .public)：建 IOProc 用了 \(milliseconds(since: creatingProc)) ms")
             return created
         } catch {
             destroy(created)
@@ -240,8 +257,9 @@ final class SystemSoundCapture {
         try check("创建系统声音聚合设备", AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &created.aggregateID))
     }
 
-    /// 拆掉建好的聚合设备和 tap（没建的跳过）
+    /// 拆掉建好的 IOProc、聚合设备和 tap，按建立的反序（没建的跳过）。IOProc 没启动过，不用停
     private nonisolated static func destroy(_ created: Created) {
+        if let procID = created.procID { AudioDeviceDestroyIOProcID(created.aggregateID, procID) }
         if created.aggregateID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(created.aggregateID) }
         if created.tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(created.tapID) }
     }
@@ -256,7 +274,7 @@ final class SystemSoundCapture {
             self.procID = nil
         }
         // 已经派发到队列上的回调执行完，写盘模块才不会在 finish 之后又收到数据、开出没人记的分片
-        ioQueue.sync {}
+        Self.ioQueue.sync {}
         writer?.finish()
         writer = nil
         if aggregateID != kAudioObjectUnknown {

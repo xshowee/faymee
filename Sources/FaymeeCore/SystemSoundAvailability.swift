@@ -91,7 +91,7 @@ public enum SystemSoundUnavailableReason: Equatable, Sendable {
 public enum SystemSoundSwitchOn: Equatable, Sendable {
     /// 已授权：什么都不做
     case nothing
-    /// 未决定：让系统弹出“系统录音”授权框（App 建一次采集，保留到用户回答，不录、不写盘；
+    /// 未决定：让系统弹出“系统录音”授权框（App 建一次采集、含不启动的 IOProc，保留到用户回答，不录、不写盘；
     /// 见 `SystemSoundAuthorizationPrompt`）
     case requestAuthorization
     /// 菜单栏面板提示系统声音不可用。录音前不开不可用时段：还没有会议

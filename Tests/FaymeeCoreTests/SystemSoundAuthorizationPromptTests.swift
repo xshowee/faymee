@@ -28,6 +28,17 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
         #expect(!p.isPending)
     }
 
+    /// 建 IOProc 时卡在授权框上，用户点了按钮才返回（多数情况）：建好后马上查的第一次就有结果，直接拆掉，
+    /// 不再等一秒
+    @Test(arguments: [SystemSoundAuthorization.authorized, .denied])
+    func 建立卡到用户回答时第一次查就拆掉(answer: SystemSoundAuthorization) {
+        var p = SystemSoundAuthorizationPrompt()
+        p.begin()
+        p.held(at: at(5))
+        #expect(p.checked(answer, at: at(5.1)) == .release(answer))
+        #expect(!p.isPending)
+    }
+
     /// 一直没回答（或子进程一直查不到）：从建好起最多保留 120 秒，到时拆掉，按未决定处理（不提示没有授权）。
     /// 建立本身可能卡在授权框上很久，那段不算
     @Test func 一直未决定时建好120秒后拆掉() {
