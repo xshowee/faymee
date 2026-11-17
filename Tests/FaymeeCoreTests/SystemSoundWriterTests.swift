@@ -230,4 +230,37 @@ private final class Harness: @unchecked Sendable {
         #expect(abs(converted.timeIntervalSinceNow) < 0.05)
         #expect(converted.timeIntervalSince(clock.referenceDate) > 0.15)
     }
+
+    /// process tap 的 IOProc 交来的是交错的 32 位浮点 AudioBufferList，帧数由字节数决定。
+    /// 直接交给写盘模块：左右声道不串、帧数不错
+    @Test func IOProc的交错缓冲直接交给写盘模块() throws {
+        let h = Harness()
+        defer { h.cleanUp() }
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 8000, channels: 2, interleaved: true)!
+        let frames = 800
+        var samples = [Float](repeating: 0, count: frames * 2)
+        for i in 0..<frames {
+            samples[2 * i] = 0.5
+            samples[2 * i + 1] = -0.25
+        }
+        let writer = h.writer()
+        samples.withUnsafeMutableBytes { raw in
+            var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(
+                mNumberChannels: 2, mDataByteSize: UInt32(raw.count), mData: raw.baseAddress))
+            writer.push(&list, format: format, hostTime: host(1))
+        }
+        writer.finish()
+
+        #expect(h.segments == [SystemSoundWriter.Segment(file: "0001.caf", startedAt: t0.addingTimeInterval(1),
+                                                         sampleRate: 8000, channels: 2)])
+        let f = try AVAudioFile(forReading: h.directory.appendingPathComponent("0001.caf"),
+                                commonFormat: .pcmFormatFloat32, interleaved: false)
+        let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length))!
+        try f.read(into: b)
+        #expect(Int(b.frameLength) == frames)
+        #expect(Array(UnsafeBufferPointer(start: b.floatChannelData![0], count: frames))
+            == Array(repeating: 0.5, count: frames))
+        #expect(Array(UnsafeBufferPointer(start: b.floatChannelData![1], count: frames))
+            == Array(repeating: -0.25, count: frames))
+    }
 }

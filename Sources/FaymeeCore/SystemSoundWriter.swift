@@ -93,6 +93,13 @@ public final class SystemSoundWriter: @unchecked Sendable {
         queue.async { self.write(copy, hostTime: hostTime) }
     }
 
+    /// IOProc 里调用：把采集交来的 AudioBufferList 按 format 解读（帧数由字节数决定），拷贝、入队
+    public func push(_ bufferList: UnsafePointer<AudioBufferList>, format: AVAudioFormat, hostTime: UInt64) {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: bufferList, deallocator: nil)
+        else { return }
+        push(buffer, hostTime: hostTime)
+    }
+
     /// 写完已入队的音频并关掉当前分片。之后不应再 push
     public func finish() {
         queue.sync { closeSegment() }
