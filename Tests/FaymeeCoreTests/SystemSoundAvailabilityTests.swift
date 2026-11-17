@@ -1,0 +1,124 @@
+import Foundation
+import Testing
+@testable import FaymeeCore
+
+private let t0 = try! Date("2026-11-10T02:00:00Z", strategy: .iso8601)
+
+/// 相对 t0 的墙钟时间
+private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+
+@Suite struct SystemSoundAvailabilityTests {
+    @Test func 授权为拒绝时不建不可用且不重试() {
+        var a = SystemSoundAvailability()
+        let starts = a.shouldStart(authorization: .denied, at: at(0))
+        #expect(!starts)
+        #expect(a.unavailableReason == .notAuthorized)
+        #expect(!a.isRetryDue(at: at(600), deviceChanged: false))
+        #expect(!a.isRetryDue(at: at(600), deviceChanged: true))
+    }
+
+    /// 未决定时由系统弹授权框；查询接口取不到也按未决定处理
+    @Test func 授权为未决定时照常建() {
+        var a = SystemSoundAvailability()
+        let starts = a.shouldStart(authorization: .undetermined, at: at(0))
+        #expect(starts)
+        a.started()
+        #expect(a.isAvailable)
+    }
+
+    @Test func 已授权时建好就可用() {
+        var a = SystemSoundAvailability()
+        let starts = a.shouldStart(authorization: .authorized, at: at(0))
+        #expect(starts)
+        a.started()
+        #expect(a.isAvailable)
+        #expect(!a.awaitsAuthorization)
+    }
+
+    @Test func 建立失败时不可用并定时重试() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.startFailed()
+        #expect(a.unavailableReason == .startFailed)
+        #expect(!a.isRetryDue(at: at(SystemSoundAvailability.retryInterval - 1), deviceChanged: false))
+        #expect(a.isRetryDue(at: at(SystemSoundAvailability.retryInterval), deviceChanged: false))
+    }
+
+    @Test func 重试成功后恢复() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.startFailed()
+        let starts = a.shouldStart(authorization: .authorized, at: at(10))
+        #expect(starts)
+        a.started()
+        #expect(a.isAvailable)
+        #expect(!a.isRetryDue(at: at(100), deviceChanged: true))
+    }
+
+    /// 重试时授权变成了拒绝（同一进程里实测不会变，但每次建之前都查）：改按没有授权处理，不再重试
+    @Test func 重试前查到拒绝时改为没有授权() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.startFailed()
+        let starts = a.shouldStart(authorization: .denied, at: at(10))
+        #expect(!starts)
+        #expect(a.unavailableReason == .notAuthorized)
+        #expect(!a.isRetryDue(at: at(100), deviceChanged: true))
+    }
+
+    @Test func 运行中设备失效时不可用并在设备变化时立即重试() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        a.deviceLost()
+        #expect(a.unavailableReason == .deviceLost)
+        #expect(a.isRetryDue(at: at(60), deviceChanged: true))
+        #expect(a.isRetryDue(at: at(60), deviceChanged: false))
+    }
+
+    /// 私有聚合设备建了又拆会触发设备列表变化：失败后马上又因“设备变化”重试会停不下来
+    @Test func 设备变化触发的重试与上次尝试至少隔开一段时间() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.startFailed()
+        let spacing = SystemSoundAvailability.minimumRetrySpacing
+        #expect(!a.isRetryDue(at: at(spacing - 0.1), deviceChanged: true))
+        #expect(a.isRetryDue(at: at(spacing), deviceChanged: true))
+    }
+
+    /// 没有声音播放时可能完全没有回调，播放过之后没声音时回调全零：这两种都不是输入，
+    /// 建好之后只要设备没失效，过多久都是可用、不重试
+    @Test func 没有回调或回调全零都不判为不可用() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        #expect(a.isAvailable)
+        #expect(!a.isRetryDue(at: at(3600), deviceChanged: false))
+    }
+
+    /// 未决定时建好的 tap 在等用户回答授权框：之后查到拒绝就判为没有授权，要停掉采集
+    @Test func 未决定时建好后查到拒绝改为没有授权() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .undetermined, at: at(0))
+        a.started()
+        #expect(a.awaitsAuthorization)
+        let stopsOnUndetermined = a.authorizationResolved(.undetermined)
+        #expect(!stopsOnUndetermined)
+        #expect(a.awaitsAuthorization)
+        let stopsOnDenied = a.authorizationResolved(.denied)
+        #expect(stopsOnDenied)
+        #expect(a.unavailableReason == .notAuthorized)
+        #expect(!a.awaitsAuthorization)
+        #expect(!a.isRetryDue(at: at(600), deviceChanged: true))
+    }
+
+    @Test func 未决定时建好后查到已授权照常可用() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .undetermined, at: at(0))
+        a.started()
+        let stops = a.authorizationResolved(.authorized)
+        #expect(!stops)
+        #expect(a.isAvailable)
+        #expect(!a.awaitsAuthorization)
+    }
+}

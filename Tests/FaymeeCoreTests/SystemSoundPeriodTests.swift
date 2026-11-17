@@ -73,4 +73,25 @@ private func meeting() -> Meeting {
         #expect(added == [true, false, true])
         #expect(m.systemSoundSegmentList == [first, second])
     }
+
+    /// 系统声音不可用时开一段，恢复后结束；仍不可用时再报一次（重试又失败）不另开一段
+    @Test func 不可用时开一段恢复后结束() {
+        var m = meeting()
+        m.beginSystemSoundPeriod(at: at(0))
+        m.beginSystemSoundUnavailablePeriod(at: at(0))
+        m.beginSystemSoundUnavailablePeriod(at: at(10))
+        m.endSystemSoundUnavailablePeriod(at: at(40))
+        m.endSystemSoundUnavailablePeriod(at: at(50))
+        #expect(m.systemSoundUnavailablePeriodList == [WallClockPeriod(start: at(0), end: at(40))])
+    }
+
+    /// “不可用”只在开关时段内才算：关掉开关时，仍在进行的不可用时段和开关时段同时结束
+    @Test func 关掉开关时不可用时段一起结束() {
+        var m = meeting()
+        m.beginSystemSoundPeriod(at: at(0))
+        m.beginSystemSoundUnavailablePeriod(at: at(0))
+        m.endSystemSoundPeriod(at: at(90))
+        #expect(m.systemSoundPeriodList == [WallClockPeriod(start: at(0), end: at(90))])
+        #expect(m.systemSoundUnavailablePeriodList == [WallClockPeriod(start: at(0), end: at(90))])
+    }
 }
