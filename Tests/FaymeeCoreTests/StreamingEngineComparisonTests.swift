@@ -14,6 +14,9 @@ import Testing
 private let evalAudio = ProcessInfo.processInfo.environment["FAYMEE_STREAM_EVAL"]?
     .split(separator: ",").map { URL(fileURLWithPath: String($0)) } ?? []
 private let evalOutput = ProcessInfo.processInfo.environment["FAYMEE_STREAM_EVAL_OUT"].map { URL(fileURLWithPath: $0) }
+/// 只跑这几个引擎（逗号分隔的引擎名，如 `SpeechAnalyzer`）；不设时全跑
+private let evalEngines = ProcessInfo.processInfo.environment["FAYMEE_STREAM_EVAL_ENGINES"]?
+    .split(separator: ",").map(String.init)
 /// 热词对比用的热词表（同评估 loops.py）
 private let evalHotwords = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场", "模型广场", "端到端研发"]
 
@@ -46,7 +49,7 @@ struct StreamingEngineComparisonTests {
             ("X-ASR-480ms", SherpaStreamingTranscriber(model: .xASR480), []),
             ("X-ASR-960ms", SherpaStreamingTranscriber(model: .xASR960), []),
             ("X-ASR-480ms+热词", SherpaStreamingTranscriber(model: .xASR480), evalHotwords),
-        ]
+        ].filter { evalEngines?.contains($0.0) ?? true }
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
         for (_, engine, _) in engines { try await engine.prepare { _ in } }

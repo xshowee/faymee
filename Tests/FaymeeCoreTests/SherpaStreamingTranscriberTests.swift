@@ -114,6 +114,25 @@ struct SherpaStreamingTranscriberContractTests {
         let text = events.compactMap { if case .sentence(let s) = $0 { s.text } else { nil } }.joined()
         print("带热词：\(text)")
         #expect(text.contains("登录模块"))
+        // 热词起了作用：不带热词时是「对接借口」
+        #expect(!text.contains("对接借口"))
+    }
+
+    /// 热词表是用户随手写的：怪字符、生僻字、表情、纯空白都不能让识别出错或让正常的热词失效
+    @Test func 热词里有怪字符时_照常转且正常的热词仍生效() async throws {
+        let url = try twoSpeakersURL()
+        let engine = SherpaStreamingTranscriber(model: .xASR480)
+        let format = try AVAudioFile(forReading: url).processingFormat
+        let hotwords = ["C#", ":x", "@home", "#tag", "GPT-4o", "3.5", "龘", "🎉", "   ", "a:b", "对接接口"]
+
+        let (events, _) = try await stream(url, into: engine.start(format: format, hotwords: hotwords), pace: .zero)
+
+        let failures = events.compactMap { if case .failed(let reason) = $0 { reason } else { nil } }
+        #expect(failures.isEmpty)
+        let text = events.compactMap { if case .sentence(let s) = $0 { s.text } else { nil } }.joined()
+        print("带怪热词：\(text)")
+        #expect(text.contains("登录模块"))
+        #expect(!text.contains("对接借口"))
     }
 
     @Test func 取消后事件流尽快结束() async throws {
