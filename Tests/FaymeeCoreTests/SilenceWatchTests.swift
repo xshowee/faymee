@@ -66,7 +66,7 @@ private let bothNotice = MeetingNotice(
 
     // MARK: - 开着系统声音
 
-    /// 闭麦旁听线上会议：麦克风一直没声音，系统声音里有人在说话
+    /// 开着系统声音时闭麦旁听：麦克风一直没声音，系统声音里有人在说话
     @Test func 开着系统声音_麦克风没声音但系统声音有就不提醒() {
         var watch = SilenceWatch()
         watch.micLevel(quiet, at: at(0))

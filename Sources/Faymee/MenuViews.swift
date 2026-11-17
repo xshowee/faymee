@@ -243,7 +243,7 @@ private struct UpdateNotice: View {
     }
 }
 
-/// “系统声音”开关：录下本机播放的声音（线上会议里对方的发言）。录音前、录音中都能切换
+/// “系统声音”开关：录下本机播放的声音（会议软件里对方的发言就在其中）。录音前、录音中都能切换
 struct SystemSoundToggle: View {
     @Environment(AppModel.self) private var model
 
