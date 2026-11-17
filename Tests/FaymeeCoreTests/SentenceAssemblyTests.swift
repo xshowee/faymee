@@ -174,13 +174,40 @@ import Testing
         expectSentences(SentenceAssembly.sentences(results), [(5.14, 8.7, "还有年底了。")])
     }
 
-    @Test func 没有逐字时间的模型不去重() {
+    /// 没有逐字时间（Fun-ASR-Nano、Qwen3-ASR）：补边伸进了邻段的说话里时，按文字去重——前一段末尾和后一段开头
+    /// 相同的字（最多 4 个，不算标点）从前一段去掉（真实输出：「…当我们。」「我们搭的那套」）
+    @Test func 没有逐字时间时按文字去掉段边界的重复字() {
         let results = [
-            (first, SegmentRecognition(text: "我们看一下我这里", tokens: nil)),
+            (first, SegmentRecognition(text: "我们看一下，我这里。", tokens: nil)),
             (second, SegmentRecognition(text: "我这里自己搞。", tokens: nil)),
         ]
 
-        #expect(SentenceAssembly.sentences(results).map(\.text) == ["我们看一下我这里", "我这里自己搞。"])
+        #expect(SentenceAssembly.sentences(results).map(\.text) == ["我们看一下。", "我这里自己搞。"])
+    }
+
+    @Test func 没有逐字时间时_相同的字超过4个或不在交界处不去掉() {
+        let five = [
+            (first, SegmentRecognition(text: "我们看一下这里", tokens: nil)),
+            (second, SegmentRecognition(text: "我们看一下这里吧。", tokens: nil)),
+        ]
+        #expect(SentenceAssembly.sentences(five).map(\.text) == ["我们看一下这里", "我们看一下这里吧。"])
+
+        let different = [
+            (first, SegmentRecognition(text: "我们看一下。", tokens: nil)),
+            (second, SegmentRecognition(text: "好的，我们。", tokens: nil)),
+        ]
+        #expect(SentenceAssembly.sentences(different).map(\.text) == ["我们看一下。", "好的，我们。"])
+    }
+
+    @Test func 没有逐字时间时_补边没伸进邻段说话里就不去重() {
+        // 两段之间静音 0.5 秒：补边只在静音里重叠，交界处相同的字是真说了两遍
+        let a = SpeechSegment(audio: 0..<85_600, speech: 0..<80_800)        // 说话 0–5.05
+        let b = SpeechSegment(audio: 84_000..<144_000, speech: 88_800..<139_200) // 说话 5.55–8.7
+        let results = [
+            (a, SegmentRecognition(text: "对。", tokens: nil)),
+            (b, SegmentRecognition(text: "对，可以。", tokens: nil)),
+        ]
+        #expect(SentenceAssembly.sentences(results).map(\.text) == ["对。", "对，可以。"])
     }
 
     @Test func 空结果和只有标点的结果不出句子() {

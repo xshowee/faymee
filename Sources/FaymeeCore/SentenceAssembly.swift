@@ -36,7 +36,7 @@ public struct SegmentRecognition: Hashable, Sendable {
 ///   只按句末标点断句
 /// - 没有真实逐字时间：每个字（不算标点和空白）在说话部分里等分时间，同样只按句末标点断句
 /// - 标点不占时间：接在前一个字的结尾
-/// - 有真实逐字时间时去掉段边界的重复字（见 `droppingOverlapDuplicates`）
+/// - 去掉段边界的重复字：有真实逐字时间时按时间，没有时按文字（见 `droppingOverlapDuplicates`）
 enum SentenceAssembly {
     typealias Result = (segment: SpeechSegment, recognition: SegmentRecognition)
 
@@ -54,14 +54,25 @@ enum SentenceAssembly {
     /// 做法：前一段末尾从后一段音频开头（再早 `twinTolerance`）起的字里，找第一个在后一段开头（前一段音频结束前）
     /// 有“孪生”的字——同一个字、开始时间相差不超过 `twinTolerance`；从它起去掉前一段剩下的字（前一段在这里被截断，
     /// 末尾常是半个字，如「到时候会总」对「到时候会准备」；后一段对这块有完整的上下文）。
-    /// 去掉后留在末尾的非句末标点（逗号等）一起去掉。两段都要有能对上文字的逐字时间，否则不动
+    /// 去掉后留在末尾的非句末标点（逗号等）一起去掉。
+    ///
+    /// 没有逐字时间（Fun-ASR-Nano、Qwen3-ASR，时间是估算的）时按文字去重：只在补边伸进了邻段的说话部分时
+    /// （只在静音里重叠的话，交界处相同的字更可能是真说了两遍），前一段末尾和后一段开头相同的字
+    /// （最多 `maxTextTwins` 个，不算标点）从前一段去掉。三场真实会议里 Fun-ASR-Nano 有约 11 处这样的重复
+    /// （「…当我们。」「我们搭的那套」）。代价：交界处真实的重复（「对。」「对，」）会少一个
     static func droppingOverlapDuplicates(_ results: [Result]) -> [Result] {
         let rate = Double(SpeechSegmentation.sampleRate)
         var out = results
         for i in out.indices.dropLast() {
             let a = out[i], b = out[i + 1]
-            guard a.segment.audio.upperBound > b.segment.audio.lowerBound,
-                  let tail = timedCharacters(a), let head = timedCharacters(b) else { continue }
+            guard a.segment.audio.upperBound > b.segment.audio.lowerBound else { continue }
+            guard let tail = timedCharacters(a), let head = timedCharacters(b) else {
+                if a.segment.audio.upperBound > b.segment.speech.lowerBound
+                    || b.segment.audio.lowerBound < a.segment.speech.upperBound {
+                    out[i].recognition = droppingTextTwins(of: a.recognition, before: b.recognition)
+                }
+                continue
+            }
             let bStart = Double(b.segment.audio.lowerBound) / rate
             let aEnd = Double(a.segment.audio.upperBound) / rate
             let candidates = head.filter { $0.start < aEnd }
@@ -75,6 +86,21 @@ enum SentenceAssembly {
         return out
     }
 
+    /// 按文字去重时最多去掉几个字（补边重叠最多约 0.5 秒）
+    static let maxTextTwins = 4
+
+    /// 前一段末尾与后一段开头相同的字（不分大小写，最多 `maxTextTwins` 个，取最长）从前一段去掉；逐字时间不留
+    private static func droppingTextTwins(of first: SegmentRecognition, before second: SegmentRecognition)
+        -> SegmentRecognition {
+        let tail = units(first.text).filter(\.isContent).map { $0.character.lowercased() }
+        let head = units(second.text).filter(\.isContent).map { $0.character.lowercased() }
+        for k in stride(from: min(maxTextTwins, tail.count, head.count), through: 1, by: -1)
+        where tail.suffix(k).elementsEqual(head.prefix(k)) {
+            return keeping(tail.count - k, of: first, starts: nil)
+        }
+        return first
+    }
+
     /// 文字里每个字（不算标点和空白，小写）和它的开始时间（相对录音开头）；没有逐字时间或对不上时为 nil
     private static func timedCharacters(_ result: Result) -> [(character: String, start: TimeInterval)]? {
         let content = units(result.recognition.text).filter(\.isContent).map(\.character)
@@ -85,8 +111,8 @@ enum SentenceAssembly {
     }
 
     /// 只留前 `count` 个字（和它们之间的标点、空白），末尾的非句末标点去掉；原文以句末标点结尾而留下的部分没有，
-    /// 把它接上（「我这里，我这里。」→「我这里。」）。逐字时间换成每字一个
-    private static func keeping(_ count: Int, of result: SegmentRecognition, starts: [TimeInterval]) -> SegmentRecognition {
+    /// 把它接上（「我这里，我这里。」→「我这里。」）。逐字时间换成每字一个（`starts` 为 nil 时不留）
+    private static func keeping(_ count: Int, of result: SegmentRecognition, starts: [TimeInterval]?) -> SegmentRecognition {
         let all = units(result.text)
         var kept: [(text: String, character: Character, isContent: Bool)] = []
         var n = 0
@@ -106,7 +132,7 @@ enum SentenceAssembly {
         }
         let characters = kept.filter(\.isContent)
         return SegmentRecognition(text: kept.map(\.text).joined(),
-                                  tokens: zip(characters, starts).map { .init(text: String($0.character), start: $1) })
+                                  tokens: starts.map { zip(characters, $0).map { .init(text: String($0.character), start: $1) } })
     }
 
     private static func sentences(in segment: SpeechSegment, _ result: SegmentRecognition) -> [TranscribedSentence] {
