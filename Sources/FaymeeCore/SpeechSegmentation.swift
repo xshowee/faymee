@@ -15,7 +15,8 @@ public struct SpeechSegment: Hashable, Sendable {
 
 /// 静音切段的后处理（sherpa 整段模型共用）：VAD 说话段前后补边，再把太长的段切开。
 ///
-/// - 补边：VAD 判定的段首段尾常常比真正开口、收声晚一点、早一点（实测 0.1–0.2 秒），前后各多带 0.3 秒避免丢字
+/// - 补边：VAD 判定的段首段尾常常比真正开口、收声晚一点、早一点（实测 0.1–0.2 秒），前后各多带 0.3 秒避免丢字；
+///   但不越过相邻的说话段（真实会议里两段常常只隔约 0.07 秒，补过去会让段边界的字识别两遍）
 /// - 硬上限 10 秒（按补边后送进识别器的长度算）：Fun-ASR-Nano / Qwen3-ASR 的上下文装不下更长的音频，会整段缺字
 ///   甚至为空；VAD 自带的 `max_speech_duration` 不是硬上限。超过的段在 6–10 秒之间找能量最低的 0.1 秒，
 ///   从它中点切开，循环到每段 ≤ 10 秒。切点处不补边（补了会让两段重复识别同一个字）
@@ -33,8 +34,12 @@ enum SpeechSegmentation {
 
     /// VAD 说话段（按时间先后、互不重叠）→ 送进识别器的段
     static func segments(speech: [Range<Int>], samples: [Float]) -> [SpeechSegment] {
-        speech.flatMap { raw -> [SpeechSegment] in
-            let audio = max(0, raw.lowerBound - padding)..<min(samples.count, raw.upperBound + padding)
+        speech.indices.flatMap { i -> [SpeechSegment] in
+            let raw = speech[i]
+            // 补边不越过相邻说话段：VAD 强行断开的两段之间只有很短的间隙，补过去两段会重复识别同几个字
+            let floor = i > speech.startIndex ? speech[i - 1].upperBound : 0
+            let ceiling = i + 1 < speech.endIndex ? speech[i + 1].lowerBound : samples.count
+            let audio = max(0, floor, raw.lowerBound - padding)..<min(samples.count, ceiling, raw.upperBound + padding)
             return cut(audio, samples: samples).compactMap { piece in
                 let lower = max(piece.lowerBound, raw.lowerBound)
                 let upper = min(piece.upperBound, raw.upperBound)
