@@ -29,6 +29,12 @@ public final class VoiceprintModelBinding {
         return (engine.diarizer, engine.voiceprintThreshold)
     }
 
+    /// 所选模型的声纹提取（重算声纹库用）；所选模型现在不能用时为 nil
+    public func makeExtractor() -> (any VoiceprintExtractor)? {
+        SherpaOnnxDiarizer.engine(for: selections.selected(for: .voiceprint), bundleResources: bundleResources,
+                                  modelsRoot: downloads.directory).diarizer
+    }
+
     /// 开始同步：记下管线现在用的模型，之后选择或下载状态变化时换引擎
     public func bind(_ pipeline: TranscriptionPipeline) {
         self.pipeline = pipeline

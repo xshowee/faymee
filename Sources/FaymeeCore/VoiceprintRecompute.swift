@@ -83,6 +83,20 @@ public struct VoiceprintRecomputeReport: Hashable, Sendable {
     }
 }
 
+extension VoiceprintRecomputeReport {
+    /// 结束后在设置里显示的说明，一行一条：先总数，再逐个列出受影响的人
+    public var summary: [String] {
+        let head = isCancelled ? "已取消，已重算的 \(recomputed) 人保留。再点“重算声纹库”接着算剩下的"
+            : "已用新模型重算 \(recomputed) 人"
+        return [head] + affected.map { a in
+            var seen = Set<String>()
+            let reasons = a.unrecomputable.map(\.text).filter { seen.insert($0).inserted }.joined(separator: "、")
+            return a.keptOldModel ? "\(a.name)：样本都无法重算（\(reasons)），需要在会议里重新登记"
+                : "\(a.name)：\(a.unrecomputable.count) 个样本无法重算，已去掉（\(reasons)）"
+        }
+    }
+}
+
 /// 样本无法重算的原因
 public enum VoiceprintRecomputeFailure: Error, Hashable, Sendable {
     /// 来源会议已删除

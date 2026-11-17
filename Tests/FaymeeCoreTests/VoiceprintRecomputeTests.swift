@@ -331,3 +331,23 @@ private final class Progress: @unchecked Sendable {
         #expect(try f.voiceprints.load().people[0].voiceprintModel == "old/vp")
     }
 }
+
+@Suite struct 重算结果的说明 {
+    @Test func 列出受影响的人和原因() {
+        let report = VoiceprintRecomputeReport(recomputed: 2, affected: [
+            .init(personID: "p1", name: "张三", unrecomputable: [.meetingDeleted, .meetingDeleted], keptOldModel: true),
+            .init(personID: "p2", name: "李四", unrecomputable: [.meetingDeleted, .speakerNotFound], keptOldModel: false),
+        ], isCancelled: false)
+
+        #expect(report.summary == [
+            "已用新模型重算 2 人",
+            "张三：样本都无法重算（来源会议已删除），需要在会议里重新登记",
+            "李四：2 个样本无法重算，已去掉（来源会议已删除、在来源会议里找不到这个人）",
+        ])
+    }
+
+    @Test func 取消时说明已重算的保留() {
+        #expect(VoiceprintRecomputeReport(recomputed: 1, affected: [], isCancelled: true).summary
+            == ["已取消，已重算的 1 人保留。再点“重算声纹库”接着算剩下的"])
+    }
+}

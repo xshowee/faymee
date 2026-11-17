@@ -207,7 +207,7 @@ struct TranscriptSection: View {
 
     private func voiceprintActions(_ transcript: Transcript) -> VoiceprintActions {
         let library = model.voiceprints.library
-        let current = model.transcription.voiceprintModel
+        let current = model.selectedVoiceprintModel
         return VoiceprintActions(
             enrollment: { speaker in
                 library.enrollmentOption(speaker: speaker.id, in: transcript, meetingID: meeting.id,
@@ -251,7 +251,7 @@ struct TranscriptSection: View {
         guard let speaker = edited.speaker(id) else { return }
         let option = model.voiceprints.library.enrollmentOption(
             speaker: id, in: edited, meetingID: meeting.id,
-            currentVoiceprintModel: model.transcription.voiceprintModel)
+            currentVoiceprintModel: model.selectedVoiceprintModel)
         enrollOffer = option.isEnabled
             ? EnrollOffer(speakerID: id, name: speaker.displayName, title: option.title) : nil
     }

@@ -66,7 +66,7 @@ struct VoiceprintsView: View {
     var body: some View {
         let voiceprints = model.voiceprints
         let people = voiceprints.library.people
-        let currentModel = model.transcription.voiceprintModel
+        let currentModel = model.selectedVoiceprintModel
 
         VStack(alignment: .leading, spacing: 8) {
             Text("登记过的人会在之后的会议里被自动认出。声纹只存在这台 Mac 上，只在你在会议里点“记住这个声音”时登记。")
@@ -88,7 +88,7 @@ struct VoiceprintsView: View {
                 List(people, id: \.id) { person in
                     VoiceprintPersonRow(
                         person: person,
-                        // 没有区分引擎时不知道当前模型，不标
+                        // 与设置里所选声纹模型不同的人不参与识别：重算声纹库或重新登记
                         needsReenrollment: currentModel.map(person.needsReenrollment(voiceprintModel:)) ?? false,
                         onRename: { beginRename(person) },
                         onDelete: { deleting = person })

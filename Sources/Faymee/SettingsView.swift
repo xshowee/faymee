@@ -70,6 +70,10 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                ModelPicker(role: .voiceprint, title: "声纹模型",
+                            deleteBlockedReason: { _ in model.voiceprintModelDeleteBlockedReason })
+                VoiceprintRecomputeControls()
             }
 
             Section("纪要") {
@@ -382,4 +386,60 @@ private struct UpdateSettings: View {
     }
 
     private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+}
+
+/// 「声纹」一节里的重算声纹库：所选声纹模型与声纹库里有人的模型不同时说明人数、给出按钮；
+/// 进行中显示进度和取消；结束后列出结果和受影响的人
+private struct VoiceprintRecomputeControls: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let recomputation = model.voiceprintRecomputation
+        let selected = model.selectedVoiceprintModel
+        let pending = selected.map { model.voiceprints.library.peopleNeedingReenrollment(voiceprintModel: $0) } ?? []
+
+        switch recomputation.state {
+        case let .running(done, total):
+            LabeledContent("重算声纹库") {
+                HStack {
+                    ProgressView(value: total > 0 ? Double(done) / Double(total) : 0)
+                        .frame(width: 120)
+                    Text("\(done) / \(total) 个样本")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("取消") { recomputation.cancel() }
+                }
+            }
+        default:
+            if !pending.isEmpty {
+                // 所选模型要下载、还没下好时不能重算（ModelPicker 里有下载按钮）
+                let ready = model.selectedVoiceprintModelIsReady
+                LabeledContent("已登记的 \(pending.count) 人需要用新模型重算") {
+                    Button("重算声纹库") { model.recomputeVoiceprints() }
+                        .disabled(!ready)
+                }
+                Text(ready
+                     ? "从这些人登记时的会议录音里取他们的发言，用所选模型重新算声纹。重算前他们不参与识别"
+                     : "所选声纹模型下载好后才能重算。重算前这些人不参与识别")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        switch recomputation.state {
+        case let .finished(report):
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(report.summary.enumerated()), id: \.offset) { _, line in Text(line) }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        case let .failed(message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        default:
+            EmptyView()
+        }
+    }
 }

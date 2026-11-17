@@ -136,6 +136,36 @@ final class AppModel {
     @ObservationIgnored private(set) lazy var voiceprintModel = VoiceprintModelBinding(
         selections: modelSelections, downloads: modelDownloads, bundleResources: Bundle.main.resourceURL)
 
+    /// 设置里的「重算声纹库」：换声纹模型后用新模型从原会议录音重算。每写回一个人，声纹库界面跟着重读
+    @ObservationIgnored private(set) lazy var voiceprintRecomputation: VoiceprintRecomputation = {
+        let r = VoiceprintRecomputation(voiceprints: voiceprints.store, meetings: store)
+        r.onLibraryChange = { [weak self] in self?.voiceprints.reload() }
+        return r
+    }()
+
+    /// 设置里选中的声纹模型 id。声纹库里模型与它不同的人不参与识别、需要重算或重新登记
+    var selectedVoiceprintModel: String? { modelSelections.selectedID(for: .voiceprint) }
+
+    /// 所选声纹模型能不能用（打进 App 的总能用，需要下载的看是否下好）
+    var selectedVoiceprintModelIsReady: Bool {
+        guard let selected = modelSelections.selected(for: .voiceprint) else { return false }
+        // 读下载器的状态（可观察），下载完成时界面跟着变
+        return modelDownloads.downloader(for: selected)?.isReady ?? modelDownloads.isReady(selected)
+    }
+
+    /// 声纹模型现在不能删的原因：正在转写（可能接着区分说话人）或重算声纹库时，引擎还要读模型文件
+    var voiceprintModelDeleteBlockedReason: String? {
+        if voiceprintRecomputation.isRunning { return "正在重算声纹库，结束后才能删除模型" }
+        if transcription.activeID != nil { return "正在转写或区分说话人，结束后才能删除模型" }
+        return nil
+    }
+
+    /// 用所选声纹模型重算声纹库；所选模型还不能用（没下载）时什么都不做
+    func recomputeVoiceprints() {
+        guard let extractor = voiceprintModel.makeExtractor() else { return }
+        voiceprintRecomputation.start(with: extractor)
+    }
+
     /// 选中的纪要模型的下载器（详情页纪要等模型时显示它）。只在用户点“下载”时开始；
     /// 下载完成或删除模型时通知纪要管线（见 init）
     var modelDownloader: ModelDownloader {

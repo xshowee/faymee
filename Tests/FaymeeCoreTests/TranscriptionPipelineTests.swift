@@ -1690,6 +1690,26 @@ private final class Library {
         #expect(try f.store.loadTranscript("m1")?.diarization?.voiceprintModel == "fake/voiceprint")
     }
 
+    @Test func 运行期去掉区分引擎_已排队的只区分说话人记为失败并说明原因() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(diarizer: old)
+        f.addTranscribedMeeting("m1")
+        f.addTranscribedMeeting("m2")
+        f.pipeline.enqueueDiarization("m1")
+        f.pipeline.enqueueDiarization("m2")
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7)
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m2"]?.diarization
+            == DiarizationState(status: .failed, error: "所选声纹模型还不能用，下载好后再区分说话人"))
+        #expect(old.calls.count == 1)
+    }
+
     @Test func 运行期去掉区分引擎_进行中的完整转写照常写上说话人() async throws {
         let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
         old.block = true
