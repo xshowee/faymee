@@ -70,7 +70,7 @@ public final class OnlineEngineCoordinator {
     }
 
     /// 绑定管线并订阅配置变化；调用前管线应已按当前 `settings` 初始化，避免启动时重复创建引擎。
-    /// 会后转写模型的下载器的 `onAvailabilityChange` 由这里占用（含还隐藏的目录项）
+    /// 订阅会后转写模型（含还隐藏的目录项）下载器的可用性变化
     public func bind(transcription: TranscriptionPipeline, minutes: MinutesPipeline) {
         self.transcription = transcription
         self.minutes = minutes
@@ -84,7 +84,7 @@ public final class OnlineEngineCoordinator {
         }
         if let downloads {
             for model in downloads.catalog.models where model.roles.contains(.transcription) {
-                downloads.downloader(for: model)?.onAvailabilityChange = { [weak self] in
+                downloads.downloader(for: model)?.observeAvailability { [weak self] in
                     self?.transcriptionModelAvailabilityChanged()
                 }
             }

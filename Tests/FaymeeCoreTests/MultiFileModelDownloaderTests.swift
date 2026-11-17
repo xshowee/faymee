@@ -191,8 +191,10 @@ private final class Fixture {
         let d = f.downloader()
         d.start()
         await d.waitUntilFinished()
-        var changes = 0
-        d.onAvailabilityChange = { changes += 1 }
+        // 几处都要知道（会后转写管线、纪要管线、声纹绑定）：每个订阅的都通知到，后订阅的不顶掉先订阅的
+        var changes = 0, others = 0
+        d.observeAvailability { changes += 1 }
+        d.observeAvailability { others += 1 }
 
         try await d.delete()
 
@@ -201,6 +203,7 @@ private final class Fixture {
         #expect(!f.exists(asrModel.directory(in: f.root)))
         #expect(f.exists(f.root))
         #expect(changes == 1)
+        #expect(others == 1)
     }
 
     @Test func 辅助模型随主模型一起下载_一起算进度() async {

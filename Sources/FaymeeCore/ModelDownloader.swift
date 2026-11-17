@@ -59,9 +59,8 @@ public final class ModelDownloader {
     public private(set) var phase: ModelDownloadPhase = .notDownloaded
     /// 已下载到本地的字节数（所有文件合计，含之前中断留下的）
     public private(set) var receivedBytes: Int64 = 0
-    /// 模型变得可用（下载完成）或不再可用（删除）时调用。App 在这里通知排队的管线。
-    /// 按磁盘上的文件判断，变了就调用：取消时恰好下完、改名到位的也算
-    @ObservationIgnored public var onAvailabilityChange: (() -> Void)?
+    /// 模型变得可用（下载完成）或不再可用（删除）时要通知的（`observeAvailability`）
+    @ObservationIgnored private var availabilityObservers: [() -> Void] = []
     /// 删除 / 取消时，这个辅助模型要不要留着（还有别的已下载模型依赖它）。由 `ModelDownloads` 设置
     @ObservationIgnored public var keepsDependency: (LocalModel) -> Bool = { _ in false }
 
@@ -85,6 +84,13 @@ public final class ModelDownloader {
     public var isReady: Bool { phase == .ready }
     public var isRunning: Bool { phase == .downloading || phase == .verifying }
     public var progress: Double { totalBytes > 0 ? Double(receivedBytes) / Double(totalBytes) : 0 }
+
+    /// 模型变得可用（下载完成）或不再可用（删除）时调用 `handler`，App 在这里通知排队的管线。
+    /// 按磁盘上的文件判断，变了就调用：取消时恰好下完、改名到位的也算。
+    /// 可以有多个：同一份模型可能有几处在等（会后转写和声纹各自的管线、纪要管线），各自订阅，互不顶掉
+    public func observeAvailability(_ handler: @escaping () -> Void) {
+        availabilityObservers.append(handler)
+    }
 
     /// 开始或继续下载（也用于“重试”）。已就绪、正在下载时什么都不做
     public func start() {
@@ -184,7 +190,7 @@ public final class ModelDownloader {
             let unfinished = allModels.filter { !$0.isDownloaded(in: directory) }
             phase = bytesOnDisk(unfinished, in: directory) > 0 ? .paused : .notDownloaded
         }
-        if isReady != wasReady { onAvailabilityChange?() }
+        if isReady != wasReady { availabilityObservers.forEach { $0() } }
     }
 
     private func report(_ event: DownloadJob.Event, token: Int) {

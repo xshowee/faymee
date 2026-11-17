@@ -6,7 +6,7 @@ import Foundation
 /// - 所选模型需要下载但没下完时管线没有区分引擎、在等它（spec「切换的语义」）：区分说话人排队「等待下载声纹模型」，
 ///   转写照常；下载完成时换上引擎，排队的自动开始
 /// - 打进 App 的文件不在（`swift run` 等）时没有引擎、也不等：之后的完整转写跳过区分说话人，不能单独区分
-/// - 声纹类模型只有「声纹」一个用途，它们下载器的 `onAvailabilityChange` 由这里占用
+/// - 订阅声纹模型下载器的可用性变化（`ModelDownloader.observeAvailability`）
 @MainActor
 public final class VoiceprintModelBinding {
     private let selections: ModelSelections
@@ -50,7 +50,7 @@ public final class VoiceprintModelBinding {
         // 看有没有引擎，不看 canDiarize：等下载时 canDiarize 也为 true，下好时就看不出变化了
         applied = (selections.selectedID(for: .voiceprint), pipeline.voiceprintModel != nil)
         for model in downloads.catalog.models(for: .voiceprint) {
-            downloads.downloader(for: model)?.onAvailabilityChange = { [weak self] in self?.sync() }
+            downloads.downloader(for: model)?.observeAvailability { [weak self] in self?.sync() }
         }
         selections.observe { [weak self] role in
             if role == .voiceprint { self?.sync() }

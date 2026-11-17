@@ -108,14 +108,14 @@ private final class Fixture {
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
-    /// 接上纪要管线，接法同 AppModel：下载器的 onAvailabilityChange 调 modelAvailabilityChanged()，
+    /// 接上纪要管线，接法同 AppModel：下载器的可用性变化（observeAvailability）调 modelAvailabilityChanged()，
     /// 并排进一场转写好的会议
     func makePipeline() -> (MinutesPipeline, FakeHost) {
         let store = MeetingStore(root: directory.appendingPathComponent("Meetings", isDirectory: true))
         let host = FakeHost()
         let pipeline = MinutesPipeline(store: store, generator: DiskBackedGenerator(model: model, directory: directory),
                                        model: model.id, host: host)
-        downloader.onAvailabilityChange = { pipeline.modelAvailabilityChanged() }
+        downloader.observeAvailability { pipeline.modelAvailabilityChanged() }
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         var m = Meeting(id: "m1", title: "产品周会", startedAt: start, endedAt: start + 600, status: .done,
                         recording: "recording.m4a", duration: 600)

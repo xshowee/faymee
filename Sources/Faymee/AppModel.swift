@@ -366,7 +366,7 @@ final class AppModel {
         // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”。
         // 每个纪要模型的下载器都接上：管线只看当前引擎的模型在不在
         for entry in modelSelections.catalog.models(for: .minutes) {
-            modelDownloads.downloader(for: entry)?.onAvailabilityChange = { [weak self] in
+            modelDownloads.downloader(for: entry)?.observeAvailability { [weak self] in
                 self?.minutes.modelAvailabilityChanged()
             }
         }
