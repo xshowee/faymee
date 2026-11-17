@@ -43,6 +43,8 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
     /// 模型是下载来的（坏了要重新下载），不是打进 App 的（坏了要重装）
     private let isDownloaded: Bool
     private let threads: Int32
+    /// 按句聚类自动判断人数的阈值（和声纹模型相关）
+    let clusteringThreshold: Double
     private let lock = NSLock()
     private var verified = false
     /// 串行：同一时刻只跑一次区分（每次要占 CPU 和与录音时长成正比的内存）
@@ -55,8 +57,10 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
     }
 
     /// 任意单文件的声纹模型（sherpa-onnx 声纹提取器认得的格式：3D-Speaker / WeSpeaker / NeMo）
-    init(modelURL: URL, file: ModelFile, voiceprintModel: String, isDownloaded: Bool, threads: Int = 4) {
+    init(modelURL: URL, file: ModelFile, voiceprintModel: String, isDownloaded: Bool,
+         clusteringThreshold: Double = SentenceClustering.defaultThreshold, threads: Int = 4) {
         self.modelURL = modelURL
+        self.clusteringThreshold = clusteringThreshold
         modelFile = file
         self.voiceprintModel = voiceprintModel
         self.isDownloaded = isDownloaded
@@ -186,7 +190,7 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
                 embedded.map {
                     SentenceClustering.Item(vector: $0.vector, duration: $0.range.upperBound - $0.range.lowerBound)
                 },
-                speakerCount: speakerCount)
+                speakerCount: speakerCount, threshold: clusteringThreshold)
             progress.report(1)
             return Self.result(embedded, labels: labels, dim: dim)
         }
@@ -311,7 +315,8 @@ extension SherpaOnnxDiarizer {
     /// 引擎为 nil 表示现在没法用：没选、不是声纹家族、打进 App 的文件不在（直接 `swift run` 没打包）、
     /// 需要下载的还没下完（只看大小，哈希在 `prepare` 时校验），或打进 App 的文件不是已知的（没有哈希可校验）。
     /// 阈值取目录项的 `matchThreshold`（「声纹」用途的目录项一定带，`CatalogModel.init` 里查）；
-    /// 没选或不是声纹模型时没有引擎，阈值用不上，给 `VoiceprintLibrary.defaultMatchThreshold`
+    /// 没选或不是声纹模型时没有引擎，阈值用不上，给 `VoiceprintLibrary.defaultMatchThreshold`。
+    /// 聚类阈值取 `clusteringThreshold`，没写时用 `SentenceClustering.defaultThreshold`
     /// - Parameters:
     ///   - bundleResources: App 的 `Contents/Resources`（`Bundle.main.resourceURL`）
     ///   - modelsRoot: 下载模型的根目录（`LocalModel.defaultDirectory`）
@@ -321,6 +326,7 @@ extension SherpaOnnxDiarizer {
               let threshold = model.parameters.matchThreshold else {
             return (nil, VoiceprintLibrary.defaultMatchThreshold)
         }
+        let clustering = model.parameters.clusteringThreshold ?? SentenceClustering.defaultThreshold
         switch model.source {
         case .system:
             return (nil, threshold)
@@ -331,14 +337,15 @@ extension SherpaOnnxDiarizer {
             let url = bundleResources.appendingPathComponent(directory, isDirectory: true)
                 .appendingPathComponent(fileName)
             guard fileHasSize(url, file.size) else { return (nil, threshold) }
-            return (SherpaOnnxDiarizer(modelURL: url, file: file, voiceprintModel: model.id, isDownloaded: false),
-                    threshold)
+            return (SherpaOnnxDiarizer(modelURL: url, file: file, voiceprintModel: model.id, isDownloaded: false,
+                                       clusteringThreshold: clustering), threshold)
         case let .download(local):
             // 声纹模型是单个 onnx 文件
             guard local.files.count == 1, local.isDownloaded(in: modelsRoot) else { return (nil, threshold) }
             let file = local.files[0]
             return (SherpaOnnxDiarizer(modelURL: local.url(of: file, in: modelsRoot), file: file,
-                                       voiceprintModel: model.id, isDownloaded: true), threshold)
+                                       voiceprintModel: model.id, isDownloaded: true, clusteringThreshold: clustering),
+                    threshold)
         }
     }
 }

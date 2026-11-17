@@ -172,6 +172,28 @@ struct SherpaOnnxDiarizerContractTests {
         #expect(agreement(result.segments) >= 0.9)
     }
 
+    /// 聚类阈值随模型：目录项写了 `clusteringThreshold` 就按它判断人数（-1 时任何两组都够像，全并成一人）
+    @Test func 目录项的聚类阈值_决定自动判断的人数() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = SherpaOnnxDiarizer.embeddingModel
+        let local = LocalModel(id: "test/downloaded-eres2net", directoryName: "downloaded-eres2net", files: [
+            ModelFile(path: base.path, size: base.size, sha256: base.sha256,
+                      downloadURLs: [URL(string: "https://example.com/\(base.path)")!]),
+        ])
+        try FileManager.default.createDirectory(at: local.directory(in: root), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.path), to: local.url(in: root))
+        let entry = CatalogModel(id: local.id, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
+                                 source: .download(local), name: "下载的",
+                                 parameters: ModelParameters(matchThreshold: 0.6, clusteringThreshold: -1))
+
+        let diarizer = try #require(SherpaOnnxDiarizer.engine(for: entry, bundleResources: nil, modelsRoot: root).diarizer)
+        let result = try await diarizer.diarize(audio: try resource("two-speakers-zh"), sentences: allSentences,
+                                                speakerCount: nil) { _ in }
+
+        #expect(Set(result.segments.map(\.speaker)) == [0])
+    }
+
     /// 重算声纹库：按句子分组算声纹，与区分时同一人的声纹一致；太短算不出的组为 nil
     @Test func 按组算声纹_与区分结果里同一人的声纹一致() async throws {
         let engine = SherpaOnnxDiarizer(modelDirectory: modelDirectory)

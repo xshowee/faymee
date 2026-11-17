@@ -83,16 +83,20 @@ public struct ModelParameters: Sendable, Hashable {
     public var hotwordTokenBudget: Int?
     /// 声纹库匹配阈值（余弦相似度）。阈值和模型相关，「声纹」用途的目录项必须带上自己的（`CatalogModel.init` 里查）
     public var matchThreshold: Float?
+    /// 区分说话人按句聚类的停止阈值（平均余弦相似度），和声纹模型相关；nil 用 `SentenceClustering.defaultThreshold`
+    /// （按 ERes2Net base 校的）
+    public var clusteringThreshold: Double?
     /// 纪要模型的分段参数（每次调用留多少给输出）；nil 用 `MinutesChunking.standard`
     public var minutesChunking: MinutesChunking?
     /// 纪要模型是否开思考模式；nil 是不开
     public var thinking: Bool?
 
     public init(contextTokens: Int? = nil, hotwordTokenBudget: Int? = nil, matchThreshold: Float? = nil,
-                minutesChunking: MinutesChunking? = nil, thinking: Bool? = nil) {
+                clusteringThreshold: Double? = nil, minutesChunking: MinutesChunking? = nil, thinking: Bool? = nil) {
         self.contextTokens = contextTokens
         self.hotwordTokenBudget = hotwordTokenBudget
         self.matchThreshold = matchThreshold
+        self.clusteringThreshold = clusteringThreshold
         self.minutesChunking = minutesChunking
         self.thinking = thinking
     }
