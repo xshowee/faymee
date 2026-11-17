@@ -95,7 +95,7 @@ final class AppModel {
     /// 正在合盖、用的又是内置麦克风：此刻没有在录到声音
     var isLidGapOpen: Bool { current?.openGap != nil }
 
-    @ObservationIgnored let store = MeetingStore()
+    @ObservationIgnored let store: MeetingStore
     /// 自动更新。录音、整理期间推迟重启，由 syncTranscriptionSuspension 同步忙闲
     @ObservationIgnored let updater = AppUpdater()
     /// 声纹库。界面（说话人菜单、声纹管理窗口）经它读写；转写管线识别时自己读盘
@@ -128,8 +128,10 @@ final class AppModel {
     /// 本机模型目录里需要下载的模型的下载器，每个模型一个（`ModelPicker` 和各管线共用）
     @ObservationIgnored let modelDownloads = ModelDownloads(directory: LocalModel.defaultDirectory,
                                                             transport: URLSessionModelTransport())
-    /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定
-    @ObservationIgnored private(set) var modelSelections: ModelSelections!
+    /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定。
+    /// 转写、纪要管线和声纹模型（lazy）都读它，而 meetings 的 didSet 在 init 里就会建出这些管线：
+    /// 必须是没有默认值的 let，编译器才保证它在 self 能被用到（任何 didSet、lazy 跑起来）之前已经赋值
+    @ObservationIgnored let modelSelections: ModelSelections
 
     /// 设置里「声纹」选中的模型 → 转写管线的区分引擎和匹配阈值。打进 App 的模型由 build.sh 拷进
     /// Contents/Resources；直接 swift run（没打包）时没有，不区分说话人
@@ -321,6 +323,11 @@ final class AppModel {
     }()
 
     init() {
+        // 先读会议目录、定好各用途的模型，再做别的：已有安装的判断要看会议，而 meetings 一赋值就会建管线
+        let store = MeetingStore()
+        let loadedMeetings = store.loadAll()
+        self.store = store
+        modelSelections = .atLaunch(meetings: loadedMeetings)
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
@@ -330,11 +337,7 @@ final class AppModel {
         systemSoundEnabled = UserDefaults.standard.bool(forKey: "systemSound")
         hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
         noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
-        meetings = store.loadAll()
-        // 已有会议的视为已有安装。每个用途没存过选择时现在就决定默认值并写入，免得第一场会议录完后才决定
-        let existingInstall = !meetings.isEmpty
-        modelSelections = ModelSelections(isExistingInstall: { existingInstall })
-        for role in ModelRole.allCases { _ = modelSelections.selectedID(for: role) }
+        meetings = loadedMeetings
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
         // 不依赖 init 里的赋值是否触发 hotwordsText 的 didSet，直接算一次

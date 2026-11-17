@@ -180,6 +180,23 @@ import Testing
         defaults.removePersistentDomain(forName: suite)
     }
 
+    @Test func 启动时有会议算已有安装_每个用途的默认值当场写入() {
+        let meeting = Meeting(id: "2026-01-01_09-00-00", title: "会议", startedAt: Date(), status: .done)
+        _ = ModelSelections.atLaunch(meetings: [meeting], defaults: defaults)
+        #expect(defaults.string(forKey: ModelSelections.key(for: .transcription)) == "apple/speechanalyzer")
+        for role in ModelRole.allCases {
+            #expect(defaults.string(forKey: ModelSelections.key(for: role)) != nil, "\(role) 没写入")
+        }
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 启动时没有会议算新安装() {
+        _ = ModelSelections.atLaunch(meetings: [], defaults: defaults)
+        #expect(defaults.string(forKey: ModelSelections.key(for: .transcription))
+            == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
     @Test func 已有安装_转写保持SpeechAnalyzer() {
         #expect(make(existing: true).selectedID(for: .transcription) == "apple/speechanalyzer")
         defaults.removePersistentDomain(forName: suite)

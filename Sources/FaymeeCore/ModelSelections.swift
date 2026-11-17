@@ -26,6 +26,16 @@ public final class ModelSelections {
         self.isExistingInstall = isExistingInstall
     }
 
+    /// App 启动时建：会议目录里已有会议的视为已有安装。每个用途没存过选择时当场决定默认值并写入，
+    /// 免得第一场会议录完后才决定（那时已经有会议，新安装会被当成已有安装）
+    public static func atLaunch(meetings: [Meeting], defaults: UserDefaults = .standard,
+                                catalog: ModelCatalog = .builtIn) -> ModelSelections {
+        let existingInstall = !meetings.isEmpty
+        let selections = ModelSelections(defaults: defaults, catalog: catalog, isExistingInstall: { existingInstall })
+        for role in ModelRole.allCases { _ = selections.selectedID(for: role) }
+        return selections
+    }
+
     public static func key(for role: ModelRole) -> String { "model.\(role.rawValue)" }
 
     /// 选中的模型 id；nil 表示“不用”
