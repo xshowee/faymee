@@ -19,8 +19,4 @@ enum MinutesEngine {
             local: { (LlamaTextGenerator(model: model, directory: directory), model.id) }
         )
     }
-
-    @MainActor static func makeDownloader() -> ModelDownloader {
-        ModelDownloader(model: model, directory: directory, transport: URLSessionModelTransport())
-    }
 }

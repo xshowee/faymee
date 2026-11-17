@@ -7,13 +7,10 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @State private var confirmingDelete = false
-    @State private var deleteError: String?
 
     var body: some View {
         @Bindable var model = model
         @Bindable var online = model.onlineSettings
-        let downloader = model.modelDownloader
 
         Form {
             Section("录音") {
@@ -91,35 +88,14 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if online.minutesMode == .local {
-                    LabeledContent("Qwen3 4B（Q4_K_M）") {
-                        ModelDownloadControls(style: .settings)
-                    }
-                    Text("纪要在本机生成，不上传任何数据。模型约 \(formatGigabytes(downloader.model.size))，只在点“下载”后才开始下载，可以暂停，中断后能续传")
+                    ModelPicker(role: .minutes, title: "纪要模型",
+                                deleteBlockedReason: { _ in
+                                    model.canDeleteModel ? nil : "正在生成纪要，生成完才能删除模型"
+                                })
+                    Text("纪要在本机生成，不上传任何数据。模型只在点“下载”后才开始下载，可以暂停，中断后能续传")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    if downloader.isReady {
-                        HStack {
-                            Button("在访达中显示") {
-                                NSWorkspace.shared.activateFileViewerSelecting([downloader.model.url(in: downloader.directory)])
-                            }
-                            Spacer()
-                            Button("删除模型…", role: .destructive) { confirmingDelete = true }
-                                .disabled(!model.canDeleteModel)
-                        }
-                        if !model.canDeleteModel {
-                            Text("正在生成纪要，生成完才能删除模型")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if let deleteError {
-                        Label(deleteError, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                 } else {
                     OnlineEndpointFields(
                         provider: $online.minutesProvider,
@@ -147,20 +123,6 @@ struct SettingsView: View {
         .onDisappear {
             model.flushOnlineSettingsSync()
             model.cancelInFlightConnectionTests()
-        }
-        .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
-            Button("删除模型", role: .destructive) {
-                Task {
-                    do {
-                        try await model.deleteModel()
-                        deleteError = nil
-                    } catch {
-                        deleteError = "删除模型失败：\(error.localizedDescription)"
-                    }
-                }
-            }
-        } message: {
-            Text("释放约 \(formatGigabytes(downloader.model.size)) 空间。之后生成纪要需要重新下载，已生成的纪要不受影响。")
         }
     }
 }
@@ -345,9 +307,11 @@ struct ModelDownloadControls: View {
 
     @Environment(AppModel.self) private var model
     var style: Style
+    /// 哪个模型的下载器；不给时是纪要模型的
+    var downloader: ModelDownloader?
 
     var body: some View {
-        let downloader = model.modelDownloader
+        let downloader = downloader ?? model.modelDownloader
         let status = downloader.status
 
         HStack(spacing: 6) {

@@ -125,8 +125,15 @@ final class AppModel {
         didSet { syncTranscriptionSuspension() }
     }
 
+    /// 本机模型目录里需要下载的模型的下载器，每个模型一个（`ModelPicker` 和各管线共用）
+    @ObservationIgnored let modelDownloads = ModelDownloads(directory: LocalModel.defaultDirectory,
+                                                            transport: URLSessionModelTransport())
+    /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定
+    @ObservationIgnored private(set) var modelSelections: ModelSelections!
+
     /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
-    @ObservationIgnored let modelDownloader = MinutesEngine.makeDownloader()
+    @ObservationIgnored private(set) lazy var modelDownloader: ModelDownloader =
+        modelDownloads.downloader(for: ModelCatalog.builtIn.model(id: MinutesEngine.model.id)!)!
 
     /// 在线转写与在线纪要设置，API Key 存于系统钥匙串；默认保持纯本机模式
     @ObservationIgnored let onlineSettings = OnlineModelSettings(
@@ -249,6 +256,10 @@ final class AppModel {
         hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
         noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
         meetings = store.loadAll()
+        // 已有会议的视为已有安装。每个用途没存过选择时现在就决定默认值并写入，免得第一场会议录完后才决定
+        let existingInstall = !meetings.isEmpty
+        modelSelections = ModelSelections(isExistingInstall: { existingInstall })
+        for role in ModelRole.allCases { _ = modelSelections.selectedID(for: role) }
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
         // 不依赖 init 里的赋值是否触发 hotwordsText 的 didSet，直接算一次
@@ -1058,11 +1069,6 @@ final class AppModel {
     /// 正在加载模型或生成纪要时不能删除模型：引擎还在用这个文件。
     /// 被取消的生成退出前也算在用（加载模型时可能一时不理会取消）
     var canDeleteModel: Bool { !minutes.isEngineInUse }
-
-    func deleteModel() async throws {
-        guard canDeleteModel else { return }
-        try await modelDownloader.delete()
-    }
 
     private func update(_ m: Meeting) {
         if let i = meetings.firstIndex(where: { $0.id == m.id }) {
