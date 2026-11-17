@@ -148,6 +148,30 @@ struct SherpaOnnxDiarizerContractTests {
         await #expect(throws: CancellationError.self) { try await task.value }
     }
 
+    /// 目录里需要下载的声纹模型（ticket 12 的候选）走同一个引擎：把 ERes2Net base 当成下载来的模型放进模型根目录
+    @Test func 下载来的声纹模型_用它的id区分说话人() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = SherpaOnnxDiarizer.embeddingModel
+        let local = LocalModel(id: "test/downloaded-eres2net", directoryName: "downloaded-eres2net", files: [
+            ModelFile(path: base.name, size: base.size, sha256: base.sha256,
+                      downloadURLs: [URL(string: "https://example.com/\(base.name)")!]),
+        ])
+        try FileManager.default.createDirectory(at: local.directory(in: root), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.name), to: local.url(in: root))
+        let entry = CatalogModel(id: local.id, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
+                                 source: .download(local), name: "下载的", parameters: ModelParameters(matchThreshold: 0.6))
+
+        let (engine, threshold) = SherpaOnnxDiarizer.engine(for: entry, bundleResources: nil, modelsRoot: root)
+        let diarizer = try #require(engine)
+        let result = try await diarizer.diarize(audio: try resource("two-speakers-zh"), sentences: allSentences,
+                                                speakerCount: nil) { _ in }
+
+        #expect(diarizer.voiceprintModel == "test/downloaded-eres2net")
+        #expect(threshold == 0.6)
+        #expect(agreement(result.segments) >= 0.9)
+    }
+
     @Test func 没有句子_没有说话人() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).caf")
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2))

@@ -131,6 +131,11 @@ final class AppModel {
     /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定
     @ObservationIgnored private(set) var modelSelections: ModelSelections!
 
+    /// 设置里「声纹」选中的模型 → 转写管线的区分引擎和匹配阈值。打进 App 的模型由 build.sh 拷进
+    /// Contents/Resources；直接 swift run（没打包）时没有，不区分说话人
+    @ObservationIgnored private(set) lazy var voiceprintModel = VoiceprintModelBinding(
+        selections: modelSelections, downloads: modelDownloads, bundleResources: Bundle.main.resourceURL)
+
     /// 选中的纪要模型的下载器（详情页纪要等模型时显示它）。只在用户点“下载”时开始；
     /// 下载完成或删除模型时通知纪要管线（见 init）
     var modelDownloader: ModelDownloader {
@@ -221,7 +226,7 @@ final class AppModel {
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
         let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport)
-        let diarization = DiarizationEngine.make()
+        let diarization = voiceprintModel.makeEngine()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
                                              engine: engine.name, isEngineReady: engine.isReady,
                                              diarizer: diarization.diarizer,
@@ -231,6 +236,7 @@ final class AppModel {
         pipeline.hotwords = hotwords
         pipeline.diarizes = diarizeSpeakers
         pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
+        voiceprintModel.bind(pipeline)
         return pipeline
     }()
 
