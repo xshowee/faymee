@@ -8,6 +8,8 @@ build/
 .scratch/
 # 区分说话人模型（scripts/fetch-diarization-models.sh 下载）
 Resources/Diarization/
+# 静音切段模型（scripts/fetch-vad-model.sh 下载）
+Resources/VAD/
 
 # 签名、公证、Sparkle 更新的密钥，绝不提交
 *.p8

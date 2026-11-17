@@ -121,6 +121,8 @@ fi
 
 # 区分说话人模型（约 40MB，不进 git）：没有或校验不过时下载
 ./scripts/fetch-diarization-models.sh Resources/Diarization
+# 静音切段模型（约 0.6MB，不进 git，sherpa 整段转写模型切段用）
+./scripts/fetch-vad-model.sh Resources/VAD
 
 echo "==> 编译 Faymee（${ARCH}）"
 swift build -c release --arch "$ARCH"
@@ -139,6 +141,8 @@ mkdir -p "$APP/Contents/Resources/Diarization"
 # 只拷当前引擎用的文件（目录里可能还留着旧引擎的模型）
 cp Resources/Diarization/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx \
     Resources/Diarization/3dspeaker-eres2net-base.LICENSE "$APP/Contents/Resources/Diarization/"
+mkdir -p "$APP/Contents/Resources/VAD"
+cp Resources/VAD/silero_vad.onnx Resources/VAD/silero-vad.LICENSE "$APP/Contents/Resources/VAD/"
 # llama.cpp 是动态 framework：拷进 Contents/Frameworks（ditto 保留 Versions/Current 等符号链接，
 # 不拷 llama.dSYM），release 可执行文件的 rpath 只有 @loader_path，要补一条。
 # install_name_tool 会让签名失效，必须在签名之前
