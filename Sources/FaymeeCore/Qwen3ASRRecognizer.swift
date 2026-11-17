@@ -8,8 +8,8 @@ import SherpaOnnxC
 ///   模型先输出 `language Chinese<asr_text>` 再输出文字，sherpa 会去掉这个前缀。
 ///   热词、音频、输出共用 `max_total_len`（512）的上下文，超了 sherpa 会悄悄截掉音频，
 ///   所以热词先按 `Qwen3ASR.fitHotwords` 截到预算内
-/// - sherpa 自己会截掉「只在两三个 token 间打转」的复读；其余复读、单独的「system」这类提示词泄漏
-///   由外面套的 `GuardedRecognizer` 处理
+/// - sherpa 自己会截掉「只在两三个 token 间打转」的复读；其余复读（含整句重复到输出上限）、
+///   单独的「system」、把整串热词当成结果输出，由外面套的 `GuardedRecognizer` 处理
 public final class Qwen3ASRRecognizer: SegmentRecognizer {
     private let recognizer: OpaquePointer
 
@@ -111,7 +111,8 @@ extension SherpaOfflineTranscriber {
         return SherpaOfflineTranscriber(model: model, catalog: catalog, modelDirectory: modelDirectory,
                                         vadModel: vadModel) { hotwords in
             let fitted = try Qwen3ASR.fitHotwords(hotwords, budget: budget, modelDirectory: directory)
-            return GuardedRecognizer(try Qwen3ASRRecognizer(directory: directory, hotwords: fitted, threads: threads))
+            return GuardedRecognizer(try Qwen3ASRRecognizer(directory: directory, hotwords: fitted, threads: threads),
+                                     hotwords: fitted)
         }
     }
 }

@@ -3,21 +3,24 @@ import Foundation
 /// 给大模型类 ASR（Fun-ASR-Nano、Qwen3-ASR）的识别器加上输出防护（`ASROutputGuard`）：
 ///
 /// - 删掉 `[breath]`、`/sil` 这类标记
-/// - 失控复读、整段日文、提示词泄漏：这一段从中点切开，前后各多 0.2 秒，分别重转再拼起来（去掉交界处
+/// - 失控复读、整段日文、提示词泄漏（含把整串热词当成结果输出）：这一段从中点切开，前后各多 0.2 秒，分别重转再拼起来（去掉交界处
 ///   被两半各识别一遍的字）；重转后仍有问题的那一半，复读截到 3 次，日文和泄漏丢掉。只递归一层
 /// - 不到 2 秒的段不切（两半会几乎是同一段音频），直接截短或丢掉
 ///
 /// 会后转写（`SherpaOfflineTranscriber`）和实时字幕定稿都套这一层
 public final class GuardedRecognizer: SegmentRecognizer {
     private let inner: any SegmentRecognizer
+    /// 交给模型的热词，用来认出热词泄漏
+    private let hotwords: [String]
 
     /// 两半各多带的样本数（0.2 秒）
     static let overlap = 3200
     /// 短于这个长度（2 秒）不切
     static let minSplitLength = 32000
 
-    public init(_ inner: any SegmentRecognizer) {
+    public init(_ inner: any SegmentRecognizer, hotwords: [String] = []) {
         self.inner = inner
+        self.hotwords = hotwords
     }
 
     public func recognize(_ samples: ArraySlice<Float>) throws -> SegmentRecognition {
@@ -26,14 +29,16 @@ public final class GuardedRecognizer: SegmentRecognizer {
         if text != result.text {
             result = SegmentRecognition(text: text, tokens: nil)
         }
-        guard ASROutputGuard.problem(in: text) != nil else { return result }
+        guard ASROutputGuard.problem(in: text, hotwords: hotwords) != nil else { return result }
         guard samples.count >= Self.minSplitLength else {
-            return SegmentRecognition(text: ASROutputGuard.salvage(text), tokens: nil)
+            return SegmentRecognition(text: ASROutputGuard.salvage(text, hotwords: hotwords), tokens: nil)
         }
         let mid = samples.startIndex + samples.count / 2
         let first = samples[samples.startIndex..<(mid + Self.overlap)]
         let second = samples[(mid - Self.overlap)..<samples.endIndex]
-        let texts = try [first, second].map { ASROutputGuard.salvage(ASROutputGuard.clean(try inner.recognize($0).text)) }
+        let texts = try [first, second].map {
+            ASROutputGuard.salvage(ASROutputGuard.clean(try inner.recognize($0).text), hotwords: hotwords)
+        }
         return SegmentRecognition(text: ASROutputGuard.joinHalves(texts[0], texts[1]), tokens: nil)
     }
 }

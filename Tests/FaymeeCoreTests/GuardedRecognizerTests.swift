@@ -85,6 +85,15 @@ private final class ScriptedRecognizer: SegmentRecognizer {
         #expect(long.calls.count == 3)
     }
 
+    @Test func 输出整串热词时按泄漏对半重转() throws {
+        let hotwords = ["DeerFlow", "LangChain", "Harness", "Agent"]
+        let inner = ScriptedRecognizer { r in
+            r.upperBound - r.lowerBound > 5 ? "DeerFlow LangChain Harness Agent。那你既然是TR，" : r.lowerBound == 10 ? "绩效是T2，" : "那你既然是T2，"
+        }
+        #expect(try GuardedRecognizer(inner, hotwords: hotwords).recognize(clip(10, 18)).text == "绩效是T2，那你既然是T2，")
+        #expect(inner.calls.count == 3)
+    }
+
     @Test func 不到2秒的短段不切_直接截短或丢掉() throws {
         let inner = ScriptedRecognizer { _ in self.runaway }
         #expect(try GuardedRecognizer(inner).recognize(clip(10, 11.5)).text == "我们现在这个这个这个")

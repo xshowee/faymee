@@ -121,7 +121,8 @@ extension SherpaOfflineTranscriber {
         return SherpaOfflineTranscriber(model: model, catalog: catalog, modelDirectory: modelDirectory,
                                         vadModel: vadModel) { hotwords in
             let fitted = try FunASRNano.fitHotwords(hotwords, budget: budget, modelDirectory: directory)
-            return GuardedRecognizer(try FunASRNanoRecognizer(directory: directory, hotwords: fitted, threads: threads))
+            return GuardedRecognizer(try FunASRNanoRecognizer(directory: directory, hotwords: fitted, threads: threads),
+                                     hotwords: fitted)
         }
     }
 }

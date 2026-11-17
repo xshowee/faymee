@@ -98,6 +98,39 @@ import Testing
         #expect(ASROutputGuard.joinHalves(first, second) == expected)
     }
 
+    /// Qwen3-ASR（带 8 个热词）在真实会议上的输出：一整句话反复说到输出上限
+    private let phraseLoop = "每一个模型，然后在端到端的这个研发，然后在端到端的这个研发，然后在端到端的这个研发，"
+        + "然后在端到端的这个研发，然后在端到端的这个研发，然后在端到端"
+
+    @Test func 五字以上的整句连续重复4次也算复读() {
+        #expect(ASROutputGuard.isRunaway(phraseLoop))
+        #expect(ASROutputGuard.truncateRepeats(phraseLoop)
+            == "每一个模型，然后在端到端的这个研发，然后在端到端的这个研发，然后在端到端的这个研发，")
+        // 3 次以内的整句重复是正常说话
+        #expect(!ASROutputGuard.isRunaway("我知道了我知道了我知道了。然后在端到端的这个研发，然后在端到端的这个研发，"
+            + "然后在端到端的这个研发。"))
+    }
+
+    /// Qwen3-ASR 把热词放在提示词的 system 段（空格连接），会把整串热词当成转写结果输出（真实输出）
+    private let hotwords = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场", "模型广场", "端到端研发"]
+
+    @Test func 输出连着三个以上按热词表顺序的热词算提示词泄漏() {
+        let leaks = ["DeerFlow LangChain Harness Agent 智能体 工具广场 模型广场 端到端研发。",
+                     "DeerFlow LangChain Harness Agent 智能体 工具广场 模型广场 端到端研发。那你既然是TR，那么你就要把你们主的。",
+                     "智能体、工具广场、模型广场"]
+        for text in leaks {
+            #expect(ASROutputGuard.problem(in: text, hotwords: hotwords) == .promptLeak, "\(text)")
+            #expect(ASROutputGuard.salvage(text, hotwords: hotwords) == "")
+            #expect(ASROutputGuard.problem(in: text) == nil)
+        }
+        // 会上说到热词、说到两个连着的热词都正常；热词不到 3 个不判
+        for ok in ["我们用 DeerFlow 和 LangChain 搭 Agent", "模型广场、工具广场都有", "LangChain Harness 这些",
+                   "创建智能体，然后去工具广场"] {
+            #expect(ASROutputGuard.problem(in: ok, hotwords: hotwords) == nil, "\(ok)")
+        }
+        #expect(ASROutputGuard.problem(in: "DeerFlow LangChain", hotwords: ["DeerFlow", "LangChain"]) == nil)
+    }
+
     @Test(arguments: [
         ("嗯，我我我我我我我我我我我我我我我我我我我我我我我我。", "嗯，我我我。"),
         ("やるぞ！", ""),

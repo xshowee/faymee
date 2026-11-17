@@ -6,7 +6,7 @@ import Foundation
 /// 或者输出日文、输出提示词。这里只判断和清理文字；对半重转在 `GuardedRecognizer`。
 ///
 /// 复读按“字”算：标点和空白不算字（「就用这个，就用这个，」的单元是「就用这个」），全是数字的单元不算
-/// （「100000」「13800000000」是正常输出）
+/// （「100000」「13800000000」是正常输出）。Qwen3-ASR 还会把 5 个字以上的整句一直重复到输出上限
 public enum ASROutputGuard {
     /// 同一单元在任何位置连续重复这么多次算失控
     static let runawayRepeats = 8
@@ -14,9 +14,12 @@ public enum ASROutputGuard {
     static let trailingRepeats = 5
     /// 单元最长几个字
     static let maxUnit = 4
+    /// 长单元（5–20 个字的整句）连续重复这么多次算失控。正常说话很少把同一整句连说 4 遍
+    static let phraseRepeats = 4
+    static let maxPhraseUnit = 20
 
-    /// 是否失控复读：同一单元连续重复 ≥ 8 次，或输出末尾连续重复 ≥ 5 次（末尾可以多一个没写完的单元）。
-    /// 真实口吃（「不不不不不啊」「这个这个。」）不算
+    /// 是否失控复读：1–4 字的单元连续重复 ≥ 8 次，或输出末尾连续重复 ≥ 5 次（末尾可以多一个没写完的单元）；
+    /// 5–20 字的整句连续重复 ≥ 4 次。真实口吃（「不不不不不啊」「这个这个。」）不算
     public static func isRunaway(_ text: String) -> Bool {
         !runawayRuns(in: Array(text).filter(isContent)).isEmpty
     }
@@ -58,7 +61,7 @@ public enum ASROutputGuard {
         var i = 0
         while i < chars.count {
             var best: Run?
-            for unit in 1...maxUnit where i + unit * 2 <= chars.count {
+            for unit in 1...maxPhraseUnit where i + unit * 2 <= chars.count {
                 let pattern = chars[i..<(i + unit)]
                 guard !pattern.allSatisfy(\.isNumber) else { continue }
                 var count = 1
@@ -70,7 +73,10 @@ public enum ASROutputGuard {
                 let rest = chars.count - after
                 let tail = rest < unit && chars[after...].elementsEqual(pattern.prefix(rest)) ? rest : 0
                 let atEnd = after + tail == chars.count
-                guard count >= runawayRepeats || (atEnd && count >= trailingRepeats) else { continue }
+                let isRunaway = unit <= maxUnit
+                    ? count >= runawayRepeats || (atEnd && count >= trailingRepeats)
+                    : count >= phraseRepeats
+                guard isRunaway else { continue }
                 let run = Run(start: i, unit: unit, count: count, tail: atEnd ? tail : 0)
                 if best.map({ run.unit * run.count > $0.unit * $0.count }) ?? true { best = run }
             }
@@ -101,16 +107,17 @@ public enum ASROutputGuard {
     }
 
     /// 输出有没有问题（先 `clean`）。有问题的段对半重转
-    public static func problem(in text: String) -> Problem? {
-        if isPromptLeak(text) { return .promptLeak }
+    /// - Parameter hotwords: 交给模型的热词（拼进了提示词），用来认出整串热词的泄漏
+    public static func problem(in text: String, hotwords: [String] = []) -> Problem? {
+        if isPromptLeak(text) || isHotwordLeak(text, hotwords: hotwords) { return .promptLeak }
         if isForeign(text) { return .foreign }
         if isRunaway(text) { return .runaway }
         return nil
     }
 
     /// 重转后仍有问题时的兜底：复读截到 3 次；日文、提示词泄漏整段丢掉
-    public static func salvage(_ text: String) -> String {
-        switch problem(in: text) {
+    public static func salvage(_ text: String, hotwords: [String] = []) -> String {
+        switch problem(in: text, hotwords: hotwords) {
         case nil: text
         case .runaway: truncateRepeats(text)
         case .foreign, .promptLeak: ""
@@ -140,6 +147,19 @@ public enum ASROutputGuard {
         let lower = text.lowercased()
         if promptFragments.contains(where: lower.contains) { return true }
         return chatRoles.contains(String(lower.filter(isContent)))
+    }
+
+    /// 输出里连着出现热词表中相邻的 3 个热词（按表的顺序，忽略中间的空格、标点、大小写，合起来至少 6 个字）：
+    /// 模型把提示词里的热词串当成了转写结果（Qwen3-ASR 把热词用空格连接放在 system 段）。
+    /// 会上说到一两个热词、或不按表的顺序说到几个热词不算
+    static func isHotwordLeak(_ text: String, hotwords: [String]) -> Bool {
+        let words = hotwords.map { String($0.lowercased().filter(isContent)) }.filter { !$0.isEmpty }
+        guard words.count >= 3 else { return false }
+        let content = String(text.lowercased().filter(isContent))
+        return (0...(words.count - 3)).contains { i in
+            let run = words[i..<(i + 3)].joined()
+            return run.count >= 6 && content.contains(run)
+        }
     }
 
     // MARK: - 对半重转后拼接
