@@ -1,0 +1,98 @@
+import Foundation
+
+/// 会议详情里跟音源有关的文字，都由会议数据里记的原始时段推出，不写盘
+extension Meeting {
+    /// 系统声音时段的起止和会议的开始、结束允许差这么多仍算对齐：时段由 App 在开始、停止采集时
+    /// 另取当前时间，和 `startedAt`、`endedAt` 不是同一个时刻
+    static let audioSourceEdgeTolerance: TimeInterval = 5
+
+    /// 详情页标题下的音源标记：全程开着系统声音为“麦克风 + 系统声音”，部分时段开着为“部分时段含系统声音”，
+    /// 没开过为 nil，不显示。只看开关的时段，不看系统声音是否可用。
+    ///
+    /// “全程”指合并后只有一段，且起止与录音的起止相差都在容差内；录音中途关过再开（中间断开）算部分时段。
+    /// 没有结束时间的时段（还在录、或录音中断时没关）算开到录音结束；还在录（没有 `endedAt`）时，
+    /// 已经关掉的时段之后录音仍在继续，算部分时段
+    public var audioSourceText: String? {
+        let recordingEnd = endedAt ?? .distantFuture
+        let covered = Self.merged(systemSoundPeriodList.map { (start: $0.start, end: $0.end ?? .distantFuture) })
+            .map { (start: max($0.start, startedAt), end: min($0.end, recordingEnd)) }
+            .filter { $0.start < $0.end }
+        guard let first = covered.first else { return nil }
+        let isWhole = covered.count == 1
+            && first.start.timeIntervalSince(startedAt) <= Self.audioSourceEdgeTolerance
+            && recordingEnd.timeIntervalSince(first.end) <= Self.audioSourceEdgeTolerance
+        return isWhole ? "麦克风 + 系统声音" : "部分时段含系统声音"
+    }
+
+    /// 详情页列出的合盖时段，按系统声音的状态分组说明，组按最早的一段排先后；没有合盖时为空。
+    /// 一段合盖跨过系统声音的开关切换或不可用的起止时，在这些时间点拆开，各段各归各组。
+    /// 分组与转写稿里空白的标法一致（spec「会议数据」的组合表）：
+    /// - 系统声音关着：内置麦克风没有录到声音（与以前的文字相同）
+    /// - 开着且可用：只录到系统声音
+    /// - 开着但不可用：两路都没录到
+    public var lidGapNotices: [LidGapNotice] {
+        let on = systemSoundPeriodList
+        let unavailable = systemSoundUnavailablePeriodList
+        let boundaries = (on + unavailable).flatMap { [$0.start, $0.end].compactMap { $0 } }
+        var notices: [LidGapNotice] = []
+        for gap in lidGaps {
+            let cuts = boundaries.filter { $0 > gap.start && $0 < (gap.end ?? .distantFuture) }
+            let points = [gap.start] + Set(cuts).sorted()
+            for (i, start) in points.enumerated() {
+                let end = i + 1 < points.count ? points[i + 1] : gap.end
+                let title = LidGapNotice.title(systemSoundOn: on.contains { $0.contains(start) },
+                                               unavailable: unavailable.contains { $0.contains(start) })
+                let piece = Gap(start: start, end: end, reason: gap.reason)
+                if let n = notices.firstIndex(where: { $0.title == title }) {
+                    // 与同组上一段首尾相接（拆开的两段之间只隔着另一组不认的切换点）时接回一段
+                    if let last = notices[n].gaps.last, last.end == start {
+                        notices[n].gaps[notices[n].gaps.count - 1].end = end
+                    } else {
+                        notices[n].gaps.append(piece)
+                    }
+                } else {
+                    notices.append(LidGapNotice(title: title, gaps: [piece]))
+                }
+            }
+        }
+        return notices
+    }
+
+    /// 按起点排序，重叠或首尾相接的合成一段
+    private static func merged(_ ranges: [(start: Date, end: Date)]) -> [(start: Date, end: Date)] {
+        var result: [(start: Date, end: Date)] = []
+        for r in ranges.sorted(by: { $0.start < $1.start }) {
+            if let last = result.last, r.start <= last.end {
+                result[result.count - 1].end = max(last.end, r.end)
+            } else {
+                result.append(r)
+            }
+        }
+        return result
+    }
+}
+
+/// 详情页里一组合盖时段：一行说明，下面列出各段的时间
+public struct LidGapNotice: Hashable, Sendable {
+    public var title: String
+    /// 按时间先后；没有结束时间的一段表示仍在合盖
+    public var gaps: [Gap]
+
+    public init(title: String, gaps: [Gap]) {
+        self.title = title
+        self.gaps = gaps
+    }
+
+    static func title(systemSoundOn: Bool, unavailable: Bool) -> String {
+        switch (systemSoundOn, unavailable) {
+        case (false, _): "以下时段因合盖，内置麦克风没有录到声音"
+        case (true, false): "以下时段因合盖，只录到系统声音"
+        case (true, true): "以下时段因合盖且系统声音不可用，没有录到声音"
+        }
+    }
+}
+
+private extension WallClockPeriod {
+    /// 起点算在内，终点不算；没有结束时间的一直延续
+    func contains(_ t: Date) -> Bool { start <= t && t < (end ?? .distantFuture) }
+}
