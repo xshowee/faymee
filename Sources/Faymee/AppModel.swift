@@ -82,6 +82,8 @@ final class AppModel {
     private(set) var systemSoundAvailability = SystemSoundAvailability()
     /// 录音中系统声音不可用的原因，菜单栏面板据此显示“系统声音不可用”
     var systemSoundUnavailableReason: SystemSoundUnavailableReason? { systemSoundAvailability.unavailableReason }
+    /// 不在录音时打开开关就查到的不可用原因（没有授权），菜单栏面板录音前就提示。关掉开关、开始录音时清掉
+    private(set) var systemSoundIdleUnavailableReason: SystemSoundUnavailableReason?
 
     /// 按当前选择和设备状态，开始录音时会用哪个麦克风
     var plannedDevice: AudioInputDevice? {
@@ -310,6 +312,8 @@ final class AppModel {
         elapsed = 0
         isSilent = false
         hasRecordingError = false
+        // 录音中的提示由 systemSoundAvailability 接手
+        systemSoundIdleUnavailableReason = nil
         silence = SilenceWatch()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -361,9 +365,12 @@ final class AppModel {
     // MARK: - 系统声音
 
     /// 让录音中的系统声音跟上开关：打开时开一段时段、开始采集，关闭时停止采集、结束这段。
-    /// 不在录音时什么也不做（开始录音时再调一次）。采集不可用时麦克风照常录，时段照样记（它记的是开关）
+    /// 不在录音时只查授权（开始录音时再调一次）。采集不可用时麦克风照常录，时段照样记（它记的是开关）
     private func syncSystemSound(at date: Date = Date()) {
-        guard var m = current else { return }
+        guard var m = current else {
+            checkSystemSoundBeforeRecording()
+            return
+        }
         if systemSoundEnabled, !m.isSystemSoundPeriodOpen {
             // 时段先记下、写盘，再建采集：时段记的是开关，不等 tap 建好（建的时候可能在等授权）。
             // 一开始就不可用时，不可用时段和开关时段起点相同
@@ -378,6 +385,18 @@ final class AppModel {
             update(m)
             systemSoundAvailability = SystemSoundAvailability()
         }
+    }
+
+    /// 不在录音时打开开关：未决定就让系统弹出授权框，拒绝就在面板里提示没有授权（spec 用户故事 6、7）。
+    /// 关掉开关时清掉提示。不录、不写盘，也不开不可用时段（还没有会议）
+    private func checkSystemSoundBeforeRecording() {
+        guard systemSoundEnabled else {
+            systemSoundIdleUnavailableReason = nil
+            return
+        }
+        let action = SystemSoundSwitchOn(authorization: SystemSoundAuthorizationQuery.current())
+        systemSoundIdleUnavailableReason = action.unavailableReason
+        if action == .requestAuthorization { systemSound.requestAuthorization() }
     }
 
     /// 开始（或重试、重建）系统声音采集的唯一入口：先查授权，拒绝就不建；建不起来时只记下不可用，

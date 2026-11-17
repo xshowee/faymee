@@ -44,6 +44,12 @@ struct MenuContent: View {
             } else {
                 MicrophonePicker()
                 SystemSoundToggle()
+                if let reason = model.systemSoundIdleUnavailableReason {
+                    Label(reason.idleMenuText, systemImage: "speaker.slash.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Button {
                     Task { await model.start() }
                 } label: {

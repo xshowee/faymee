@@ -79,34 +79,28 @@ final class SystemSoundCapture {
         return opened.drain()
     }
 
+    /// 让系统弹出“系统录音”授权框（不在录音时第一次打开开关，spec 用户故事 6）：短暂建一次 tap、
+    /// 只含 tap 的聚合设备和一个什么都不做的 IOProc，启动后立即拆掉。不录、不写盘。
+    /// 正在采集时什么也不做；建不起来只记日志（开始录音时照常按建立失败处理）
+    func requestAuthorization() {
+        guard !isRunning else { return }
+        defer { teardown() }
+        do {
+            _ = try createTapAndAggregate()
+            try check("创建系统声音回调", AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue) { _, _, _, _, _ in })
+            try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
+            log.info("已建立一次系统声音采集，以弹出授权框")
+        } catch {
+            log.error("为弹出授权框建立系统声音采集失败：\(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - 建立
 
     private func build(directory: URL,
                        onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
                        onError: @escaping @Sendable (String) -> Void) throws {
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [try Self.ownProcessObject()])
-        description.uuid = UUID()
-        description.name = "Faymee 系统声音"
-        description.isPrivate = true
-        description.muteBehavior = .unmuted
-        try check("创建系统声音 tap", AudioHardwareCreateProcessTap(description, &tapID))
-
-        var asbd = AudioStreamBasicDescription()
-        try check("读取系统声音格式", Self.getProperty(tapID, kAudioTapPropertyFormat, &asbd))
-        guard let format = AVAudioFormat(streamDescription: &asbd), format.sampleRate > 0, format.channelCount > 0
-        else { throw SystemSoundCaptureError.unsupportedFormat }
-
-        let aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Faymee 系统声音",
-            kAudioAggregateDeviceUIDKey: Self.aggregateUIDPrefix + UUID().uuidString,
-            kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapAutoStartKey: true,
-            // 不加任何 sub device：麦克风不在这里
-            kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true,
-                                               kAudioSubTapUIDKey: description.uuid.uuidString]],
-        ]
-        try check("创建系统声音聚合设备", AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID))
+        let (format, asbd) = try createTapAndAggregate()
 
         // host time 只在同一次采集内有效：每次（重新）建立都按此刻重新锚定
         let opened = opened
@@ -134,6 +128,34 @@ final class SystemSoundCapture {
         try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
         watchDevice(format: asbd)
         log.info("系统声音采集已开始：\(format.sampleRate) Hz，\(format.channelCount) 声道")
+    }
+
+    /// 建 tap 和只含它的私有聚合设备，返回 tap 的格式。出错时已建好的部分由调用方 teardown 拆掉
+    private func createTapAndAggregate() throws -> (AVAudioFormat, AudioStreamBasicDescription) {
+        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [try Self.ownProcessObject()])
+        description.uuid = UUID()
+        description.name = "Faymee 系统声音"
+        description.isPrivate = true
+        description.muteBehavior = .unmuted
+        try check("创建系统声音 tap", AudioHardwareCreateProcessTap(description, &tapID))
+
+        var asbd = AudioStreamBasicDescription()
+        try check("读取系统声音格式", Self.getProperty(tapID, kAudioTapPropertyFormat, &asbd))
+        guard let format = AVAudioFormat(streamDescription: &asbd), format.sampleRate > 0, format.channelCount > 0
+        else { throw SystemSoundCaptureError.unsupportedFormat }
+
+        let aggregate: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Faymee 系统声音",
+            kAudioAggregateDeviceUIDKey: Self.aggregateUIDPrefix + UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            // 不加任何 sub device：麦克风不在这里
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true,
+                                               kAudioSubTapUIDKey: description.uuid.uuidString]],
+        ]
+        try check("创建系统声音聚合设备", AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID))
+        return (format, asbd)
     }
 
     /// 按建立的反序拆掉，哪一步没建都跳过

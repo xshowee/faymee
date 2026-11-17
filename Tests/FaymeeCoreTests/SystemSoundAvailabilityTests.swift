@@ -121,4 +121,31 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
         #expect(a.isAvailable)
         #expect(!a.awaitsAuthorization)
     }
+
+    // MARK: - 录音前打开开关
+
+    /// 第一次打开开关（还没回答过授权）：录音前就让系统弹出授权框，不等到开始录音
+    @Test func 录音前打开开关_授权未决定时弹授权框() {
+        #expect(SystemSoundSwitchOn(authorization: .undetermined) == .requestAuthorization)
+    }
+
+    /// 拒绝过授权：录音前就在面板里说系统声音不可用、去系统设置打开
+    @Test func 录音前打开开关_授权为拒绝时提示没有授权() {
+        let action = SystemSoundSwitchOn(authorization: .denied)
+        #expect(action == .showUnavailable(.notAuthorized))
+        #expect(action.unavailableReason == .notAuthorized)
+    }
+
+    @Test func 录音前打开开关_已授权时什么都不做() {
+        let action = SystemSoundSwitchOn(authorization: .authorized)
+        #expect(action == .nothing)
+        #expect(action.unavailableReason == nil)
+    }
+
+    /// 录音前的提示不说“麦克风照常在录”：这时还没在录
+    @Test func 录音前的没有授权提示不提麦克风在录() {
+        let text = SystemSoundUnavailableReason.notAuthorized.idleMenuText
+        #expect(text.contains("录屏与系统录音"))
+        #expect(!text.contains("麦克风照常在录"))
+    }
 }

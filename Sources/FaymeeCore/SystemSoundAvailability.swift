@@ -30,6 +30,17 @@ public enum SystemSoundUnavailableReason: Equatable, Sendable {
         }
     }
 
+    /// 不在录音时菜单栏面板里的说明：和录音中一样，只是不说麦克风在录
+    public var idleMenuText: String {
+        switch self {
+        case .notAuthorized:
+            "系统声音不可用：没有“系统录音”授权。请到“系统设置 › 隐私与安全性 › 录屏与系统录音”里打开 Faymee，"
+                + "然后重新打开 Faymee。"
+        case .startFailed, .deviceLost:
+            "系统声音不可用。"
+        }
+    }
+
     /// 通知的标题和正文（无声，只在屏幕可见时发）
     public var notice: (title: String, body: String) {
         switch self {
@@ -39,6 +50,30 @@ public enum SystemSoundUnavailableReason: Equatable, Sendable {
         case .startFailed, .deviceLost:
             ("系统声音不可用", "暂时只录到麦克风，恢复后自动接着录系统声音。")
         }
+    }
+}
+
+/// 不在录音时打开系统声音开关要做的事（spec 用户故事 6、7）：录音前就弹授权框、就说没有授权，
+/// 不等到开始录音。只看此刻的授权查询结果；关掉开关时 App 清掉这里给出的提示
+public enum SystemSoundSwitchOn: Equatable, Sendable {
+    /// 已授权：什么都不做
+    case nothing
+    /// 未决定：让系统弹出“系统录音”授权框（App 短暂建一次采集再拆掉，不录、不写盘）
+    case requestAuthorization
+    /// 菜单栏面板提示系统声音不可用。录音前不开不可用时段：还没有会议
+    case showUnavailable(SystemSoundUnavailableReason)
+
+    public init(authorization: SystemSoundAuthorization) {
+        switch authorization {
+        case .authorized: self = .nothing
+        case .undetermined: self = .requestAuthorization
+        case .denied: self = .showUnavailable(.notAuthorized)
+        }
+    }
+
+    /// 要在面板里提示的不可用原因，没有为 nil
+    public var unavailableReason: SystemSoundUnavailableReason? {
+        if case let .showUnavailable(reason) = self { reason } else { nil }
     }
 }
 
