@@ -455,10 +455,11 @@ final class AppModel {
         updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
     }
 
-    /// 授权未决定时建好的采集在等用户回答授权框：再查一次，查到拒绝就停掉，判为没有授权
+    /// 授权未决定时建好的采集在等用户回答授权框：再查一次，查到拒绝就停掉，判为没有授权。
+    /// 被拒绝的 tap 从建好起只拿到全零，不可用时段从那次建立算起
     private func recheckSystemSoundAuthorization() {
         guard current != nil, systemSoundAvailability.awaitsAuthorization else { return }
-        let date = Date()
+        let date = systemSoundAvailability.lastAttempt ?? Date()
         updatingSystemSoundAvailability(at: date) {
             if systemSoundAvailability.authorizationResolved(SystemSoundAuthorizationQuery.current()) {
                 stopSystemSoundCaptureKeepingSegments()

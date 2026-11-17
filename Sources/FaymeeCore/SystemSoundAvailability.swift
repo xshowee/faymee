@@ -57,7 +57,8 @@ public struct SystemSoundAvailability: Equatable, Sendable {
     public private(set) var unavailableReason: SystemSoundUnavailableReason?
     /// 建好时授权还是未决定（系统在弹授权框）：之后要再查，用户点了拒绝就判为没有授权
     public private(set) var awaitsAuthorization = false
-    private var lastAttempt: Date?
+    /// 上次开始（或重试）采集的时刻
+    public private(set) var lastAttempt: Date?
     private var pendingAuthorization: SystemSoundAuthorization?
 
     public init() {}
