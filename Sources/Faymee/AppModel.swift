@@ -332,7 +332,7 @@ final class AppModel {
         stopLiveCaptions()
         recorder.stop()
         // 打开时的回调可能还没切回主线程：停下后把报过的分片补记进这份会议，整理才不会丢掉它们
-        for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(SystemSoundSegment(segment)) }
+        for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(segment) }
         timer?.invalidate()
         timer = nil
         m.endedAt = endedAt
@@ -372,7 +372,7 @@ final class AppModel {
             systemSoundAvailability = SystemSoundAvailability()
             updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
         } else if !systemSoundEnabled, m.isSystemSoundPeriodOpen {
-            for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(SystemSoundSegment(segment)) }
+            for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(segment) }
             // 仍在进行的不可用时段一起结束
             m.endSystemSoundPeriod(at: date)
             update(m)
@@ -406,7 +406,7 @@ final class AppModel {
     }
 
     /// 停止采集，返回本次采集报过的分片（调用方补记进会议）
-    private func stopSystemSoundCapture() -> [SystemSoundWriter.Segment] {
+    private func stopSystemSoundCapture() -> [SystemSoundSegment] {
         isCapturingSystemSound = false
         return systemSound.stop()
     }
@@ -417,7 +417,7 @@ final class AppModel {
         guard var m = current else { return }
         var changed = false
         for segment in segments {
-            changed = m.addSystemSoundSegment(SystemSoundSegment(segment)) || changed
+            changed = m.addSystemSoundSegment(segment) || changed
         }
         if changed { update(m) }
     }
@@ -485,9 +485,9 @@ final class AppModel {
 
     /// 系统声音分片打开时记进 meeting.json。按会议 id 找而不是看 current：回调切回主线程时
     /// 录音可能刚停（停止时已补记过，这里不重复记）；会议已经开始整理就不再改它
-    private func systemSoundSegmentOpened(_ segment: SystemSoundWriter.Segment, in id: String) {
+    private func systemSoundSegmentOpened(_ segment: SystemSoundSegment, in id: String) {
         guard var m = meeting(id), m.status == .recording,
-              m.addSystemSoundSegment(SystemSoundSegment(segment)) else { return }
+              m.addSystemSoundSegment(segment) else { return }
         update(m)
     }
 

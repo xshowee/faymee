@@ -63,11 +63,3 @@ extension Meeting {
         }
     }
 }
-
-extension SystemSoundSegment {
-    /// 写盘模块交出的分片，记进会议数据
-    public init(_ segment: SystemSoundWriter.Segment) {
-        self.init(file: segment.file, startedAt: segment.startedAt, sampleRate: segment.sampleRate,
-                  channels: segment.channels)
-    }
-}

@@ -60,7 +60,7 @@ final class SystemSoundCapture {
 
     /// 开始采集，分片写进 directory。建不起来时抛错，已经建好的部分都拆掉
     func start(directory: URL,
-               onSegment: @escaping @Sendable (SystemSoundWriter.Segment) -> Void,
+               onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
                onError: @escaping @Sendable (String) -> Void) throws {
         guard !isRunning else { return }
         do {
@@ -74,7 +74,7 @@ final class SystemSoundCapture {
     /// 停止采集，写完已收到的音频。返回从上次 stop 以来打开过的全部分片：
     /// 分片打开的回调是异步切回主线程的，可能晚于停止，调用方用这个补记
     @discardableResult
-    func stop() -> [SystemSoundWriter.Segment] {
+    func stop() -> [SystemSoundSegment] {
         teardown()
         return opened.drain()
     }
@@ -82,7 +82,7 @@ final class SystemSoundCapture {
     // MARK: - 建立
 
     private func build(directory: URL,
-                       onSegment: @escaping @Sendable (SystemSoundWriter.Segment) -> Void,
+                       onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
                        onError: @escaping @Sendable (String) -> Void) throws {
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [try Self.ownProcessObject()])
         description.uuid = UUID()
@@ -218,11 +218,11 @@ final class SystemSoundCapture {
 /// 写盘模块报过的分片，在写盘队列上追加、在主线程取走
 private final class OpenedSegments: @unchecked Sendable {
     private let lock = NSLock()
-    private var segments: [SystemSoundWriter.Segment] = []
+    private var segments: [SystemSoundSegment] = []
 
-    func append(_ segment: SystemSoundWriter.Segment) { lock.withLock { segments.append(segment) } }
+    func append(_ segment: SystemSoundSegment) { lock.withLock { segments.append(segment) } }
 
-    func drain() -> [SystemSoundWriter.Segment] {
+    func drain() -> [SystemSoundSegment] {
         lock.withLock {
             defer { segments = [] }
             return segments

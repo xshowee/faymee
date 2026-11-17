@@ -41,28 +41,15 @@ public struct HostClock: Sendable {
 /// - 分片 CAF 和麦克风分片一样用 16 位 PCM，进程被强杀后仍可读。
 /// - `onSegment`、`onError` 在写盘队列上调用，需要主线程的调用方自己切过去。
 public final class SystemSoundWriter: @unchecked Sendable {
-    /// 一个系统声音分片
-    public struct Segment: Hashable, Sendable {
-        public var file: String
-        /// 第一帧的墙钟时间
-        public var startedAt: Date
-        public var sampleRate: Double
-        public var channels: Int
-
-        public init(file: String, startedAt: Date, sampleRate: Double, channels: Int) {
-            self.file = file
-            self.startedAt = startedAt
-            self.sampleRate = sampleRate
-            self.channels = channels
-        }
-    }
+    /// 交出的分片就是会议数据里记的 `SystemSoundSegment`，这个名字只是它的别名
+    public typealias Segment = SystemSoundSegment
 
     public let directory: URL
     public let segmentSeconds: TimeInterval
     /// 回调间隔的抖动在这个范围内不补静音
     public let jitterTolerance: TimeInterval
     private let clock: HostClock
-    private let onSegment: @Sendable (Segment) -> Void
+    private let onSegment: @Sendable (SystemSoundSegment) -> Void
     private let onError: @Sendable (String) -> Void
     private let queue = DispatchQueue(label: "faymee.system-sound-writer")
 
@@ -77,7 +64,7 @@ public final class SystemSoundWriter: @unchecked Sendable {
 
     public init(directory: URL, clock: HostClock,
                 segmentSeconds: TimeInterval = 60, jitterTolerance: TimeInterval = 0.02,
-                onSegment: @escaping @Sendable (Segment) -> Void,
+                onSegment: @escaping @Sendable (SystemSoundSegment) -> Void,
                 onError: @escaping @Sendable (String) -> Void) {
         self.directory = directory
         self.clock = clock
@@ -190,7 +177,7 @@ public final class SystemSoundWriter: @unchecked Sendable {
         nextIndex = index + 1
         segmentStart = hostTime
         framesInFile = 0
-        onSegment(Segment(file: name, startedAt: clock.date(forHostTime: hostTime),
-                          sampleRate: format.sampleRate, channels: Int(format.channelCount)))
+        onSegment(SystemSoundSegment(file: name, startedAt: clock.date(forHostTime: hostTime),
+                                     sampleRate: format.sampleRate, channels: Int(format.channelCount)))
     }
 }
