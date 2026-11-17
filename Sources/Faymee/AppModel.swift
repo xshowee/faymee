@@ -332,7 +332,7 @@ final class AppModel {
         stopLiveCaptions()
         recorder.stop()
         // 打开时的回调可能还没切回主线程：停下后把报过的分片补记进这份会议，整理才不会丢掉它们
-        for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(segment) }
+        stopSystemSoundCapture(into: &m)
         timer?.invalidate()
         timer = nil
         m.endedAt = endedAt
@@ -372,7 +372,7 @@ final class AppModel {
             systemSoundAvailability = SystemSoundAvailability()
             updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
         } else if !systemSoundEnabled, m.isSystemSoundPeriodOpen {
-            for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(segment) }
+            stopSystemSoundCapture(into: &m)
             // 仍在进行的不可用时段一起结束
             m.endSystemSoundPeriod(at: date)
             update(m)
@@ -405,21 +405,26 @@ final class AppModel {
         }
     }
 
-    /// 停止采集，返回本次采集报过的分片（调用方补记进会议）
-    private func stopSystemSoundCapture() -> [SystemSoundSegment] {
+    /// 停止采集，把写盘模块报过、但打开的回调可能还没切回主线程的分片补记进 m（已记过的不重复记）。
+    /// 有新记的返回 true，调用方负责写盘
+    @discardableResult
+    private func stopSystemSoundCapture(into m: inout Meeting) -> Bool {
         isCapturingSystemSound = false
-        return systemSound.stop()
-    }
-
-    /// 停止采集，把报过的分片补记进正在录的会议
-    private func stopSystemSoundCaptureKeepingSegments() {
-        let segments = stopSystemSoundCapture()
-        guard var m = current else { return }
         var changed = false
-        for segment in segments {
+        for segment in systemSound.stop() {
             changed = m.addSystemSoundSegment(segment) || changed
         }
-        if changed { update(m) }
+        return changed
+    }
+
+    /// 停止采集，把报过的分片补记进正在录的会议并写盘
+    private func stopSystemSoundCaptureKeepingSegments() {
+        guard var m = current else {
+            isCapturingSystemSound = false
+            systemSound.stop()
+            return
+        }
+        if stopSystemSoundCapture(into: &m) { update(m) }
     }
 
     /// 唤醒后、格式变了时重建采集：时钟换算按此刻重新锚定，分片接着编号
