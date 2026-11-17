@@ -90,8 +90,31 @@ private final class ScriptedRecognizer: SegmentRecognizer {
         #expect(try GuardedRecognizer(inner).recognize(clip(10, 11.5)).text == "我们现在这个这个这个")
         #expect(inner.calls.count == 1)
 
+        // 评估里 1.22 秒的「那那那那那」：末尾 5 次够判复读，但短段没法重转核对，照原样留着（见下一个测试）
+        let five = ScriptedRecognizer { _ in "那那那那那" }
+        #expect(try GuardedRecognizer(five).recognize(clip(10, 11.22)).text == "那那那那那")
+
         let japanese = ScriptedRecognizer { _ in "あんまりないですね。" }
         #expect(try GuardedRecognizer(japanese).recognize(clip(10, 10.6)).text == "")
         #expect(japanese.calls.count == 1)
+    }
+
+    /// 真实口吃不能误判（spec）：短段（实时字幕定稿的一句常常不到 2 秒）以口吃结尾时，只够「末尾 ≥ 5 次」的
+    /// 连续重复没法对半重转核对，不截；任何位置 ≥ 8 次的才是确定失控，照样截到 3 次
+    @Test(arguments: [
+        "到不不不不不",
+        "我觉得不是不是不是不是不是",
+        "就是这个这个这个这个这个。",
+        "呃呃呃呃呃",
+    ])
+    func 短段以口吃结尾时不截短(_ stutter: String) throws {
+        let inner = ScriptedRecognizer { _ in stutter }
+        #expect(try GuardedRecognizer(inner).recognize(clip(10, 11.5)).text == stutter)
+        #expect(inner.calls.count == 1)
+    }
+
+    @Test func 短段末尾重复到8次以上仍截到3次() throws {
+        let inner = ScriptedRecognizer { _ in "那就麻烦你们了，哎呀，那那那那那那那那那。" }
+        #expect(try GuardedRecognizer(inner).recognize(clip(10, 11.8)).text == "那就麻烦你们了，哎呀，那那那。")
     }
 }

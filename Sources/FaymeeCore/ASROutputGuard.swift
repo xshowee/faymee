@@ -29,10 +29,11 @@ public enum ASROutputGuard {
 
     /// 把失控的连续重复截到 3 次（对半重转后仍复读时用）。删掉的单元连同夹在中间的标点一起删，
     /// 连续段后面的标点和内容保留；不到失控的重复（口吃）不动
-    public static func truncateRepeats(_ text: String) -> String {
+    /// - Parameter trailing: 只够「末尾 ≥ 5 次」的连续段也截；false 时只截确定失控的（任何位置 ≥ 8 次、整句 ≥ 4 次）
+    public static func truncateRepeats(_ text: String, trailing: Bool = true) -> String {
         let characters = Array(text)
         let contentPositions = characters.indices.filter { isContent(characters[$0]) }
-        let runs = runawayRuns(in: contentPositions.map { characters[$0] })
+        let runs = runawayRuns(in: contentPositions.map { characters[$0] }, trailing: trailing)
         guard !runs.isEmpty else { return text }
         var drop = IndexSet()
         for run in runs {
@@ -56,7 +57,8 @@ public enum ASROutputGuard {
     }
 
     /// 所有失控的连续段（按出现顺序，不重叠）。同一起点取覆盖最长的单元，一样长取短单元
-    static func runawayRuns(in chars: [Character]) -> [Run] {
+    /// - Parameter trailing: 末尾连续 ≥ 5 次也算；false 时只算任何位置都算失控的
+    static func runawayRuns(in chars: [Character], trailing: Bool = true) -> [Run] {
         var runs: [Run] = []
         var i = 0
         while i < chars.count {
@@ -74,7 +76,7 @@ public enum ASROutputGuard {
                 let tail = rest < unit && chars[after...].elementsEqual(pattern.prefix(rest)) ? rest : 0
                 let atEnd = after + tail == chars.count
                 let isRunaway = unit <= maxUnit
-                    ? count >= runawayRepeats || (atEnd && count >= trailingRepeats)
+                    ? count >= runawayRepeats || (trailing && atEnd && count >= trailingRepeats)
                     : count >= phraseRepeats
                 guard isRunaway else { continue }
                 let run = Run(start: i, unit: unit, count: count, tail: atEnd ? tail : 0)
@@ -124,7 +126,15 @@ public enum ASROutputGuard {
         }
     }
 
-    /// 假名、谚文、西里尔字母占（不算 ASCII 的）字的三成以上。中文里偶尔夹一个「の」不算；英文、数字不算
+    /// 不能重转核对时（不到 2 秒的短段）的兜底：同 `salvage`，但只够「末尾 ≥ 5 次」的连续重复不截。
+    /// 短段以这样的重复结尾多半是真口吃（「到不不不不不」，spec：真实口吃不能误判）；
+    /// 确定失控的（任何位置 ≥ 8 次、整句 ≥ 4 次）照样截到 3 次
+    public static func salvageWithoutRetry(_ text: String) -> String {
+        problem(in: text) == .runaway ? truncateRepeats(text, trailing: false) : salvage(text)
+    }
+
+    /// 假名、谚文、西里尔字母占（不算 ASCII 的）字的三成以上。短句里一个假名也够：实时字幕定稿的一句常常很短，
+    /// Fun-ASR-Nano 把「别的」转成过「彼の話」。句子长一点、中文里偶尔夹一个「の」不算；英文、数字不算
     static func isForeign(_ text: String) -> Bool {
         let chars = text.unicodeScalars.filter { $0.value > 0x7F && isContent(Character($0)) }
         let foreign = chars.filter { s in
@@ -135,7 +145,7 @@ public enum ASROutputGuard {
             default: false
             }
         }
-        return foreign.count >= 2 && foreign.count * 10 >= chars.count * 3
+        return !foreign.isEmpty && foreign.count * 10 >= chars.count * 3
     }
 
     /// 提示词里的固定片段（Fun-ASR-Nano：「语音转写：」「热词列表：[…]」；Qwen3-ASR：单独的 system / user）。

@@ -72,11 +72,16 @@ import Testing
         #expect(ASROutputGuard.problem(in: "안녕하세요") == .foreign)
         // Qwen3-ASR 在一段 0.9 秒的「嗯」上输出过俄文字母
         #expect(ASROutputGuard.problem(in: "стьы") == .foreign)
+        // 实时字幕定稿实测（10:38）：Fun-ASR-Nano 把短句「别的」转成「彼の話」，只有 1 个假名
+        #expect(ASROutputGuard.problem(in: "彼の話") == .foreign)
+        #expect(ASROutputGuard.problem(in: "はい。") == .foreign)
         #expect(ASROutputGuard.problem(in: "system") == .promptLeak)
         #expect(ASROutputGuard.problem(in: "热词列表：[DeerFlow, LangChain]") == .promptLeak)
         #expect(ASROutputGuard.problem(in: "那那那那那那那那那。") == .runaway)
         for ok in ["OK。", "LangChain", "7月2号交付，预算100000", "好的，那我们就这样定了。", "这个系统要上线", "",
-                   "我们要做语音转写，热词列表也要支持"] {
+                   "我们要做语音转写，热词列表也要支持",
+                   // 中文里偶尔夹一个「の」不算；和日文共用的汉字不算
+                   "这是我の书", "这个の那个", "彼此的话", "話題"] {
             #expect(ASROutputGuard.problem(in: ok) == nil, "\(ok)")
         }
     }
