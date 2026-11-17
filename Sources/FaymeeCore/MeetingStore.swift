@@ -5,7 +5,9 @@ import Foundation
 ///     ~/Library/Application Support/Faymee/Meetings/<id>/
 ///         meeting.json        元数据（原子写入）
 ///         segments/0001.caf   录音分片，整理完成后删除
-///         recording.m4a       合并后的录音
+///         segments/system/0001.caf  系统声音分片，整理完成后删除
+///         recording.m4a       合并后的录音（有系统声音时两路混成单声道）
+///         system.m4a          只含系统声音，与 recording.m4a 等长对齐；没开过系统声音时没有
 ///         transcript.json     转写稿（原子写入），只由转写和编辑写入
 ///         minutes.json        纪要（原子写入），只由生成和编辑写入
 ///
@@ -34,12 +36,19 @@ public final class MeetingStore {
 
     public func directory(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
     public func segmentsDirectory(_ id: String) -> URL { directory(id).appendingPathComponent("segments", isDirectory: true) }
+    public func systemSoundSegmentsDirectory(_ id: String) -> URL {
+        segmentsDirectory(id).appendingPathComponent("system", isDirectory: true)
+    }
     private func manifest(_ id: String) -> URL { directory(id).appendingPathComponent("meeting.json") }
     private func transcriptURL(_ id: String) -> URL { directory(id).appendingPathComponent("transcript.json") }
     private func minutesURL(_ id: String) -> URL { directory(id).appendingPathComponent("minutes.json") }
 
     public func recordingURL(_ m: Meeting) -> URL? {
         m.recording.map { directory(m.id).appendingPathComponent($0) }
+    }
+
+    public func systemSoundRecordingURL(_ m: Meeting) -> URL? {
+        m.systemSoundRecording.map { directory(m.id).appendingPathComponent($0) }
     }
 
     public func create(startedAt: Date) throws -> Meeting {
@@ -114,6 +123,14 @@ public final class MeetingStore {
     public func segmentFiles(_ id: String) -> [URL] {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: segmentsDirectory(id), includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.pathExtension == "caf" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// 磁盘上的系统声音分片，按文件名排序。不一定都记在 meeting.json 里
+    public func systemSoundSegmentFiles(_ id: String) -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: systemSoundSegmentsDirectory(id), includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "caf" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }

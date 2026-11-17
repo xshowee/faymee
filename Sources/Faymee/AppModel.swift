@@ -509,7 +509,7 @@ final class AppModel {
 
     // MARK: - 整理
 
-    /// 合并分片为 recording.m4a。成功后删除分片；失败则保留分片，可以重试
+    /// 合并分片为 recording.m4a（有系统声音时另导出 system.m4a）。成功后删除分片；失败则保留分片，可以重试
     func finalize(_ id: String) async {
         guard var m = meeting(id), m.id != current?.id else { return }
         // 整理好就要排队转写：在那之前转写不算空闲。否则标记整理完成、解除暂停的瞬间转写队列是空的，
@@ -520,10 +520,9 @@ final class AppModel {
         m.error = nil
         update(m)
 
-        let output = store.directory(id).appendingPathComponent("recording.m4a")
         let result: Result<FinalizeResult, Error>
         do {
-            result = .success(try await Finalizer.export(segments: store.segmentFiles(id), to: output))
+            result = .success(try await Finalizer.export(m, in: store))
         } catch {
             result = .failure(error)
         }
@@ -532,8 +531,9 @@ final class AppModel {
         guard var latest = meeting(id) else { return }
         switch result {
         case let .success(finalized):
-            latest.markFinalized(recording: output.lastPathComponent, finalized)
+            latest.markFinalized(recording: Finalizer.recordingFile, finalized)
             update(latest)
+            // 系统声音分片在 segments/system/ 里，一并删除
             try? FileManager.default.removeItem(at: store.segmentsDirectory(id))
             transcription.enqueue(id)
         case let .failure(error):

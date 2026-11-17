@@ -47,6 +47,23 @@ public struct RecordingTimeline: Sendable {
         return span.offset + min(max(t.timeIntervalSince(span.startedAt), 0), span.duration)
     }
 
+    /// 墙钟上的一段音频（从 start 起 duration 秒）落在录音里的各段，按麦克风分片的边界切开。
+    /// 落在分片之间（断点、麦克风重试中）或录音首尾之外的部分没有位置，丢弃；不像 `offset(at:)` 那样钳到边界。
+    /// 每个分片的墙钟范围截止到下一个分片的起点，免得分片实际时长略长于墙钟间隔时同一段声音摆两次
+    public func pieces(from start: Date, duration: TimeInterval) -> [TimelinePiece] {
+        let end = start.addingTimeInterval(duration)
+        return spans.indices.compactMap { i in
+            let span = spans[i]
+            var spanEnd = span.startedAt.addingTimeInterval(span.duration)
+            if i + 1 < spans.count { spanEnd = min(spanEnd, spans[i + 1].startedAt) }
+            let from = max(start, span.startedAt), to = min(end, spanEnd)
+            guard to > from else { return nil }
+            return TimelinePiece(source: from.timeIntervalSince(start),
+                                 offset: span.offset + from.timeIntervalSince(span.startedAt),
+                                 duration: to.timeIntervalSince(from))
+        }
+    }
+
     /// 空白在录音中对应的区间。没有结束时间的空白（录音中断时仍在合盖）延续到录音结束。
     /// 空白恰好落在没录到的时段时，区间可能长度为 0
     public func range(of gap: Gap) -> ClosedRange<TimeInterval> {
@@ -54,6 +71,15 @@ public struct RecordingTimeline: Sendable {
         let end = gap.end.map(offset(at:)) ?? spans.map { $0.offset + $0.duration }.max()!
         return start...max(start, end)
     }
+}
+
+/// 一段墙钟音频在录音里的一块，见 `RecordingTimeline.pieces(from:duration:)`
+public struct TimelinePiece: Sendable, Equatable {
+    /// 在原音频里的起点（秒，相对音频开头）
+    public var source: TimeInterval
+    /// 在录音里的起点（秒）
+    public var offset: TimeInterval
+    public var duration: TimeInterval
 }
 
 extension Meeting {

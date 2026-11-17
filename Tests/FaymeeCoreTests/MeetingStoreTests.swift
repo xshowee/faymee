@@ -402,4 +402,116 @@ private func date(_ iso: String) -> Date {
             == ["id": "a2", "at": "2026-11-10T02:06:30Z", "kind": "note", "text": "预算 → 老王确认"])
         #expect(json["lastAnnotationNumber"] as? Int == 2)
     }
+
+    /// v0.5 写出的 meeting.json（逐字，带标注）：没开过系统声音的会议读入再保存，文件逐字节相同
+    @Test func 没开系统声音时写出的文件与以前相同() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let v05 = """
+        {
+          "annotations" : [
+            {
+              "at" : "2026-11-10T02:05:00Z",
+              "id" : "a1",
+              "kind" : "mark"
+            },
+            {
+              "at" : "2026-11-10T02:06:30Z",
+              "id" : "a2",
+              "kind" : "note",
+              "text" : "预算 → 老王确认"
+            }
+          ],
+          "diarization" : {
+            "status" : "done"
+          },
+          "duration" : 3540,
+          "endedAt" : "2026-11-10T03:00:00Z",
+          "gaps" : [
+            {
+              "end" : "2026-11-10T02:11:00Z",
+              "reason" : "lidClosed",
+              "start" : "2026-11-10T02:10:00Z"
+            }
+          ],
+          "id" : "2026-11-10_10-00-00",
+          "lastAnnotationNumber" : 2,
+          "minutes" : {
+            "status" : "done"
+          },
+          "recording" : "recording.m4a",
+          "segments" : [
+            {
+              "channels" : 1,
+              "device" : "MacBook Pro 麦克风",
+              "deviceUID" : "BuiltIn",
+              "duration" : 3540,
+              "file" : "0001.caf",
+              "offset" : 0,
+              "sampleRate" : 48000,
+              "startedAt" : "2026-11-10T02:00:00Z"
+            }
+          ],
+          "startedAt" : "2026-11-10T02:00:00Z",
+          "status" : "done",
+          "title" : "会议 11月10日 10:00",
+          "transcription" : {
+            "status" : "done"
+          }
+        }
+        """
+        let dir = store.directory("2026-11-10_10-00-00")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("meeting.json")
+        try Data(v05.utf8).write(to: url)
+
+        let loaded = try #require(store.loadAll().first)
+        #expect(loaded.systemSoundSegmentList.isEmpty)
+        #expect(loaded.systemSoundPeriodList.isEmpty)
+        #expect(loaded.systemSoundUnavailablePeriodList.isEmpty)
+        #expect(loaded.systemSoundRecording == nil)
+        try store.save(loaded)
+        #expect(try String(contentsOf: url, encoding: .utf8) == v05)
+    }
+
+    @Test func 系统声音的字段按约定写入并能读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        var m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        m.systemSoundSegmentList = [SystemSoundSegment(file: "0001.caf", startedAt: date("2026-11-10T02:00:01Z"),
+                                                        sampleRate: 48000, channels: 2)]
+        m.systemSoundPeriodList = [WallClockPeriod(start: date("2026-11-10T02:00:00Z"), end: date("2026-11-10T02:30:00Z")),
+                                   WallClockPeriod(start: date("2026-11-10T02:40:00Z"))]
+        m.systemSoundUnavailablePeriodList = [WallClockPeriod(start: date("2026-11-10T02:10:00Z"))]
+        m.systemSoundRecording = "system.m4a"
+        try store.save(m)
+
+        #expect(MeetingStore(root: store.root).loadAll() == [m])
+        let url = store.directory(m.id).appendingPathComponent("meeting.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(json["systemSoundSegments"] as? [NSDictionary] == [
+            ["file": "0001.caf", "startedAt": "2026-11-10T02:00:01Z", "sampleRate": 48000, "channels": 2],
+        ])
+        #expect(json["systemSoundPeriods"] as? [NSDictionary] == [
+            ["start": "2026-11-10T02:00:00Z", "end": "2026-11-10T02:30:00Z"],
+            ["start": "2026-11-10T02:40:00Z"],
+        ])
+        #expect(json["systemSoundUnavailablePeriods"] as? [NSDictionary] == [["start": "2026-11-10T02:10:00Z"]])
+        #expect(json["systemSoundRecording"] as? String == "system.m4a")
+    }
+
+    /// 列表清空后字段不写，免得留下一个空数组让文件与没开过系统声音时不同
+    @Test func 系统声音的列表为空时不写字段() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        var m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        m.systemSoundPeriodList = []
+        m.systemSoundUnavailablePeriodList = []
+        m.systemSoundSegmentList = []
+        try store.save(m)
+
+        let url = store.directory(m.id).appendingPathComponent("meeting.json")
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(json.keys.filter { $0.hasPrefix("systemSound") }.isEmpty)
+    }
 }
