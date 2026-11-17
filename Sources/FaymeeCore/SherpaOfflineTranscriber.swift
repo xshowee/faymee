@@ -133,6 +133,7 @@ public enum SileroVAD {
 /// - 识别器每场转写建一个（热词是识别器级别的配置），转写结束就释放，不常驻内存
 /// - 进度：解码 0–5%，切段 5–10%，识别 10–100% 按已识别到录音的哪个位置；每段之间检查取消
 /// - 内存主要是整段录音解码后的样本（1 小时约 230 MB）
+/// - 转写期间算在 `SherpaBackgroundWork` 里：App 退出前取消转写、等它放掉模型
 public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
     public typealias MakeRecognizer = @Sendable (_ hotwords: [String]) throws -> any SegmentRecognizer
     typealias Segmenter = @Sendable (_ samples: [Float], _ flag: CancelFlag) throws -> [Range<Int>]
@@ -142,6 +143,7 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
     private let vadModel: URL?
     private let segmenter: Segmenter
     private let makeRecognizer: MakeRecognizer
+    private let inFlight: DispatchGroup
     /// 串行：同一时刻只跑一场（占 CPU 和与录音时长成正比的内存）
     private let queue = DispatchQueue(label: "com.faymee.sherpa-transcriber", qos: .utility)
 
@@ -157,16 +159,17 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
                       guard let vadModel else { throw SherpaModelError.vadMissing }
                       return try SileroVAD.speech(in: samples, model: vadModel, flag: flag)
                   },
-                  makeRecognizer: makeRecognizer)
+                  inFlight: SherpaBackgroundWork.inFlight, makeRecognizer: makeRecognizer)
     }
 
-    /// 测试用：`segmenter` 代替 VAD 给出说话段
+    /// 测试用：`segmenter` 代替 VAD 给出说话段，`inFlight` 代替全局的那个（免得与并行的其他测试互相等）
     init(model: CatalogModel, catalog: ModelCatalog, modelDirectory: URL, vadModel: URL?,
-         segmenter: @escaping Segmenter, makeRecognizer: @escaping MakeRecognizer) {
+         segmenter: @escaping Segmenter, inFlight: DispatchGroup, makeRecognizer: @escaping MakeRecognizer) {
         models = ([model] + catalog.dependencies(of: model)).compactMap { m in m.download.map { (m.name, $0) } }
         root = modelDirectory
         self.vadModel = vadModel
         self.segmenter = segmenter
+        self.inFlight = inFlight
         self.makeRecognizer = makeRecognizer
     }
 
@@ -181,7 +184,11 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
         let flag = CancelFlag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { c in
+                // 排进队列就算：退出时它要么已取消、很快返回，要么正在用模型
+                let inFlight = self.inFlight
+                inFlight.enter()
                 queue.async {
+                    defer { inFlight.leave() }
                     c.resume(with: Result {
                         try self.run(audio: audio, hotwords: hotwords, flag: flag, progress: progress)
                     })
@@ -209,6 +216,8 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
         let speech = try segmenter(samples, flag)
         let segments = SpeechSegmentation.segments(speech: speech, samples: samples)
         progress(Self.decodeShare + Self.segmentShare)
+        // 加载模型打断不了（Fun-ASR-Nano 约 2 秒）：已取消就不加载
+        try flag.check()
 
         let recognizeFrom = Self.decodeShare + Self.segmentShare
         var results: [(segment: SpeechSegment, recognition: SegmentRecognition)] = []

@@ -90,7 +90,10 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
         let flag = CancelFlag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { c in
+                // 用 onnxruntime 期间算在 SherpaBackgroundWork 里：App 退出前取消、等它放掉模型
+                SherpaBackgroundWork.inFlight.enter()
                 queue.async {
+                    defer { SherpaBackgroundWork.inFlight.leave() }
                     c.resume(with: Result {
                         try self.run(audio: audio, sentences: sentences, speakerCount: speakerCount, flag: flag,
                                      progress: Progress(progress))
@@ -108,7 +111,9 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
         let flag = CancelFlag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { c in
+                SherpaBackgroundWork.inFlight.enter()
                 queue.async {
+                    defer { SherpaBackgroundWork.inFlight.leave() }
                     c.resume(with: Result { try self.extract(audio: audio, groups: groups, flag: flag) })
                 }
             }

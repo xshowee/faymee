@@ -66,12 +66,22 @@ private struct Fixture {
     }
 
     /// 切段用固定的说话段（秒），不跑 VAD
-    func transcriber(speech: [Range<Double>], recognizer: @escaping @Sendable ([String]) throws -> any SegmentRecognizer)
+    /// - Parameter whileSegmenting: 切段时调用（模拟 VAD 在跑）
+    func transcriber(speech: [Range<Double>], inFlight: DispatchGroup = DispatchGroup(),
+                     whileSegmenting: @escaping @Sendable () -> Void = {},
+                     recognizer: @escaping @Sendable ([String]) throws -> any SegmentRecognizer)
         -> SherpaOfflineTranscriber {
         let ranges = speech.map { Int($0.lowerBound * 16000)..<Int($0.upperBound * 16000) }
         return SherpaOfflineTranscriber(model: catalog.model(id: asr.id)!, catalog: catalog, modelDirectory: root,
-                                        vadModel: vad, segmenter: { _, _ in ranges }, makeRecognizer: recognizer)
+                                        vadModel: vad, segmenter: { _, _ in whileSegmenting(); return ranges },
+                                        inFlight: inFlight, makeRecognizer: recognizer)
     }
+}
+
+/// 阻塞等待只在同步函数里做（放进 Task.detached 调用）
+private func block(on semaphore: DispatchSemaphore) { semaphore.wait() }
+private func isReleased(_ group: DispatchGroup, within seconds: Double) -> Bool {
+    group.wait(timeout: .now() + seconds) == .success
 }
 
 @Suite struct SherpaOfflineTranscriberTests {
@@ -139,6 +149,70 @@ private struct Fixture {
 
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(recognizer.received.count == 1)
+    }
+
+    /// 进程退出时 onnxruntime 还在建会话（加载模型）会崩（ticket 07；会后转写在测试进程里复现过）。
+    /// 加载打断不了：取消后转写仍算在 inFlight 里，直到识别器建完、放掉，App 退出前据此等它
+    @Test func 取消后等得到模型释放_加载模型中也算在内() async throws {
+        let f = try Fixture()
+        let group = DispatchGroup()
+        let loading = DispatchSemaphore(value: 0)
+        let loaded = DispatchSemaphore(value: 0)
+        let made = WeakBox()
+        let transcriber = f.transcriber(speech: [1..<5], inFlight: group) { _ in
+            loading.signal()
+            loaded.wait()
+            let r = FakeRecognizer(texts: ["好的"])
+            made.value = r
+            return r
+        }
+        func released(within seconds: Double) async -> Bool {
+            await Task.detached { isReleased(group, within: seconds) }.value
+        }
+
+        let task = Task { try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in } }
+        await Task.detached { block(on: loading) }.value
+        task.cancel()
+
+        #expect(await !released(within: 0.2))
+        loaded.signal()
+        #expect(await released(within: 5))
+        #expect(made.value == nil)
+        await #expect(throws: CancellationError.self) { try await task.value }
+    }
+
+    /// 加载模型打断不了（Fun-ASR-Nano 约 2 秒）：切段时就取消了，就不再加载
+    @Test func 切段时取消_不加载模型() async throws {
+        let f = try Fixture()
+        let segmenting = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        let made = Box<Int>(0)
+        let transcriber = f.transcriber(speech: [1..<5], whileSegmenting: {
+            segmenting.signal()
+            resume.wait()
+        }) { _ in
+            made.value += 1
+            return FakeRecognizer(texts: ["好的"])
+        }
+
+        let task = Task { try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in } }
+        await Task.detached { block(on: segmenting) }.value
+        task.cancel()
+        resume.signal()
+
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(made.value == 0)
+    }
+
+    @Test func 没开始转写时不算在内_转写结束后也不算() async throws {
+        let f = try Fixture()
+        let group = DispatchGroup()
+        let transcriber = f.transcriber(speech: [1..<5], inFlight: group) { _ in FakeRecognizer(texts: ["好的"]) }
+        #expect(isReleased(group, within: 0))
+
+        _ = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }
+
+        #expect(isReleased(group, within: 0))
     }
 
     @Test func 模型文件缺失时报清楚的中文错误_不创建识别器() async throws {

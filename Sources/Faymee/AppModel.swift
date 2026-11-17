@@ -172,6 +172,14 @@ final class AppModel {
         return m.roles.contains(.transcription) ? transcriptionModelDeleteBlockedReason : nil
     }
 
+    /// App 退出前：取消在后台用 onnxruntime 的会后任务（会后转写、区分说话人、重算声纹库），
+    /// 之后由调用方等它们放掉模型（`SherpaBackgroundWork.waitUntilReleased`）。
+    /// 转写管线暂停即取消正在进行的那场并放回队首、状态记为排队，下次启动照常恢复；重算声纹库已写回的人保留
+    func cancelBackgroundWorkForQuit() {
+        transcription.isSuspended = true
+        voiceprintRecomputation.cancel()
+    }
+
     /// 用所选声纹模型重算声纹库；所选模型还不能用（没下载）时什么都不做
     func recomputeVoiceprints() {
         guard let extractor = voiceprintModel.makeExtractor() else { return }
