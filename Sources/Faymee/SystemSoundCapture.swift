@@ -292,7 +292,8 @@ final class SystemSoundCapture {
     private func watchDevice(format: AudioStreamBasicDescription) {
         let tapID = tapID
         let aggregateID = aggregateID
-        let properties = [(aggregateID, kAudioDevicePropertyDeviceIsAlive), (tapID, kAudioTapPropertyFormat)]
+        let properties = [(aggregateID, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal),
+                          (tapID, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal)]
         watch.start(properties) { [weak self] in
             guard let self else { return }
             var alive = UInt32(1)
@@ -360,40 +361,6 @@ private final class OpenedSegments: @unchecked Sendable {
             defer { segments = [] }
             return segments
         }
-    }
-}
-
-/// 监听这次建立的聚合设备和 tap 的属性变化，在主线程回调。停止后、或已经换了一次建立，
-/// 迟到的通知一律丢掉（每次 start 换一代）。和 SystemSoundCapture 一样只在主线程用
-private final class DeviceWatch: @unchecked Sendable {
-    private var registered: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
-    private var generation = 0
-
-    func start(_ properties: [(AudioObjectID, AudioObjectPropertySelector)], onChange: @escaping @MainActor () -> Void) {
-        stop()
-        let generation = generation
-        for (object, selector) in properties {
-            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
-                                                     mElement: kAudioObjectPropertyElementMain)
-            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                MainActor.assumeIsolated {
-                    guard let self, self.generation == generation else { return }
-                    onChange()
-                }
-            }
-            if AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr {
-                registered.append((object, address, block))
-            }
-        }
-    }
-
-    func stop() {
-        generation += 1
-        for (object, address, block) in registered {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
-        }
-        registered = []
     }
 }
 
