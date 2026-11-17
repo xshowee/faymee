@@ -48,7 +48,7 @@ struct StreamingEngineComparisonTests {
             ("SpeechAnalyzer", SpeechAnalyzerStreamingTranscriber(), []),
             ("X-ASR-480ms", SherpaStreamingTranscriber(model: .xASR480), []),
             ("X-ASR-960ms", SherpaStreamingTranscriber(model: .xASR960), []),
-            ("X-ASR-480ms+热词", SherpaStreamingTranscriber(model: .xASR480), evalHotwords),
+            ("X-ASR-480ms+热词", SherpaStreamingTranscriber(model: .xASR480, usesHotwords: true), evalHotwords),
         ].filter { evalEngines?.contains($0.0) ?? true }
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat

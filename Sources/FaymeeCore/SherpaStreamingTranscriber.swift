@@ -11,17 +11,33 @@ import SherpaOnnxC
 /// - 坏模型会让 sherpa-onnx `_Exit` 整个进程：每次开始转写前都按大小确认文件齐全（ticket 01 下载时已校验 sha256），
 ///   不齐（比如会中删了模型）就发 `.failed`，不交给 sherpa-onnx
 /// - 每次 `start` 加载一份识别器（int8 约 170 MB，加载不到 1 秒），转写结束或取消时释放；加载期间送来的音频先缓存
-/// - 有热词时改用 `modified_beam_search` 并按流传入热词（见 `hotwordsVocab`）；没有时用 `greedy_search`（评估用的就是它）
+/// - 默认不用热词，`start` 传进来的热词表忽略，一直用 `greedy_search`（评估用的就是它）。热词要 `modified_beam_search`：
+///   它的结果会回改，句子只能等停顿处定稿，真实会议里九成句子晚 9–15 秒才定稿，字差异率也没变好（ticket 07）。
+///   热词交给实时字幕定稿和会后转写。`usesHotwords` 打开时按流传入热词（见 `OnlineRecognizer.hotwordsVocab`），留给对比测试
+/// - 退出 App 前调用 `waitUntilReleased`：识别器还在加载或解码时进程退出，onnxruntime 会崩在已析构的全局表上
 public final class SherpaStreamingTranscriber: StreamingTranscriber {
     public let model: LocalModel
     private let directory: URL
     private let threads: Int
+    private let usesHotwords: Bool
 
     /// threads 与评估一致取 2：480ms 版 20 分钟音频约 40 秒解完（约 3% 实时），不必多占核
-    public init(model: LocalModel, directory: URL = LocalModel.defaultDirectory, threads: Int = 2) {
+    public init(model: LocalModel, directory: URL = LocalModel.defaultDirectory, threads: Int = 2,
+                usesHotwords: Bool = false) {
         self.model = model
         self.directory = directory
         self.threads = threads
+        self.usesHotwords = usesHotwords
+    }
+
+    /// 正在用识别器（加载、解码）的转写任务。转写任务开始前进入、放掉识别器后离开
+    static let inFlight = DispatchGroup()
+
+    /// 等所有转写任务放掉识别器（取消或结束之后，最多再等加载完一次，通常不到 1 秒）。App 退出前在主线程调用；
+    /// 转写任务不需要主线程。超时返回 false
+    @discardableResult
+    public static func waitUntilReleased(timeout: TimeInterval) -> Bool {
+        inFlight.wait(timeout: .now() + timeout) == .success
     }
 
     /// 模型是用时下载的，下载由设置里的模型选择负责；这里只确认文件齐全
@@ -32,7 +48,7 @@ public final class SherpaStreamingTranscriber: StreamingTranscriber {
 
     public func start(format: AVAudioFormat, hotwords: [String]) -> any StreamingTranscription {
         SherpaStreamingTranscription(model: model, directory: directory, threads: threads, format: format,
-                                     hotwords: hotwords)
+                                     hotwords: usesHotwords ? hotwords : [])
     }
 }
 
@@ -71,8 +87,12 @@ private final class SherpaStreamingTranscription: StreamingTranscription, @unche
         let audio: AsyncStream<AudioChunk>
         (audio, input) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(Self.backlog))
         let output = output
-        // 解码是同步的 C 调用，每块几毫秒到几十毫秒；不在调用方（主线程）的执行器上跑
+        // 解码是同步的 C 调用，每块几毫秒到几十毫秒；不在调用方（主线程）的执行器上跑。
+        // 在这里就进入 inFlight：任务还没开始跑时 App 退出也要等它
+        SherpaStreamingTranscriber.inFlight.enter()
         task = Task.detached(priority: .userInitiated) {
+            // run 返回时识别器已释放（局部变量）
+            defer { SherpaStreamingTranscriber.inFlight.leave() }
             do {
                 try await Self.run(audio, model: model, directory: directory, threads: threads, format: format,
                                    hotwords: hotwords, output: output)
@@ -106,6 +126,8 @@ private final class SherpaStreamingTranscription: StreamingTranscription, @unche
                             output: AsyncStream<StreamingTranscriptionEvent>.Continuation) async throws {
         guard model.isDownloaded(in: directory) else { throw SherpaStreamingError.modelMissing }
         guard let resampler = MonoResampler(from: format) else { throw SherpaStreamingError.unsupportedFormat }
+        // 还没开始加载就取消了（录音刚开始就停）：不加载
+        try Task.checkCancellation()
         let recognizer = try OnlineRecognizer(model: model, directory: directory, threads: threads,
                                               hotwords: hotwords)
         try Task.checkCancellation()

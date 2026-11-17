@@ -101,9 +101,22 @@ struct SherpaStreamingTranscriberContractTests {
         #expect(sentences.allSatisfy { 100 <= $0.start && $0.end <= 100 + length + 0.5 })
     }
 
-    @Test func 带热词也能转() async throws {
+    /// 实时字幕不用热词：beam search 只能在停顿处定稿（九成句子晚 9–15 秒），真实会议的字差异率也更差（ticket 07）
+    @Test func 默认不用热词_传了也照greedy转() async throws {
         let url = try twoSpeakersURL()
         let engine = SherpaStreamingTranscriber(model: .xASR480)
+        let format = try AVAudioFile(forReading: url).processingFormat
+
+        let (events, _) = try await stream(url, into: engine.start(format: format, hotwords: ["对接接口"]), pace: .zero)
+
+        let text = events.compactMap { if case .sentence(let s) = $0 { s.text } else { nil } }.joined()
+        // 与不传热词时一样（greedy 的结果是「对接借口」）
+        #expect(text.contains("对接借口"))
+    }
+
+    @Test func 打开热词时_热词生效() async throws {
+        let url = try twoSpeakersURL()
+        let engine = SherpaStreamingTranscriber(model: .xASR480, usesHotwords: true)
         let format = try AVAudioFile(forReading: url).processingFormat
 
         let (events, _) = try await stream(url, into: engine.start(format: format, hotwords: ["对接接口", "提测", "飞书", "LangChain"]),
@@ -121,7 +134,7 @@ struct SherpaStreamingTranscriberContractTests {
     /// 热词表是用户随手写的：怪字符、生僻字、表情、纯空白都不能让识别出错或让正常的热词失效
     @Test func 热词里有怪字符时_照常转且正常的热词仍生效() async throws {
         let url = try twoSpeakersURL()
-        let engine = SherpaStreamingTranscriber(model: .xASR480)
+        let engine = SherpaStreamingTranscriber(model: .xASR480, usesHotwords: true)
         let format = try AVAudioFile(forReading: url).processingFormat
         let hotwords = ["C#", ":x", "@home", "#tag", "GPT-4o", "3.5", "龘", "🎉", "   ", "a:b", "对接接口"]
 
@@ -152,9 +165,24 @@ struct SherpaStreamingTranscriberContractTests {
 
         await collected.value
         #expect(ContinuousClock.now - started < .milliseconds(200))
-        // 识别器可能还在加载（取消打断不了 sherpa-onnx 的加载，加载完立即释放）。
-        // 测试进程在加载中途退出会让 onnxruntime 崩在已析构的全局表上，等它加载完再结束
-        try await Task.sleep(for: .seconds(3))
+        // 识别器可能还在加载（取消打断不了 sherpa-onnx 的加载）。进程在加载中途退出会让 onnxruntime 崩在
+        // 已析构的全局表上，App 退出前等它释放；这里也一样，没等到就会在测试进程退出时崩
+        #expect(await releasedInTime())
+    }
+
+    /// 录音刚开始就停（识别器还在加载）：转写任务很快放掉识别器，App 退出前等得到
+    @Test func 刚开始就取消_识别器很快释放() async throws {
+        let url = try twoSpeakersURL()
+        let format = try AVAudioFile(forReading: url).processingFormat
+        let transcriptions = (0..<3).map { _ in SherpaStreamingTranscriber(model: .xASR480).start(format: format, hotwords: []) }
+
+        for t in transcriptions { t.cancel() }
+
+        #expect(await releasedInTime())
+    }
+
+    private func releasedInTime() async -> Bool {
+        await Task.detached { SherpaStreamingTranscriber.waitUntilReleased(timeout: 5) }.value
     }
 }
 

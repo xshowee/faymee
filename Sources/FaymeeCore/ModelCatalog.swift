@@ -244,13 +244,14 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.xASR480.id, roles: [.liveCaptions], family: .sherpaOnlineTransducer,
             source: .download(.xASR480), name: "X-ASR 480ms",
-            capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: true),
+            // 实时字幕不用热词（beam search 定稿太晚，见 SherpaStreamingTranscriber）
+            capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: false),
             verdicts: [.liveCaptions: "比 SpeechAnalyzer 准；480ms 更跟手"],
             license: "Apache-2.0"),
         CatalogModel(
             id: LocalModel.xASR960.id, roles: [.liveCaptions], family: .sherpaOnlineTransducer,
             source: .download(.xASR960), name: "X-ASR 960ms",
-            capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: true),
+            capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: false),
             verdicts: [.liveCaptions: "比 SpeechAnalyzer 准；比 480ms 略准、更省 CPU，字幕稍慢"],
             license: "Apache-2.0"),
 
