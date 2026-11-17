@@ -1,0 +1,110 @@
+import Testing
+@testable import FaymeeCore
+
+/// 用例来自真实会议上 Fun-ASR-Nano 的输出（评估数据里的片段）
+@Suite struct ASROutputGuardTests {
+    @Test(arguments: [
+        // 同一单元连续 ≥ 8 次（在中间）
+        "我我我我我我我我我我我我我我我我我我我。大伟的意思是说你们问打的时候",
+        "我们对对其实其实其实其实其实其实其实其实其实其实。现在刚才呈现的意思是",
+        "不是不是不是不是不是不是不是不是还不是啊还不是",
+        // 带标点的单元
+        "有一点点，没有，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这",
+        // 末尾连续 ≥ 5 次
+        "你要把这个整出来，这个啊，这个这个这个这个这个这个这个。",
+        "那就麻烦你们了，哎呀，那那那那那那那那那。",
+        "那那那那那",
+    ])
+    func 失控复读判为复读(_ text: String) {
+        #expect(ASROutputGuard.isRunaway(text))
+    }
+
+    @Test(arguments: [
+        // 真实口吃
+        "到不不不不不啊，也是",
+        "我觉得不是不是不是不是不是，还是要再看看",
+        "这个这个。",
+        "好像可以可以搞，可以搞，把这个智能体工具",
+        // 数字不算复读
+        "预算一共是100000",
+        "电话是13800000000，",
+        "哈哈哈哈",
+    ])
+    func 口吃和正常输出不误判(_ text: String) {
+        #expect(!ASROutputGuard.isRunaway(text))
+    }
+
+    @Test(arguments: [
+        ("嗯，我我我我我我我我我我我我我我我我我我我我我我我我。", "嗯，我我我。"),
+        ("你要把这个整出来，这个啊，这个这个这个这个这个这个这个。", "你要把这个整出来，这个啊，这个这个这个。"),
+        // 带标点的单元：标点跟着单元一起删，末尾没写完的半个单元也删
+        ("没有，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这个，就用这",
+         "没有，就用这个，就用这个，就用这个，"),
+        // 中间的失控段截掉后，后面的内容保留；口吃（不到失控）不动
+        ("我们对对其实其实其实其实其实其实其实其实其实其实。到不不不不不啊，现在",
+         "我们对对其实其实其实。到不不不不不啊，现在"),
+        ("行，咱有事咱有事咱有事。那就麻烦你们了，哎呀，那那那那那那那那那。",
+         "行，咱有事咱有事咱有事。那就麻烦你们了，哎呀，那那那。"),
+        ("没有复读的文字", "没有复读的文字"),
+    ])
+    func 失控的连续重复截到3次(_ text: String, _ expected: String) {
+        #expect(ASROutputGuard.truncateRepeats(text) == expected)
+        #expect(!ASROutputGuard.isRunaway(ASROutputGuard.truncateRepeats(text)))
+    }
+
+    @Test(arguments: [
+        ("咱有事咱有事。 /sil 那就麻烦你们了", "咱有事咱有事。那就麻烦你们了"),
+        ("[breath]然后我们看一下", "然后我们看一下"),
+        ("好的 [breath] 下一个", "好的下一个"),
+        ("调 agent [breath] 的这些", "调 agent 的这些"),
+        ("用 LangChain /sil Agent 搭", "用 LangChain Agent 搭"),
+        ("<|im_end|>", ""),
+        ("调 agent 的这些，DeerFlow 和 LangChain", "调 agent 的这些，DeerFlow 和 LangChain"),
+    ])
+    func 删掉标记(_ text: String, _ expected: String) {
+        #expect(ASROutputGuard.clean(text) == expected)
+    }
+
+    @Test func 判出日文和提示词泄漏_英文和数字不算() {
+        #expect(ASROutputGuard.problem(in: "やるぞ！") == .foreign)
+        #expect(ASROutputGuard.problem(in: "ええ、あ、このように集中したのかな、この。") == .foreign)
+        #expect(ASROutputGuard.problem(in: "あんまりないですね。") == .foreign)
+        #expect(ASROutputGuard.problem(in: "안녕하세요") == .foreign)
+        #expect(ASROutputGuard.problem(in: "system") == .promptLeak)
+        #expect(ASROutputGuard.problem(in: "热词列表：[DeerFlow, LangChain]") == .promptLeak)
+        #expect(ASROutputGuard.problem(in: "那那那那那那那那那。") == .runaway)
+        for ok in ["OK。", "LangChain", "7月2号交付，预算100000", "好的，那我们就这样定了。", "这个系统要上线", "",
+                   "我们要做语音转写，热词列表也要支持"] {
+            #expect(ASROutputGuard.problem(in: ok) == nil, "\(ok)")
+        }
+    }
+
+    /// 对半重转的两半在中点各多带 0.2 秒，交界处的字常被两半各识别一遍（真实输出）
+    @Test(arguments: [
+        ("掉下面的一些小的什么，你现在这些是不在，就是", "就是室内网的还是就是自自己联系的，我这。",
+         "掉下面的一些小的什么，你现在这些是不在，就是室内网的还是就是自自己联系的，我这。"),
+        ("我是说最终的，就说你们去给。", "去给客户交付，哎，做售后服务。", "我是说最终的，就说你们去给客户交付，哎，做售后服务。"),
+        ("你要把这个整出来，这个啊，这个。", "这个东西，这个东西这个。", "你要把这个整出来，这个啊，这个东西，这个东西这个。"),
+        // 没有重复的字：原样接上
+        ("嗯，我们现在大模型训练，这个这个模型其实还是挺难的。", "我们这只是应用层。",
+         "嗯，我们现在大模型训练，这个这个模型其实还是挺难的。我们这只是应用层。"),
+        ("看前面这都在群里面。", "", "看前面这都在群里面。"),
+        ("", "那就麻烦你们了。", "那就麻烦你们了。"),
+        // 英文之间留空格
+        ("我们用的是", "LangChain 和 Agent。", "我们用的是LangChain 和 Agent。"),
+        ("我们用的是 DeerFlow", "LangChain 和 Agent。", "我们用的是 DeerFlow LangChain 和 Agent。"),
+    ])
+    func 两半拼起来时去掉交界处重复的字(_ first: String, _ second: String, _ expected: String) {
+        #expect(ASROutputGuard.joinHalves(first, second) == expected)
+    }
+
+    @Test(arguments: [
+        ("嗯，我我我我我我我我我我我我我我我我我我我我我我我我。", "嗯，我我我。"),
+        ("やるぞ！", ""),
+        ("system", ""),
+        ("好的。", "好的。"),
+    ])
+    func 重转后仍有问题时的兜底_复读截短_日文和泄漏丢掉(_ text: String, _ expected: String) {
+        #expect(ASROutputGuard.salvage(text) == expected)
+    }
+}
