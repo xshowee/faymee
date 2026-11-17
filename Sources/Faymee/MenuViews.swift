@@ -98,7 +98,10 @@ struct MenuContent: View {
         }
         .padding(14)
         .frame(width: 280)
-        .task { await model.refreshSleepState() }
+        .task {
+            model.recheckSystemSoundBeforeRecording()
+            await model.refreshSleepState()
+        }
     }
 
     @ViewBuilder private var recordingSection: some View {
