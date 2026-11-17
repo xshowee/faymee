@@ -25,6 +25,19 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if model.liveCaptionsEnabled {
+                    ModelPicker(role: .liveCaptions, title: "字幕模型",
+                                deleteBlockedReason: { m in
+                                    model.liveCaptionModelID == m.id ? "正在用它显示本场录音的字幕，录音结束后才能删除" : nil
+                                })
+                    if let note = liveCaptionModelNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             Section("转写") {
@@ -128,6 +141,21 @@ struct SettingsView: View {
             model.flushOnlineSettingsSync()
             model.cancelInFlightConnectionTests()
         }
+    }
+}
+
+extension SettingsView {
+    /// 字幕模型的说明：所选模型没下载完时说明正在用 SpeechAnalyzer；录音中改了选择时说明从下一场起生效
+    private var liveCaptionModelNote: String? {
+        guard let selected = model.modelSelections.selected(for: .liveCaptions) else { return nil }
+        // 读下载器的状态（可观察），下载完成、删除后说明跟着变
+        let ready = model.modelDownloads.downloader(for: selected)?.isReady ?? true
+        if let inUse = model.liveCaptionModelID, inUse != (ready ? selected.id : ModelCatalog.speechAnalyzerID) {
+            let name = ModelCatalog.builtIn.model(id: inUse)?.name ?? inUse
+            return "本场录音的字幕仍用 \(name)，下一场录音起生效"
+        }
+        guard !ready else { return nil }
+        return "\(selected.name) 还没下载，实时字幕暂时用 SpeechAnalyzer（系统自带）；下载完成后，下一场录音起改用它"
     }
 }
 

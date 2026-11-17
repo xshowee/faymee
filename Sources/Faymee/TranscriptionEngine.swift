@@ -19,7 +19,12 @@ enum TranscriptionEngine {
     }
 }
 
-/// 实时字幕用哪个流式转写引擎。固定在本机运行，不走在线模型
+/// 实时字幕用哪个流式转写引擎：设置里“实时字幕”选中的本机模型，没下载完时退回 SpeechAnalyzer。
+/// 固定在本机运行，不走在线模型。每场录音开始时选一次，录音中改设置从下一场起生效
 enum LiveCaptionEngine {
-    static func make() -> any StreamingTranscriber { SpeechAnalyzerStreamingTranscriber() }
+    @MainActor
+    static func make(selections: ModelSelections) -> LiveCaptionEngineChoice {
+        LiveCaptionEngineChoice(selected: selections.selected(for: .liveCaptions),
+                                directory: LocalModel.defaultDirectory)
+    }
 }

@@ -91,6 +91,9 @@ struct ModelPicker: View {
 
     private func deleteMessage(_ target: CatalogModel) -> String {
         let size = downloadBytes(target).map(formatModelSize) ?? ""
+        if role == .liveCaptions {
+            return "释放约 \(size) 空间。删除后，实时字幕改用 SpeechAnalyzer（系统自带），直到重新下载。"
+        }
         // 声纹模型没下好时不排队：新会议只是不区分说话人
         if role == .voiceprint {
             return "释放约 \(size) 空间。删除后，重新下载前新的会议不区分说话人。已有会议的说话人不受影响。"

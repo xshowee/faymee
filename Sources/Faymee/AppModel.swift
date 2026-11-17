@@ -224,6 +224,9 @@ final class AppModel {
             livePanel.captionsEnabled = liveCaptionsEnabled
         }
     }
+    /// 本场录音的实时字幕在用的模型 id（所选模型没下载完时是 SpeechAnalyzer）；不在录音时为 nil。
+    /// 设置里据此不让删正在用的模型
+    private(set) var liveCaptionModelID: String?
     /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
     private(set) var liveCaptions: LiveCaptions? {
         didSet {
@@ -822,8 +825,9 @@ final class AppModel {
     /// 录音开始：建好本场的实时字幕（面板第一次看得见时才准备模型），按上次的状态决定是否打开面板
     private func startLiveCaptions() {
         guard let m = current else { return }
-        liveCaptions = LiveCaptions(engine: LiveCaptionEngine.make(), recordingStartedAt: m.startedAt,
-                                    hotwords: hotwords)
+        let choice = LiveCaptionEngine.make(selections: modelSelections)
+        liveCaptionModelID = choice.modelID
+        liveCaptions = LiveCaptions(engine: choice.engine, recordingStartedAt: m.startedAt, hotwords: hotwords)
         if opensLivePanelOnStart { livePanel.show() }
     }
 
@@ -832,6 +836,7 @@ final class AppModel {
         opensLivePanelOnStart = livePanel.isOpen
         livePanel.close()
         liveCaptions = nil
+        liveCaptionModelID = nil
     }
 
     // MARK: - 会中标注
