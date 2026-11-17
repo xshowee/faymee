@@ -5,9 +5,14 @@ import Testing
 private final class StubTranscriber: Transcriber, @unchecked Sendable {
     var sentences: [TranscribedSentence]
     private(set) var calls = 0
+    /// 为 true 时转写停在中途，直到改回 false
+    var block = false
+    let started: AsyncStream<Void>
+    private let startedCont: AsyncStream<Void>.Continuation
 
     init(sentences: [TranscribedSentence] = [TranscribedSentence(start: 0, end: 1, text: "本地参考")]) {
         self.sentences = sentences
+        (started, startedCont) = AsyncStream.makeStream()
     }
 
     func prepare(progress: @escaping (Double) -> Void) async throws {
@@ -17,7 +22,23 @@ private final class StubTranscriber: Transcriber, @unchecked Sendable {
     func transcribe(audio: URL, hotwords: [String],
                     progress: @escaping (Double) -> Void) async throws -> [TranscribedSentence] {
         calls += 1
+        startedCont.yield()
+        while block { try await Task.sleep(for: .milliseconds(5)) }
         return sentences
+    }
+}
+
+/// 假下载源：什么地址都回“abc”（`WiringFixture.fakeASR` 的内容）
+private struct ABCTransport: ModelTransport {
+    func get(_ url: URL, from offset: Int64) async throws -> ModelResponse {
+        let data = Data(Data("abc".utf8).suffix(from: Int(offset)))
+        let body = AsyncThrowingStream<Data, Error> { c in
+            c.yield(data)
+            c.finish()
+        }
+        return ModelResponse(status: offset == 0 ? 200 : 206,
+                             contentRange: offset == 0 ? nil : "bytes \(offset)-2/3",
+                             contentLength: Int64(data.count), body: body)
     }
 }
 
@@ -44,11 +65,11 @@ private final class StubTranscriber: Transcriber, @unchecked Sendable {
         let localResolved = OnlineTranscriptionEngine.makeEngine(
             settings: settings,
             transport: transport,
-            local: { (localStub, "apple/speechanalyzer") },
+            local: { (localStub, "apple/speechanalyzer", nil) },
             reference: { referenceStub }
         )
         #expect(localResolved.name == "apple/speechanalyzer")
-        #expect(localResolved.isReady)
+        #expect(localResolved.waitReason == nil)
         let localOut = try await localResolved.transcriber.transcribe(audio: URL(fileURLWithPath: "/tmp/unused.wav"),
                                                                       hotwords: [], progress: { _ in })
         #expect(localOut.first?.text == "本地")
@@ -63,11 +84,11 @@ private final class StubTranscriber: Transcriber, @unchecked Sendable {
         let openAIResolved = OnlineTranscriptionEngine.makeEngine(
             settings: settings,
             transport: transport,
-            local: { (localStub, "apple/speechanalyzer") },
+            local: { (localStub, "apple/speechanalyzer", nil) },
             reference: { referenceStub }
         )
         #expect(openAIResolved.name == "openai/gpt-transcribe")
-        #expect(openAIResolved.isReady)
+        #expect(openAIResolved.waitReason == nil)
 
         try await ProbeAudio.withTemporaryWAV { wavURL in
             let sentences = try await openAIResolved.transcriber.transcribe(audio: wavURL, hotwords: [], progress: { _ in })
@@ -445,6 +466,94 @@ private final class StubTranscriber: Transcriber, @unchecked Sendable {
         try await f.drain()
         #expect(try f.store.loadMinutes("m1")?.model == WiringFixture.secondMinutesID)
     }
+
+    // MARK: 会后转写的本机模型
+
+    @Test func 切换本机转写模型_进行中的用旧模型跑完_排队的和之后的用新模型() async throws {
+        let f = WiringFixture()
+        try await f.downloadFakeASR()
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.localTranscriber.block = true
+        f.transcription.enqueue("m1")
+        var started = f.localTranscriber.started.makeAsyncIterator()
+        await started.next()
+        f.transcription.enqueue("m2")
+
+        // m1 转写中切到假模型：不打断 m1
+        f.selections.select(WiringFixture.fakeASRID, for: .transcription)
+        #expect(f.transcription.activeID == "m1")
+
+        f.localTranscriber.block = false
+        try await f.drain()
+        #expect(try f.store.loadTranscript("m1")?.engine == "apple/speechanalyzer")
+        #expect(try f.store.loadTranscript("m2")?.engine == WiringFixture.fakeASRID)
+        #expect(try f.store.loadTranscript("m2")?.onlineEngineLabel == nil)
+        #expect(f.localTranscriber.calls == 1)
+        #expect(f.fakeASRTranscriber.calls == 1)
+
+        // “重新转写”用当前选择
+        f.transcription.enqueue("m1")
+        try await f.drain()
+        #expect(try f.store.loadTranscript("m1")?.engine == WiringFixture.fakeASRID)
+    }
+
+    @Test func 选了没下载的转写模型_排队等下载这个模型_下载完成后自动开始() async throws {
+        let f = WiringFixture()
+        f.selections.select(WiringFixture.fakeASRID, for: .transcription)
+        f.addMeeting("m1", transcribed: false)
+        f.transcription.enqueue("m1")
+        try await f.drain()
+        #expect(f.transcription.waitReason(for: "m1") == .modelDownload(id: WiringFixture.fakeASRID))
+        #expect(f.fakeASRTranscriber.calls == 0)
+
+        // 用户点“下载”：下好后排队的会议自动开始，不用再碰设置
+        try await f.downloadFakeASR()
+        try await f.drain()
+        #expect(f.host.meetings["m1"]?.transcription?.status == .done)
+        #expect(try f.store.loadTranscript("m1")?.engine == WiringFixture.fakeASRID)
+
+        // 删掉模型：之后的会议又排队等下载
+        try await f.fakeASRDownloader.delete()
+        f.addMeeting("m2", transcribed: false)
+        f.transcription.enqueue("m2")
+        #expect(f.transcription.waitReason(for: "m2") == .modelDownload(id: WiringFixture.fakeASRID))
+    }
+
+    @Test func 在线转写时本机模型下载完成或删除不影响在线引擎() async throws {
+        let f = WiringFixture()
+        f.selections.select(WiringFixture.fakeASRID, for: .transcription)
+
+        // 在线未配置：下好本机模型也照样等配置，不会用没有密钥的在线引擎开始
+        f.settings.transcriptionMode = .online
+        f.settings.transcriptionProvider = .openAI
+        f.addMeeting("m1", transcribed: false)
+        f.transcription.enqueue("m1")
+        try await f.downloadFakeASR()
+        try await f.drain()
+        #expect(f.transcription.waitReason(for: "m1") == .onlineConfig)
+        #expect(f.fakeASRTranscriber.calls == 0)
+
+        // 在线配好后：删掉本机模型不让在线转写排队
+        try f.transport.enqueue(json: ["text": "这是在线转写结果。"])
+        f.settings.transcriptionAPIKey = "sk-openai"
+        try await f.drain()
+        #expect(try f.store.loadTranscript("m1")?.engine == "openai/gpt-transcribe")
+        try await f.fakeASRDownloader.delete()
+        try f.transport.enqueue(json: ["text": "这是在线转写结果。"])
+        f.addMeeting("m2", transcribed: false)
+        f.transcription.enqueue("m2")
+        #expect(f.transcription.waitReason(for: "m2") == nil)
+        try await f.drain()
+        #expect(try f.store.loadTranscript("m2")?.engine == "openai/gpt-transcribe")
+
+        // 回到本机：所选模型没下载，排队等下载
+        f.settings.transcriptionMode = .local
+        f.addMeeting("m3", transcribed: false)
+        f.transcription.enqueue("m3")
+        #expect(f.transcription.waitReason(for: "m3") == .modelDownload(id: WiringFixture.fakeASRID))
+    }
 }
 
 private final class StubGenerator: TextGenerator, @unchecked Sendable {
@@ -542,7 +651,22 @@ private final class WiringFixture {
                      source: .download(LocalModel(id: secondMinutesID, fileName: "fake-2b.gguf", size: 3,
                                                   sha256: "", downloadURLs: [])),
                      name: "假模型 2B", parameters: ModelParameters(contextTokens: 4096)),
+        CatalogModel(id: fakeASRID, roles: [.transcription], family: .sherpaParaformer,
+                     source: .download(fakeASR), name: "假转写模型"),
     ])
+    /// 假的本机转写模型（会后转写）：要下载，文件内容是“abc”（`ABCTransport` 给的）
+    static let fakeASRID = "sherpa-onnx/fake-asr"
+    static let fakeASR = LocalModel(id: fakeASRID, fileName: "fake-asr.bin", size: 3,
+                                    sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                                    downloadURLs: [URL(string: "https://models.example/fake-asr.bin")!])
+    /// 假转写模型的转写器
+    let fakeASRTranscriber = StubTranscriber(sentences: [
+        TranscribedSentence(start: 0.1, end: 0.9, text: "这是假转写模型的结果"),
+    ])
+    /// 本机模型目录（临时）和它的下载器
+    let modelsDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FaymeeWiringModels-\(UUID().uuidString)", isDirectory: true)
+    let downloads: ModelDownloads
     let selections: ModelSelections
     private final class Counter { var value = 0 }
     private let buildCounter = Counter()
@@ -558,18 +682,25 @@ private final class WiringFixture {
         host = WiringHost(store: store)
         settings = OnlineModelSettings(defaults: defaults, credentials: InMemoryCredentialStore())
         selections = ModelSelections(defaults: defaults, catalog: Self.catalog, isExistingInstall: { true })
+        downloads = ModelDownloads(catalog: Self.catalog, directory: modelsDirectory, transport: ABCTransport())
 
-        let localT = localTranscriber
+        let transcribers = [ModelCatalog.speechAnalyzerID: localTranscriber, Self.fakeASRID: fakeASRTranscriber]
+        let downloads = downloads
         let refT = referenceTranscriber
         let generators = [localGenerator.modelID: localGenerator, secondGenerator.modelID: secondGenerator]
         let selections = selections
         let counter = buildCounter
 
-        let makeT: @MainActor (OnlineModelSettings, any HTTPTransport) -> (transcriber: any Transcriber, name: String, isReady: Bool) = { s, t in
+        let makeT: @MainActor (OnlineModelSettings, any HTTPTransport) -> (transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?) = { s, t in
             OnlineTranscriptionEngine.makeEngine(
                 settings: s,
                 transport: t,
-                local: { (localT, "apple/speechanalyzer") },
+                local: {
+                    // 和 LocalTranscriptionEngine.make 一样：所选目录项，没下完时等下载它
+                    let model = selections.selected(for: .transcription)!
+                    return (transcribers[model.id]!, model.id,
+                            downloads.isReady(model) ? nil : .modelDownload(id: model.id))
+                },
                 reference: { refT }
             )
         }
@@ -590,7 +721,8 @@ private final class WiringFixture {
             store: store,
             transcriber: initialT.transcriber,
             engine: initialT.name,
-            isEngineReady: initialT.isReady,
+            isEngineReady: initialT.waitReason == nil,
+            engineWaitReason: initialT.waitReason ?? .onlineConfig,
             diarizer: diarizer,
             host: host
         )
@@ -611,6 +743,7 @@ private final class WiringFixture {
             makeTranscription: makeT,
             makeMinutes: makeM,
             selections: selections,
+            downloads: downloads,
             syncDebounce: syncDebounce,
             dashScopeTestPollInterval: .milliseconds(1)
         )
@@ -620,6 +753,18 @@ private final class WiringFixture {
     deinit {
         defaults.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: store.root)
+        try? FileManager.default.removeItem(at: modelsDirectory)
+    }
+
+    var fakeASRDownloader: ModelDownloader {
+        downloads.downloader(for: Self.catalog.model(id: Self.fakeASRID)!)!
+    }
+
+    /// 点“下载”并等它下完
+    func downloadFakeASR() async throws {
+        fakeASRDownloader.start()
+        await fakeASRDownloader.waitUntilFinished()
+        #expect(fakeASRDownloader.isReady)
     }
 
     func addMeeting(_ id: String, transcribed: Bool = true) {

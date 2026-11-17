@@ -14,11 +14,13 @@ public enum ConnectionTestState: Equatable, Sendable {
 }
 
 /// 连接 `OnlineModelSettings`、本机模型选择（`ModelSelections`）与两条管线，负责运行期无重启热切换、
-/// 连接测试及过期测试取消。本机模式下所选模型变了也重建引擎；在线模式下改本机选择不动，回到本机时才用上
+/// 连接测试及过期测试取消。本机模式下所选模型变了也重建引擎；在线模式下改本机选择不动，回到本机时才用上。
+/// 会后转写的本机模型下载完成或被删除时重新判断转写引擎就绪与否（只在本机模式下），排队的会议据此开始或继续等
 @MainActor @Observable
 public final class OnlineEngineCoordinator {
+    /// `waitReason` 为 nil 表示就绪
     public typealias TranscriptionFactory = @MainActor (OnlineModelSettings, any HTTPTransport) -> (
-        transcriber: any Transcriber, name: String, isReady: Bool
+        transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?
     )
     public typealias MinutesFactory = @MainActor (OnlineModelSettings, any HTTPTransport) -> (
         generator: any TextGenerator, name: String, requiresPower: Bool, isOnline: Bool
@@ -32,6 +34,7 @@ public final class OnlineEngineCoordinator {
     @ObservationIgnored private let makeTranscription: TranscriptionFactory
     @ObservationIgnored private let makeMinutes: MinutesFactory
     @ObservationIgnored private let selections: ModelSelections?
+    @ObservationIgnored private let downloads: ModelDownloads?
     @ObservationIgnored private let syncDebounce: Duration
     @ObservationIgnored private let dashScopeTestPollInterval: Duration
 
@@ -50,6 +53,7 @@ public final class OnlineEngineCoordinator {
         makeTranscription: @escaping TranscriptionFactory,
         makeMinutes: @escaping MinutesFactory,
         selections: ModelSelections? = nil,
+        downloads: ModelDownloads? = nil,
         syncDebounce: Duration = .zero,
         dashScopeTestPollInterval: Duration = .seconds(1)
     ) {
@@ -58,12 +62,15 @@ public final class OnlineEngineCoordinator {
         self.makeTranscription = makeTranscription
         self.makeMinutes = makeMinutes
         self.selections = selections
+        self.downloads = downloads
         self.syncDebounce = syncDebounce
         self.dashScopeTestPollInterval = dashScopeTestPollInterval
-        self.specs = SpecSnapshots(settings: settings, minutesModel: selections?.selectedID(for: .minutes))
+        self.specs = SpecSnapshots(settings: settings, transcriptionModel: selections?.selectedID(for: .transcription),
+                                   minutesModel: selections?.selectedID(for: .minutes))
     }
 
-    /// 绑定管线并订阅配置变化；调用前管线应已按当前 `settings` 初始化，避免启动时重复创建引擎
+    /// 绑定管线并订阅配置变化；调用前管线应已按当前 `settings` 初始化，避免启动时重复创建引擎。
+    /// 会后转写模型的下载器的 `onAvailabilityChange` 由这里占用（含还隐藏的目录项）
     public func bind(transcription: TranscriptionPipeline, minutes: MinutesPipeline) {
         self.transcription = transcription
         self.minutes = minutes
@@ -73,12 +80,36 @@ public final class OnlineEngineCoordinator {
         }
         // 本机模型选择是离散的改动，立即同步
         selections?.observe { [weak self] role in
-            if role == .minutes { self?.flushSync() }
+            if role == .transcription || role == .minutes { self?.flushSync() }
+        }
+        if let downloads {
+            for model in downloads.catalog.models where model.roles.contains(.transcription) {
+                downloads.downloader(for: model)?.onAvailabilityChange = { [weak self] in
+                    self?.transcriptionModelAvailabilityChanged()
+                }
+            }
         }
     }
 
+    /// 会后转写的本机模型下载完成或被删除：本机模式下按现在的选择重建引擎，就绪与否（等下载）随之更新，
+    /// 就绪后排队的会议自动开始。在线模式下不动，免得盖掉在线引擎的就绪状态
+    public func transcriptionModelAvailabilityChanged() {
+        guard case .local = specs.appliedTranscription else { return }
+        let resolved = makeTranscription(settings, transport)
+        applyTranscription(resolved)
+    }
+
+    private func applyTranscription(
+        _ resolved: (transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?)
+    ) {
+        transcription?.setEngine(transcriber: resolved.transcriber, engine: resolved.name,
+                                 isReady: resolved.waitReason == nil,
+                                 waitReason: resolved.waitReason ?? .onlineConfig)
+    }
+
     private func syncObservedAndAppliedSpecs() {
-        specs = SpecSnapshots(settings: settings, minutesModel: selections?.selectedID(for: .minutes))
+        specs = SpecSnapshots(settings: settings, transcriptionModel: selections?.selectedID(for: .transcription),
+                              minutesModel: selections?.selectedID(for: .minutes))
     }
 
     /// 立即同步尚未落地的配置改动（取消输入防抖）
@@ -89,12 +120,12 @@ public final class OnlineEngineCoordinator {
         let nextT = EffectiveSpec(
             mode: settings.transcriptionMode,
             provider: settings.transcriptionProvider,
-            config: settings.activeTranscriptionConfig
+            config: settings.activeTranscriptionConfig,
+            localModel: selections?.selectedID(for: .transcription)
         )
         if nextT != specs.appliedTranscription {
             specs.appliedTranscription = nextT
-            let resolved = makeTranscription(settings, transport)
-            transcription?.setEngine(transcriber: resolved.transcriber, engine: resolved.name, isReady: resolved.isReady)
+            applyTranscription(makeTranscription(settings, transport))
         }
 
         let nextM = EffectiveSpec(
@@ -223,7 +254,7 @@ private struct SpecSnapshots {
     var appliedMinutes: EffectiveSpec<OnlineMinutesProvider>
 
     @MainActor
-    init(settings: OnlineModelSettings, minutesModel: String?) {
+    init(settings: OnlineModelSettings, transcriptionModel: String?, minutesModel: String?) {
         let transcription = ObservedSpec(
             mode: settings.transcriptionMode,
             provider: settings.transcriptionProvider,
@@ -236,7 +267,7 @@ private struct SpecSnapshots {
         )
         observedTranscription = transcription
         observedMinutes = minutes
-        appliedTranscription = EffectiveSpec(transcription)
+        appliedTranscription = EffectiveSpec(transcription, localModel: transcriptionModel)
         appliedMinutes = EffectiveSpec(minutes, localModel: minutesModel)
     }
 }

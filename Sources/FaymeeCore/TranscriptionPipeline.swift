@@ -33,6 +33,8 @@ public enum TranscriptionActivity: Hashable, Sendable {
 public enum TranscriptionWaitReason: Hashable, Sendable {
     /// 在线转写配置未补齐
     case onlineConfig
+    /// 所选本机模型（目录项 id）还没下载完。不限于转写：别的用途等模型时也用目录项 id 找下载器
+    case modelDownload(id: String)
 }
 
 /// 转写队列：一次转写一场，其余按入队先后排队。
@@ -86,10 +88,12 @@ public final class TranscriptionPipeline {
         didSet { if !isHeld && oldValue { startNext() } }
     }
 
-    /// 当前转写引擎是否就绪（本机恒为 true；在线未补齐配置时为 false，完整转写保持排队）
+    /// 当前转写引擎是否就绪（在线未补齐配置、本机所选模型没下载完时为 false，完整转写保持排队）
     public private(set) var isEngineReady: Bool {
         didSet { reportIdle() }
     }
+    /// 当前引擎没就绪时在等什么（就绪时不用）
+    private var engineWaitReason: TranscriptionWaitReason
 
     /// `isIdle` 变化时调用。纪要管线据此决定能否开始：转写不空闲时不开始新的纪要
     @ObservationIgnored public var onIdleChange: ((Bool) -> Void)?
@@ -131,16 +135,18 @@ public final class TranscriptionPipeline {
     /// - Parameters:
     ///   - engine: 写进转写稿的引擎名，如 "apple/speechanalyzer"
     ///   - isEngineReady: 转写引擎是否就绪；false 时完整转写任务保持排队
+    ///   - engineWaitReason: 没就绪时在等什么
     ///   - diarizer: 区分说话人引擎；nil 表示没有可用的引擎，完整转写跳过这一步（不算失败）
     ///   - voiceprints: 声纹库。区分说话人之后用它认出登记过的人；nil 时不识别
     public init(store: MeetingStore, transcriber: any Transcriber, engine: String,
-                isEngineReady: Bool = true,
+                isEngineReady: Bool = true, engineWaitReason: TranscriptionWaitReason = .onlineConfig,
                 diarizer: (any SpeakerDiarizer)? = nil, voiceprints: VoiceprintStore? = nil,
                 host: TranscriptionHost) {
         self.store = store
         self.transcriber = transcriber
         self.engine = engine
         self.isEngineReady = isEngineReady
+        self.engineWaitReason = engineWaitReason
         self.diarizer = diarizer
         self.voiceprints = voiceprints
         self.host = host
@@ -162,10 +168,10 @@ public final class TranscriptionPipeline {
         return isEngineReady
     }
 
-    /// 某场排队中的会议在等什么；不在排队或非等待配置时为 nil
+    /// 某场排队中的会议在等什么（等在线配置、等下载模型）；不在排队或只是排在别的会议后面时为 nil
     public func waitReason(for id: String) -> TranscriptionWaitReason? {
         guard queue.contains(id), jobs[id] == .transcription, !isEngineReady else { return nil }
-        return .onlineConfig
+        return engineWaitReason
     }
 
     /// 引擎就绪状态变化时调用：刷新 `isEngineReady`，就绪后推进排队中的任务
@@ -175,10 +181,12 @@ public final class TranscriptionPipeline {
     }
 
     /// 运行期热切换转写引擎：正在执行的任务继续用启动时的旧引擎与旧标识跑完落盘，
-    /// 下一场起改用新引擎；`isReady` 为 false 时后续完整转写保持排队
-    public func setEngine(transcriber: any Transcriber, engine: String, isReady: Bool = true) {
+    /// 下一场起改用新引擎；`isReady` 为 false 时后续完整转写保持排队，排队原因是 `waitReason`
+    public func setEngine(transcriber: any Transcriber, engine: String, isReady: Bool = true,
+                          waitReason: TranscriptionWaitReason = .onlineConfig) {
         self.transcriber = transcriber
         self.engine = engine
+        engineWaitReason = waitReason
         engineAvailabilityChanged(isReady)
     }
 

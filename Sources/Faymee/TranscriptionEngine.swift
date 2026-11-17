@@ -1,19 +1,24 @@
 import FaymeeCore
 
-/// App 用哪个转写引擎。按设置在本机 `SpeechAnalyzer` 与在线适配器之间切换，
-/// 并在 OpenAI 兼容纯文本转写时注入本机参考转写器以保留句级时间轴；name 写进每份转写稿，用来区分是哪个引擎转的
+/// App 用哪个转写引擎。按设置在本机模型（设置里「会后转写」选中的目录项，见 `LocalTranscriptionEngine`）
+/// 与在线适配器之间切换，并在 OpenAI 兼容纯文本转写时注入本机参考转写器以保留句级时间轴。
+/// 参考转写器固定用 SpeechAnalyzer（不用下载、有真实逐字时间），不随设置变化。
+/// name 写进每份转写稿，用来区分是哪个引擎转的（本机是目录项 id）
 enum TranscriptionEngine {
-    static let localName = "apple/speechanalyzer"
-
     @MainActor
     static func make(
         settings: OnlineModelSettings,
-        transport: any HTTPTransport
-    ) -> (transcriber: any Transcriber, name: String, isReady: Bool) {
+        transport: any HTTPTransport,
+        selections: ModelSelections,
+        downloads: ModelDownloads
+    ) -> (transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?) {
         OnlineTranscriptionEngine.makeEngine(
             settings: settings,
             transport: transport,
-            local: { (SpeechAnalyzerTranscriber(), localName) },
+            local: {
+                LocalTranscriptionEngine.make(selections: selections, downloads: downloads,
+                                              vadModel: SileroVAD.bundledModel)
+            },
             reference: { SpeechAnalyzerTranscriber() }
         )
     }

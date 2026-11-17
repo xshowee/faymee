@@ -228,7 +228,8 @@ private func bytesOnDisk(_ models: [LocalModel], in root: URL) -> Int64 {
     }
 }
 
-/// 模型状态的文字：设置里的一行（`text`），和详情页纪要“等待下载模型”时的说明（`minutesText`）
+/// 模型状态的文字：设置里的一行（`text`），详情页纪要“等待下载模型”时的说明（`minutesText`），
+/// 和别的任务等模型时的说明（`waitText(for:)`）
 public struct ModelDownloadStatus: Hashable, Sendable {
     public var phase: ModelDownloadPhase
     public var receivedBytes: Int64
@@ -261,6 +262,19 @@ public struct ModelDownloadStatus: Hashable, Sendable {
         case .verifying: "正在校验模型…"
         case .ready: "模型已就绪"
         case let .failed(reason): "模型下载失败：\(reason)"
+        }
+    }
+
+    /// 别的任务在等这个模型时详情页的说明，如“等待下载转写模型（约 1.0 GB）”
+    /// - Parameter purpose: 什么模型，如“转写”“声纹”
+    public func waitText(for purpose: String) -> String {
+        switch phase {
+        case .notDownloaded: "等待下载\(purpose)模型（约 \(formatModelSize(totalBytes))）"
+        case .downloading: "正在下载\(purpose)模型 \(percent)"
+        case .paused: "\(purpose)模型下载已暂停（\(percent)）"
+        case .verifying: "正在校验模型…"
+        case .ready: "模型已就绪"
+        case let .failed(reason): "\(purpose)模型下载失败：\(reason)"
         }
     }
 

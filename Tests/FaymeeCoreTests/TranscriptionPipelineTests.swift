@@ -1580,6 +1580,29 @@ private final class Library {
         #expect(try f.store.loadTranscript("m2")?.sentences.map(\.text) == ["新引擎完成"])
     }
 
+    @Test func 切到模型没下载完的本机引擎_排队原因是等待下载这个模型_下好后自动开始() async throws {
+        let model = FakeTranscriber([.init(start: 0, end: 5, text: "本机新模型")])
+        let f = Fixture()
+        let m = f.addMeeting()
+
+        f.pipeline.setEngine(transcriber: model, engine: "sherpa-onnx/fake", isReady: false,
+                             waitReason: .modelDownload(id: "sherpa-onnx/fake"))
+        #expect(f.pipeline.enqueue(m.id))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(f.pipeline.waitReason(for: m.id) == .modelDownload(id: "sherpa-onnx/fake"))
+        #expect(model.calls.isEmpty)
+
+        f.pipeline.engineAvailabilityChanged(true)
+        try await f.drain()
+        #expect(try f.store.loadTranscript(m.id)?.engine == "sherpa-onnx/fake")
+
+        // 再切回在线未配置：原因跟着变回等待配置
+        f.pipeline.setEngine(transcriber: model, engine: "openai/gpt-transcribe", isReady: false)
+        f.addMeeting("m2")
+        f.pipeline.enqueue("m2")
+        #expect(f.pipeline.waitReason(for: "m2") == .onlineConfig)
+    }
+
     @Test func 在线转写失败时保留旧稿并记失败_不回退到旧引擎() async throws {
         let local = FakeTranscriber([.init(start: 0, end: 5, text: "本机旧稿")])
         let online = FakeTranscriber([.init(start: 0, end: 5, text: "不该出现")])

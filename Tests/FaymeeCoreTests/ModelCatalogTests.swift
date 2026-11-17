@@ -98,6 +98,15 @@ import Testing
         #expect(qwen?.parameters.thinking == false)
     }
 
+    @Test func 会后转写模型的id带本机前缀_转写稿里不当成在线引擎() {
+        // 目录以后删掉的模型，旧转写稿也要按前缀认出是本机的（见 Transcript.onlineEngineLabel）
+        for model in ModelCatalog.builtIn.models where model.roles.contains(.transcription) {
+            #expect(model.id.hasPrefix("apple/") || model.id.hasPrefix("sherpa-onnx/"), "\(model.id)")
+            let t = Transcript(engine: model.id, createdAt: Date(timeIntervalSince1970: 0), hotwords: [], items: [])
+            #expect(t.onlineEngineLabel == nil, "\(model.id)")
+        }
+    }
+
     @Test func 显示的大小_不到1GB用MB() {
         #expect(formatModelSize(75_519_198) == "76 MB")
         #expect(formatModelSize(2_497_280_256) == "2.5 GB")

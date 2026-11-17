@@ -181,11 +181,15 @@ final class AppModel {
     @ObservationIgnored private lazy var onlineCoordinator = OnlineEngineCoordinator(
         settings: onlineSettings,
         transport: httpTransport,
-        makeTranscription: { TranscriptionEngine.make(settings: $0, transport: $1) },
+        makeTranscription: { [unowned self] in
+            TranscriptionEngine.make(settings: $0, transport: $1, selections: modelSelections,
+                                     downloads: modelDownloads)
+        },
         makeMinutes: { [unowned self] in
             MinutesEngine.make(settings: $0, transport: $1, selections: modelSelections)
         },
         selections: modelSelections,
+        downloads: modelDownloads,
         syncDebounce: .milliseconds(500)
     )
 
@@ -261,10 +265,12 @@ final class AppModel {
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
-        let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport)
+        let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport,
+                                              selections: modelSelections, downloads: modelDownloads)
         let diarization = voiceprintModel.makeEngine()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, isEngineReady: engine.isReady,
+                                             engine: engine.name, isEngineReady: engine.waitReason == nil,
+                                             engineWaitReason: engine.waitReason ?? .onlineConfig,
                                              diarizer: diarization.diarizer,
                                              voiceprints: VoiceprintStore(), host: self)
         pipeline.voiceprintThreshold = diarization.voiceprintThreshold
