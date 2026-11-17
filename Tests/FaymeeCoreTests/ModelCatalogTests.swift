@@ -1,0 +1,159 @@
+import Foundation
+import Testing
+@testable import FaymeeCore
+
+@Suite struct ModelCatalogTests {
+    let catalog = ModelCatalog.builtIn
+
+    @Test func 每个用途至少有一个可选的模型() {
+        for role in ModelRole.allCases {
+            #expect(!catalog.models(for: role).isEmpty, "\(role) 没有可选的模型")
+        }
+    }
+
+    @Test func id唯一() {
+        let ids = catalog.models.map(\.id)
+        #expect(Set(ids).count == ids.count)
+    }
+
+    @Test func 需要下载的模型_目录名唯一_文件路径在目录内且不重复() {
+        let downloads = catalog.models.compactMap(\.download)
+        let dirs = downloads.map(\.directoryName)
+        #expect(Set(dirs).count == dirs.count)
+        for m in downloads {
+            let paths = m.files.map(\.path)
+            #expect(Set(paths).count == paths.count, "\(m.id)")
+            for f in m.files {
+                #expect(!f.path.hasPrefix("/") && !f.path.contains(".."), "\(m.id) \(f.path)")
+                #expect(f.size > 0 && f.sha256.count == 64 && !f.downloadURLs.isEmpty, "\(m.id) \(f.path)")
+                #expect(f.downloadURLs.allSatisfy { $0.scheme == "https" }, "\(m.id) \(f.path)")
+            }
+            #expect(m.id == catalog.models.first { $0.download == m }?.id)
+        }
+    }
+
+    @Test func 依赖的辅助模型都在目录里_且辅助模型不出现在选择框里() {
+        for m in catalog.models {
+            for dep in m.dependencies {
+                let aux = catalog.model(id: dep)
+                #expect(aux != nil, "\(m.id) 依赖的 \(dep) 不在目录里")
+                #expect(aux?.roles.isEmpty == true, "\(dep) 应是辅助模型")
+            }
+        }
+    }
+
+    @Test func 每个用途的默认值都在目录里且能选() {
+        for role in ModelRole.allCases {
+            for existing in [true, false] {
+                guard let id = catalog.defaultID(for: role, isExistingInstall: existing) else {
+                    #expect(role.allowsNone, "\(role) 没有默认模型")
+                    continue
+                }
+                #expect(catalog.models(for: role).contains { $0.id == id }, "\(role) 默认 \(id)")
+            }
+        }
+    }
+
+    @Test func 默认值_新安装转写用FunASRNano_已有安装保持SpeechAnalyzer_其他用途用现在的模型() {
+        #expect(catalog.defaultID(for: .transcription, isExistingInstall: false) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+        #expect(catalog.defaultID(for: .transcription, isExistingInstall: true) == "apple/speechanalyzer")
+        #expect(catalog.defaultID(for: .liveCaptions, isExistingInstall: false) == "apple/speechanalyzer")
+        #expect(catalog.defaultID(for: .liveFinalize, isExistingInstall: false) == nil)
+        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == LocalModel.qwen3_4B.id)
+        #expect(catalog.defaultID(for: .voiceprint, isExistingInstall: false) == "3dspeaker-eres2net-base-zh-cn-3dspeaker-16k")
+    }
+
+    @Test func 纪要的Qwen3_4B仍放在模型根目录下的原位置() {
+        let qwen = catalog.model(id: LocalModel.qwen3_4B.id)?.download
+        #expect(qwen == LocalModel.qwen3_4B)
+        #expect(qwen?.url(in: URL(fileURLWithPath: "/M")).path == "/M/Qwen3-4B-Q4_K_M.gguf")
+    }
+
+    @Test func 隐藏的模型不出现在选择框里_但按id仍能找到() {
+        let hidden = CatalogModel(id: "test/hidden", roles: [.transcription], family: .sherpaQwen3ASR,
+                                  source: .system, name: "隐藏", isHidden: true)
+        let c = ModelCatalog(models: ModelCatalog.builtIn.models + [hidden])
+        #expect(!c.models(for: .transcription).contains { $0.id == "test/hidden" })
+        #expect(c.model(id: "test/hidden") != nil)
+    }
+
+    @Test func 声纹模型带自己的匹配阈值() {
+        let eres = catalog.model(id: "3dspeaker-eres2net-base-zh-cn-3dspeaker-16k")
+        #expect(eres?.parameters.matchThreshold == 0.7)
+    }
+
+    @Test func 显示的大小_不到1GB用MB() {
+        #expect(formatModelSize(75_519_198) == "76 MB")
+        #expect(formatModelSize(2_497_280_256) == "2.5 GB")
+        #expect(formatModelSize(999_000_000) == "999 MB")
+    }
+}
+
+@MainActor @Suite struct ModelSelectionsTests {
+    let defaults: UserDefaults
+    let suite = "FaymeeModelSelectionsTests-\(UUID().uuidString)"
+
+    init() {
+        defaults = UserDefaults(suiteName: suite)!
+    }
+
+    func make(existing: Bool = false, catalog: ModelCatalog = .builtIn) -> ModelSelections {
+        ModelSelections(defaults: defaults, catalog: catalog, isExistingInstall: { existing })
+    }
+
+    @Test func 没存过时按默认值决定_并立即写入_之后不再判断() {
+        let s = make(existing: false)
+        #expect(s.selectedID(for: .transcription) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+        #expect(defaults.string(forKey: ModelSelections.key(for: .transcription)) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+
+        // 后来有了会议也不改
+        #expect(make(existing: true).selectedID(for: .transcription) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 已有安装_转写保持SpeechAnalyzer() {
+        #expect(make(existing: true).selectedID(for: .transcription) == "apple/speechanalyzer")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 选择后记住_重开后照样() {
+        let s = make()
+        s.select("sherpa-onnx/paraformer-zh-2023-09-14", for: .transcription)
+        #expect(s.selected(for: .transcription)?.name == "Paraformer")
+        #expect(make().selectedID(for: .transcription) == "sherpa-onnx/paraformer-zh-2023-09-14")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 可以不用的用途能选不用() {
+        let s = make()
+        #expect(s.selectedID(for: .liveFinalize) == nil)
+        s.select("sherpa-onnx/paraformer-zh-2023-09-14", for: .liveFinalize)
+        #expect(s.selectedID(for: .liveFinalize) == "sherpa-onnx/paraformer-zh-2023-09-14")
+        s.select(nil, for: .liveFinalize)
+        #expect(make().selectedID(for: .liveFinalize) == nil)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 读到未知id时退回默认值() {
+        defaults.set("sherpa-onnx/removed-model", forKey: ModelSelections.key(for: .liveCaptions))
+        defaults.set("sherpa-onnx/removed-model", forKey: ModelSelections.key(for: .liveFinalize))
+        let s = make(existing: true)
+        #expect(s.selectedID(for: .liveCaptions) == "apple/speechanalyzer")
+        #expect(s.selectedID(for: .liveFinalize) == nil)
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 存的模型不适用于这个用途时也退回默认值() {
+        // 标点模型是辅助模型，不能被选作转写模型；X-ASR 只能做实时字幕
+        defaults.set("sherpa-onnx/x-asr-480ms-zh-en-punct-int8-2026-06-05", forKey: ModelSelections.key(for: .transcription))
+        #expect(make(existing: true).selectedID(for: .transcription) == "apple/speechanalyzer")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 不接受不适用于该用途的选择() {
+        let s = make(existing: true)
+        s.select("sherpa-onnx/x-asr-480ms-zh-en-punct-int8-2026-06-05", for: .transcription)
+        #expect(s.selectedID(for: .transcription) == "apple/speechanalyzer")
+        defaults.removePersistentDomain(forName: suite)
+    }
+}
