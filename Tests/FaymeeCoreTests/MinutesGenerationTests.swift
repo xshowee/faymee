@@ -51,15 +51,18 @@ final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     }
 }
 
-/// 提示词里的转写稿行：句子行 `[s12 …] …`（可能带说话人 `[s12 03:15 说话人 2] …`）和合盖行 `[合盖，…]`
+/// 提示词里的转写稿行：句子行 `[s12 …] …`（可能带说话人 `[s12 03:15 说话人 2] …`）和空白行
+/// `[合盖，…]`、`[未录到系统声音 …]`
 func transcriptLines(in prompt: String) -> [String] {
     prompt.split(separator: "\n").map(String.init)
-        .filter { $0.hasPrefix("[合盖") || $0.wholeMatch(of: try! Regex(#"\[s\d+ [\d:]+( [^\]]+)?\] .*"#)) != nil }
+        .filter { $0.hasPrefix("[合盖") || $0.hasPrefix("[未录到") || $0.wholeMatch(of: try! Regex(#"\[s\d+ [\d:]+( [^\]]+)?\] .*"#)) != nil }
 }
 
 /// 一份长转写稿：s1…sN 每句 30 来个字，句间隔 10 秒（停顿 2 秒）。
-/// `gapAfter` 句之后插一段合盖空白，`pauseAfter` 句之后停顿 60 秒
-private func longTranscript(count: Int, gapAfter: Int? = nil, pauseAfter: Int? = nil) -> Transcript {
+/// `gapAfter` 句之后插一段 120 秒的空白（原因为 `gapReason`），`pauseAfter` 句之后停顿 60 秒。
+/// 剔除句子的空白（合盖，未录到声音）里没有句子，其余的空白里照常有句子
+private func longTranscript(count: Int, gapAfter: Int? = nil, gapReason: GapReason = .lidClosed,
+                            pauseAfter: Int? = nil) -> Transcript {
     var items: [TranscriptItem] = []
     var t: TimeInterval = 0
     for i in 1...count {
@@ -67,8 +70,8 @@ private func longTranscript(count: Int, gapAfter: Int? = nil, pauseAfter: Int? =
                                                   text: "这是第\(i)句话，大家讨论了项目的进度和下一步的安排")))
         t += 10
         if i == gapAfter {
-            items.append(.gap(TranscriptGap(start: t, end: t + 120, reason: .lidClosed)))
-            t += 120
+            items.append(.gap(TranscriptGap(start: t, end: t + 120, reason: gapReason)))
+            if gapReason.dropsSpeech { t += 120 }
         }
         if i == pauseAfter { t += 60 }
     }
@@ -423,6 +426,54 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
             #expect(first.count == cut)
         }
         #expect(second.first?.hasPrefix("[s\(cut + 1) ") == true)
+    }
+
+    /// 两种新空白里照常有人说话，不是内容的分界：切点同没有空白时一样按装满的位置，不挪到空白之后
+    @Test(arguments: [GapReason.lidClosedSystemSoundOnly, .systemSoundMissing])
+    func 不在新的两种空白处切(reason: GapReason) async throws {
+        let plain = ScriptedGenerator(contextTokens: 4000)
+        plain.respond = echoingResponder
+        _ = try await generate(plain, transcript: longTranscript(count: 200))
+        let full = transcriptLines(in: plain.extractionCalls[0]).count
+        let cut = full - 5
+
+        let generator = ScriptedGenerator(contextTokens: 4000)
+        generator.respond = echoingResponder
+        _ = try await generate(generator, transcript: longTranscript(count: 200, gapAfter: cut, gapReason: reason))
+
+        let first = transcriptLines(in: generator.extractionCalls[0])
+        #expect(first.contains { $0.hasPrefix("[\(reason.title) ") })
+        #expect(first.count > cut + 1)
+    }
+
+    /// 新的两种空白在提示词里按各自的文字写成一行，系统提示词说明这种空白行的意思（这段的句子照常是会议内容）；
+    /// 转写稿里没有的原因不说明
+    @Test func 新的两种空白按各自的文字写进提示词并说明() async throws {
+        let t = Transcript(engine: "apple/speechanalyzer", createdAt: date("2026-11-10T03:01:00Z"), hotwords: [],
+                           items: [
+                               .gap(TranscriptGap(start: 0, end: 180, reason: .lidClosedSystemSoundOnly)),
+                               .sentence(TranscriptSentence(id: "s1", start: 3.2, end: 6, text: "我们今天讨论发布时间")),
+                               .gap(TranscriptGap(start: 800, end: 980, reason: .systemSoundMissing)),
+                               .sentence(TranscriptSentence(id: "s2", start: 810, end: 815, text: "支付接口还没准备好")),
+                           ])
+        let generator = ScriptedGenerator(outputs: [emptyOutput])
+
+        _ = try await generate(generator, transcript: t)
+
+        let call = try #require(generator.calls.first)
+        #expect(call.prompt.contains("""
+        [合盖，只录到系统声音 00:00–03:00]
+        [s1 00:03] 我们今天讨论发布时间
+        [未录到系统声音 13:20–16:20]
+        [s2 13:30] 支付接口还没准备好
+        """))
+        #expect(call.system.contains("“[合盖，只录到系统声音 …]”表示这段时间只录到电脑播放的声音"))
+        #expect(call.system.contains("“[未录到系统声音 …]”表示这段时间没录到电脑播放的声音"))
+
+        let lidOnly = ScriptedGenerator(outputs: [emptyOutput])
+        _ = try await generate(lidOnly)
+        #expect(lidOnly.calls.first?.system.contains("只录到系统声音") == false)
+        #expect(lidOnly.calls.first?.system.contains("未录到系统声音") == false)
     }
 
     /// 合并的输出和输入的条目差不多长（去重之后也少不了多少），输出预算要装得下输入的全部条目，

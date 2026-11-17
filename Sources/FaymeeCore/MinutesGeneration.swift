@@ -31,7 +31,8 @@ public func generateMinutes(
         guard case let .sentence(s) = item else { return labels.line(item) }
         return labels.line(item, starred: starred.contains(s.id))
     }
-    let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty)
+    let gapReasons = Set(transcript.items.compactMap { if case let .gap(g) = $0 { g.reason } else { nil } })
+    let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty, gapReasons: gapReasons)
     let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
     let budget = Budget(generator, system: system,
                         outputTokens: min(generator.maxOutputTokens, generator.contextTokens * 2 / 5))

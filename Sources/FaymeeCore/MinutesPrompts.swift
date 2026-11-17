@@ -100,10 +100,13 @@ private func lineFormat(_ speakers: SpeakerLabels?) -> String {
 
 /// `speakers` 不为空（转写稿显示说话人）时说明行里的说话人标签，负责人可以填说话人；
 /// 还有未命名的说话人时多要一项“说话人身份”。没有说话人时与 v0.3 逐字相同。
-/// `starred`（输入里有句子带 `★`）时说明 `★` 是会上标的重点；没有时与 v0.4 逐字相同
+/// `starred`（输入里有句子带 `★`）时说明 `★` 是会上标的重点；没有时与 v0.4 逐字相同。
+/// 合盖空白（`lidClosed`）的说明一直都有；其余原因的空白只在 `gapReasons` 里有时才说明，没有时与以前逐字相同
 func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels? = nil,
-                            starred: Bool = false) -> String {
+                            starred: Bool = false, gapReasons: Set<GapReason> = []) -> String {
     let speakers = speakers?.isEmpty == false ? speakers : nil
+    let gaps = GapReason.allCases.filter { $0 != .lidClosed && gapReasons.contains($0) }
+        .map { "\n" + $0.promptExplanation }.joined()
     let star = starred
         ? "\n标签末尾带“★”的句子（如“[s12 03:15 ★]”）落在用户会上标记的重点或记了笔记的地方，"
             + "与它们相关的决议、待办、未决问题不要漏掉。"
@@ -113,7 +116,7 @@ func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels
 
     \(lineFormat(speakers))\
     转写稿由语音识别生成，可能有错别字和口语重复，请按意思理解。
-    \(GapReason.lidClosed.promptExplanation)\(star)
+    \(GapReason.lidClosed.promptExplanation)\(gaps)\(star)
 
     要求：
     - 只写转写稿里确实说到的内容，不要编造，不要补充常识或猜测。

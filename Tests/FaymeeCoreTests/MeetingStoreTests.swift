@@ -211,6 +211,39 @@ private func date(_ iso: String) -> Date {
         #expect(loaded.sentences.first?.originalSpeaker == nil)
     }
 
+    /// 旧转写稿里只有合盖空白（"lidClosed"），照常读成合盖；新的两种空白的 reason 写成各自的字符串，能读回
+    @Test func 旧转写稿的合盖空白照常读取_新的两种空白能写入读回() throws {
+        let store = makeStore()
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let m = try store.create(startedAt: date("2026-11-10T02:00:00Z"))
+        let legacy = """
+        {
+          "createdAt" : "2026-11-10T03:00:00Z",
+          "engine" : "apple/speechanalyzer",
+          "hotwords" : [],
+          "items" : [
+            { "end" : 780.5, "kind" : "gap", "reason" : "lidClosed", "start" : 600 }
+          ],
+          "version" : 1
+        }
+        """
+        let url = store.directory(m.id).appendingPathComponent("transcript.json")
+        try Data(legacy.utf8).write(to: url)
+        #expect(try store.loadTranscript(m.id)?.items == [.gap(.init(start: 600, end: 780.5, reason: .lidClosed))])
+
+        let transcript = Transcript(
+            engine: "fake/1", createdAt: date("2026-11-10T03:00:00Z"), hotwords: [],
+            items: [.gap(.init(start: 0, end: 60, reason: .lidClosedSystemSoundOnly)),
+                    .sentence(.init(id: "s1", start: 10, end: 12, text: "对方在说")),
+                    .gap(.init(start: 100, end: 160, reason: .systemSoundMissing))])
+        try store.saveTranscript(transcript, for: m.id)
+
+        #expect(try MeetingStore(root: store.root).loadTranscript(m.id) == transcript)
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let items = try #require(json["items"] as? [[String: Any]])
+        #expect(items.map { $0["reason"] as? String } == ["lidClosedSystemSoundOnly", nil, "systemSoundMissing"])
+    }
+
     @Test func 说话人按约定格式写入并能读回() throws {
         let store = makeStore()
         defer { try? FileManager.default.removeItem(at: store.root) }

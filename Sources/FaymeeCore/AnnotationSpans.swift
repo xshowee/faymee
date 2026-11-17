@@ -60,7 +60,8 @@ extension Meeting {
             if a.kind == .mark { lastMark = spans.count - 1 }
         }
 
-        let gaps = lidGaps.filter(\.reason.dropsSpeech).map(timeline.range(of:))
+        // 用转写时推出的空白（见 `transcriptGaps(on:)`），不直接用合盖空白：合盖时系统声音照常录着的那段有真句子
+        let gaps = transcriptGaps(on: timeline).filter(\.reason.dropsSpeech).map { $0.start...$0.end }
             .sorted { $0.lowerBound < $1.lowerBound }
         let sentences = transcript.sentences
         for i in spans.indices {

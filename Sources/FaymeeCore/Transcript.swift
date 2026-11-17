@@ -76,7 +76,7 @@ public struct TranscriptSentence: Hashable, Sendable {
     }
 }
 
-/// 录音中没录到声音的一段（目前只有合盖），在转写稿里显示为不可编辑的标记行
+/// 录音中有一路或两路声音没录到的一段（见 `GapReason`），在转写稿里显示为不可编辑的标记行
 public struct TranscriptGap: Hashable, Sendable {
     public var start: TimeInterval
     public var end: TimeInterval
@@ -96,6 +96,8 @@ extension GapReason {
     public var title: String {
         switch self {
         case .lidClosed: "合盖，未录到声音"
+        case .lidClosedSystemSoundOnly: "合盖，只录到系统声音"
+        case .systemSoundMissing: "未录到系统声音"
         }
     }
 
@@ -103,6 +105,8 @@ extension GapReason {
     public var symbolName: String {
         switch self {
         case .lidClosed: "mic.slash"
+        case .lidClosedSystemSoundOnly: "speaker.wave.2"
+        case .systemSoundMissing: "speaker.slash"
         }
     }
 
@@ -110,6 +114,12 @@ extension GapReason {
     var promptExplanation: String {
         switch self {
         case .lidClosed: "“[\(title) …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。"
+        case .lidClosedSystemSoundOnly:
+            "“[\(title) …]”表示这段时间只录到电脑播放的声音（如远程参会者的发言），"
+                + "没录到本机麦克风前的人说的话；其后的句子照常是会议内容。"
+        case .systemSoundMissing:
+            "“[\(title) …]”表示这段时间没录到电脑播放的声音（如远程参会者的发言），"
+                + "只录到本机麦克风前的人说的话；其后的句子照常是会议内容，但可能缺了远程参会者的话。"
         }
     }
 
@@ -118,6 +128,8 @@ extension GapReason {
     public var dropsSpeech: Bool {
         switch self {
         case .lidClosed: true
+        // 这段录到了另一路声音，句子是真的
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
         }
     }
 
@@ -125,6 +137,8 @@ extension GapReason {
     var isPreferredSplitPoint: Bool {
         switch self {
         case .lidClosed: true
+        // 中间照常有人说话，不算内容的分界
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
         }
     }
 
@@ -132,6 +146,8 @@ extension GapReason {
     var isPlaybackTarget: Bool {
         switch self {
         case .lidClosed: true
+        // 播放的是其中的句子
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
         }
     }
 }

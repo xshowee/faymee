@@ -66,9 +66,16 @@ public struct WallClockPeriod: Codable, Hashable, Sendable {
     }
 }
 
-public enum GapReason: String, Codable, Sendable {
-    /// 合盖导致内置麦克风被硬件断开
+/// 空白的原因。会议数据（`meeting.json` 的合盖空白）里只会出现 `lidClosed`，只记合盖本身；
+/// 另外两种只出现在转写稿里，由合盖和系统声音的状态在转写时推出（见 `Meeting.transcriptGaps(on:)`）。
+/// raw value 写进 `transcript.json`，不能改
+public enum GapReason: String, Codable, Sendable, CaseIterable {
+    /// 合盖导致内置麦克风被硬件断开，且没有录到系统声音（没开或不可用）：两路都没录到
     case lidClosed
+    /// 合盖导致内置麦克风被硬件断开，系统声音照常录着
+    case lidClosedSystemSoundOnly
+    /// 麦克风照常，开着的系统声音不可用
+    case systemSoundMissing
 }
 
 /// 录音时间线上没有收到有效声音的一段。录音文件里这段是静音，

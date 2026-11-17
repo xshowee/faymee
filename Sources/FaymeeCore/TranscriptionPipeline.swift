@@ -522,18 +522,13 @@ private func wholeSecondNow() -> Date {
 }
 
 extension Transcript {
-    /// 把引擎输出的句子和会议的合盖空白合成转写稿。
+    /// 把引擎输出的句子和会议的空白（由合盖和系统声音的状态推出，见 `Meeting.transcriptGaps(on:)`）合成转写稿。
     /// 空白按分片位置换算到录音中的区间；中点落在剔除句子的空白（`GapReason.dropsSpeech`）里的句子丢弃
     /// （合盖时录音是静音，识别出的只能是噪声），
     /// 跨过空白边界的句子中点在外，保留。空白在录音里长度为 0（落在没录到的时段）时照样显示标记
     static func assemble(_ sentences: [TranscribedSentence], meeting: Meeting, engine: String,
                          hotwords: [String], createdAt: Date) -> Transcript {
-        let gaps: [TranscriptGap] = RecordingTimeline(meeting).map { timeline in
-            meeting.lidGaps.map { gap in
-                let r = timeline.range(of: gap)
-                return TranscriptGap(start: r.lowerBound, end: r.upperBound, reason: gap.reason)
-            }
-        } ?? []
+        let gaps = RecordingTimeline(meeting).map(meeting.transcriptGaps(on:)) ?? []
 
         let kept = sentences.enumerated()
             .filter { _, s in

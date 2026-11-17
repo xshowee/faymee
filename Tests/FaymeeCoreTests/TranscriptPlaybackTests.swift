@@ -79,6 +79,26 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
     }
 }
 
+/// 两种新空白里照常有句子：播放位置落在里面时高亮句子，空白行不当当前条目
+@Suite struct 新空白里的当前条目 {
+    @Test(arguments: [GapReason.lidClosedSystemSoundOnly, .systemSoundMissing])
+    func 落在新空白里时是其中的句子(reason: GapReason) {
+        let t = transcript([
+            sentence("s1", 1.0, 3.0, "开始"),
+            .gap(TranscriptGap(start: 10, end: 70, reason: reason)),
+            sentence("s2", 12.0, 15.0, "对方在说"),
+            sentence("s3", 20.0, 25.0, "接着说"),
+            sentence("s4", 75.0, 78.0, "空白之后"),
+        ])
+        #expect(t.itemIndex(at: 13) == 2)
+        #expect(t.itemIndex(at: 22) == 3)
+        // 空白里两句之间、空白开头还没说话：保持刚说完的那句
+        #expect(t.itemIndex(at: 17) == 2)
+        #expect(t.itemIndex(at: 11) == 0)
+        #expect(t.itemIndex(at: 72) == 3)
+    }
+}
+
 /// 全选复制得到的纯文本
 @Suite struct 复制文本 {
     @Test func 每行是开始时间加文本_合盖空白单独一行() {
@@ -93,6 +113,21 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
             [01:05] 然后看一下数据
             [10:00] 合盖，未录到声音（10:00–13:00，03:00）
             [1:02:05] 好的，今天先到这里
+            """)
+    }
+
+    @Test func 新的两种空白按各自的文字单独一行_后面照常列出其中的句子() {
+        let t = transcript([
+            .gap(TranscriptGap(start: 600, end: 780.5, reason: .lidClosedSystemSoundOnly)),
+            sentence("s1", 610, 615, "对方在说"),
+            .gap(TranscriptGap(start: 900, end: 960, reason: .systemSoundMissing)),
+            sentence("s2", 905, 910, "我在说"),
+        ])
+        #expect(t.plainText(meeting: nil) == """
+            [10:00] 合盖，只录到系统声音（10:00–13:00，03:00）
+            [10:10] 对方在说
+            [15:00] 未录到系统声音（15:00–16:00，01:00）
+            [15:05] 我在说
             """)
     }
 
