@@ -133,8 +133,9 @@ public enum ASROutputGuard {
         problem(in: text) == .runaway ? truncateRepeats(text, trailing: false) : salvage(text)
     }
 
-    /// 假名、谚文、西里尔字母占（不算 ASCII 的）字的三成以上。短句里一个假名也够：实时字幕定稿的一句常常很短，
-    /// Fun-ASR-Nano 把「别的」转成过「彼の話」。句子长一点、中文里偶尔夹一个「の」不算；英文、数字不算
+    /// 假名、谚文、西里尔字母至少 2 个，且占（不算 ASCII 的）字的三成以上。整句不超过 4 个字（英文字母也算）时
+    /// 一个就够：实时字幕定稿的一句常常很短，Fun-ASR-Nano 把「别的」转成过「彼の話」。
+    /// 长一点的中文夹一个「の」、英文里夹一个「の」不算；英文、数字本身不算
     static func isForeign(_ text: String) -> Bool {
         let chars = text.unicodeScalars.filter { $0.value > 0x7F && isContent(Character($0)) }
         let foreign = chars.filter { s in
@@ -145,7 +146,8 @@ public enum ASROutputGuard {
             default: false
             }
         }
-        return !foreign.isEmpty && foreign.count * 10 >= chars.count * 3
+        let isShort = text.filter(isContent).count <= 4
+        return foreign.count >= (isShort ? 1 : 2) && foreign.count * 10 >= chars.count * 3
     }
 
     /// 提示词里的固定片段（Fun-ASR-Nano：「语音转写：」「热词列表：[…]」；Qwen3-ASR：单独的 system / user）。
