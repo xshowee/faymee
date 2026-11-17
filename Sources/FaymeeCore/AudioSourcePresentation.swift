@@ -46,7 +46,8 @@ extension Meeting {
     }
 
     /// 一段合盖在系统声音的开关切换、不可用的起止处拆开，并掉零碎的段，相邻同一说明的段接回一段。
-    /// 详情页的说明和录音中开盖的提醒、面板里的合盖摘要都按它分
+    /// 拆合盖只有这一份：详情页的说明、录音中开盖的提醒、面板里的合盖摘要，以及转写稿里的空白
+    /// （`derivedGaps`，经 `Kind.gapReason`）都按它分
     func lidGapPieces(_ gap: Gap) -> [(kind: LidGapNotice.Kind, gap: Gap)] {
         let on = systemSoundPeriodList
         let unavailable = systemSoundUnavailablePeriodList
@@ -132,6 +133,14 @@ public struct LidGapNotice: Hashable, Sendable {
             case .systemSoundOff: "以下时段因合盖，内置麦克风没有录到声音"
             case .systemSoundOnly: "以下时段因合盖，只录到系统声音"
             case .nothing: "以下时段因合盖且系统声音不可用，没有录到声音"
+            }
+        }
+
+        /// 转写稿里这段合盖标的空白原因（spec「会议数据」的组合表）：只有开着且可用时录到了系统声音
+        var gapReason: GapReason {
+            switch self {
+            case .systemSoundOff, .nothing: .lidClosed
+            case .systemSoundOnly: .lidClosedSystemSoundOnly
             }
         }
     }
