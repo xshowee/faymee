@@ -110,6 +110,12 @@ final class AppModel {
     @ObservationIgnored private var systemSoundAttempt = 0
     /// 每次录音前查授权加一，同上
     @ObservationIgnored private var systemSoundIdleCheck = 0
+    /// 录音前打开开关时为弹出授权框保留的采集还在不在等（ticket 15）
+    @ObservationIgnored private var systemSoundPrompt = SystemSoundAuthorizationPrompt()
+    /// 在等授权框的那个任务，结果是最后查到的授权。录音中的采集尝试等它，不另建
+    @ObservationIgnored private var systemSoundPromptTask: Task<SystemSoundAuthorization, Never>?
+    /// 每开始、结束一次等授权框加一：任务中途 await 回来时据此判断还算不算数。开始、停止录音不影响它
+    @ObservationIgnored private var systemSoundPromptToken = 0
     @ObservationIgnored private var timer: Timer?
     /// “没有声音”的判断：麦克风电平随到随喂，系统声音电平每秒从采集取一次
     @ObservationIgnored private var silence = SilenceWatch()
@@ -376,6 +382,8 @@ final class AppModel {
     /// 让录音中的系统声音跟上开关：打开时开一段时段、开始采集，关闭时停止采集、结束这段。
     /// 不在录音时只查授权（开始录音时再调一次）。采集不可用时麦克风照常录，时段照样记（它记的是开关）
     private func syncSystemSound(at date: Date = Date()) {
+        // 关掉开关：为授权框保留的采集拆掉，录音中在等它的采集尝试下面一起作废
+        if !systemSoundEnabled { cancelSystemSoundPrompt() }
         guard var m = current else {
             checkSystemSoundBeforeRecording()
             return
@@ -402,9 +410,9 @@ final class AppModel {
         checkSystemSoundBeforeRecording()
     }
 
-    /// 不在录音时打开开关：未决定就让系统弹出授权框，拒绝就在面板里提示没有授权（spec 用户故事 6、7）。
-    /// 授权框关掉后再查一次，按用户的回答更新提示。关掉开关时清掉提示。不录、不写盘，也不开不可用时段（还没有会议）。
-    /// 结果回来时已经开始录音、关了开关或又查了一次，这次就作废
+    /// 不在录音时打开开关：未决定就让系统弹出授权框（见 `promptSystemSoundAuthorization`），拒绝就在面板里提示
+    /// 没有授权（spec 用户故事 6、7）。关掉开关时清掉提示。不录、不写盘，也不开不可用时段（还没有会议）。
+    /// 查询结果回来时已经开始录音、关了开关或又查了一次，这次就作废
     private func checkSystemSoundBeforeRecording() {
         systemSoundIdleCheck += 1
         let check = systemSoundIdleCheck
@@ -417,11 +425,69 @@ final class AppModel {
             guard isCurrentIdleCheck(check) else { return }
             systemSoundIdleUnavailableReason = action.unavailableReason
             guard action == .requestAuthorization else { return }
-            await systemSound.requestAuthorization()
-            let answered = await SystemSoundAuthorizationQuery.current()
-            guard isCurrentIdleCheck(check) else { return }
-            systemSoundIdleUnavailableReason = SystemSoundSwitchOn(authorization: answered).unavailableReason
+            promptSystemSoundAuthorization()
         }
+    }
+
+    /// 让系统弹出授权框，并等用户回答：建一次采集保留着，每秒在子进程里查授权，查到回答或建好后满 2 分钟才拆掉
+    /// （`SystemSoundAuthorizationPrompt`）。等的期间开始录音不影响它，录音中的采集尝试等它的结果。
+    /// 有结果时不在录音、开关还开着，就按结果更新录音前的提示。已经在等时什么也不做
+    private func promptSystemSoundAuthorization() {
+        guard !systemSoundPrompt.isPending else { return }
+        systemSoundPromptToken += 1
+        let token = systemSoundPromptToken
+        systemSoundPrompt.begin()
+        systemSoundPromptTask = Task { await awaitSystemSoundPrompt(token) }
+    }
+
+    /// 等授权框的过程，返回最后查到的授权。中途被关掉开关作废时返回未决定（这时没有人用这个结果）
+    private func awaitSystemSoundPrompt(_ token: Int) async -> SystemSoundAuthorization {
+        let held = await systemSound.holdForAuthorizationPrompt()
+        guard token == systemSoundPromptToken else { return .undetermined }
+        guard held else {
+            // 建不起来：没有在等的授权框，查一次就结束（开始录音时照常按建立失败处理）
+            systemSoundPrompt.holdFailed()
+            let authorization = await SystemSoundAuthorizationQuery.current()
+            guard token == systemSoundPromptToken else { return .undetermined }
+            finishSystemSoundPrompt(authorization)
+            return authorization
+        }
+        systemSoundPrompt.held(at: Date())
+        while true {
+            let authorization = await SystemSoundAuthorizationQuery.current()
+            guard token == systemSoundPromptToken else { return .undetermined }
+            switch systemSoundPrompt.checked(authorization, at: Date()) {
+            case let .recheck(after: interval):
+                try? await Task.sleep(for: .seconds(interval))
+                guard token == systemSoundPromptToken else { return .undetermined }
+            case let .release(result):
+                systemSoundLog.info("授权框有结果（\(result.childOutput, privacy: .public)），拆掉为它保留的采集")
+                systemSound.releaseAuthorizationPromptHold()
+                finishSystemSoundPrompt(result)
+                return result
+            }
+        }
+    }
+
+    /// 等授权框结束（拆掉保留的采集之后）。不在录音、开关还开着时按结果更新录音前的提示：
+    /// 录音中的提示由 systemSoundAvailability 管
+    private func finishSystemSoundPrompt(_ authorization: SystemSoundAuthorization) {
+        systemSoundPromptToken += 1
+        systemSoundPromptTask = nil
+        guard current == nil, systemSoundEnabled else { return }
+        systemSoundIdleCheck += 1
+        systemSoundIdleUnavailableReason = SystemSoundSwitchOn(authorization: authorization).unavailableReason
+    }
+
+    /// 关掉开关时：不再等授权框，拆掉为它保留的采集（还在建的那次建好后直接拆掉）。没在等时什么也不做
+    private func cancelSystemSoundPrompt() {
+        guard systemSoundPrompt.isPending else { return }
+        systemSoundPromptToken += 1
+        systemSoundPrompt.cancel()
+        systemSoundPromptTask?.cancel()
+        systemSoundPromptTask = nil
+        systemSound.releaseAuthorizationPromptHold()
+        systemSoundLog.info("关掉了开关，不再等授权框")
     }
 
     private func isCurrentIdleCheck(_ check: Int) -> Bool {
@@ -445,9 +511,19 @@ final class AppModel {
             }
         }
         Task {
+            var known = knownAuthorization
+            // 录音前打开开关弹的授权框还在等：等它的结果，不另建一次去弹第二个授权框（ticket 15）。
+            // 点了“允许”时保留的采集已经排在后台队列上拆掉，下面按已授权新建，不用再重建一次
+            if known == nil, systemSoundPrompt.capturesWait, let prompt = systemSoundPromptTask {
+                systemSoundLog.info("授权框还在等用户回答，等它有结果再建系统声音采集")
+                let answered = await prompt.value
+                guard isCurrentSystemSoundAttempt(attempt, in: id) else { return }
+                // 一直没回答（超时）就照常查一次
+                if answered != .undetermined { known = answered }
+            }
             let authorization: SystemSoundAuthorization
-            if let knownAuthorization {
-                authorization = knownAuthorization
+            if let known {
+                authorization = known
             } else {
                 authorization = await SystemSoundAuthorizationQuery.current()
             }

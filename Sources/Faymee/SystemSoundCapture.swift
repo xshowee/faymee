@@ -40,6 +40,10 @@ final class SystemSoundCapture {
     /// 每次 start、stop 加一。后台建好时已经变了，说明这次建立已被停掉或换掉：建好的直接拆掉
     private var generation = 0
     private var procID: AudioDeviceIOProcID?
+    /// 为授权框保留的 tap 和聚合设备（见 `holdForAuthorizationPrompt`），没有为 nil
+    private var promptHold: Created?
+    /// 每次开始保留、拆掉加一，用法同 generation，和它分开：start、stop 不影响授权框
+    private var promptGeneration = 0
     private var writer: SystemSoundWriter?
     /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在往写盘模块交数据
     private let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
@@ -76,7 +80,9 @@ final class SystemSoundCapture {
         guard !isRunning else { return }
         generation += 1
         let generation = generation
+        let began = Date()
         let created = try await Self.onSetupQueue { try Self.createTapAndAggregate() }
+        log.info("建 tap 和聚合设备用了 \(Self.milliseconds(since: began)) ms")
         guard generation == self.generation, !isRunning else {
             Self.setupQueue.async { Self.destroy(created) }
             throw CancellationError()
@@ -101,16 +107,39 @@ final class SystemSoundCapture {
         return opened.drain()
     }
 
-    /// 让系统弹出“系统录音”授权框（不在录音时第一次打开开关，spec 用户故事 6）：在后台短暂建一次 tap 和只含
-    /// tap 的聚合设备（授权框在建聚合设备时弹出，等用户回答后才返回），然后拆掉。不录、不写盘。
-    /// 返回时授权框已经关掉。建不起来只记日志（开始录音时照常按建立失败处理）
-    func requestAuthorization() async {
+    /// 让系统弹出“系统录音”授权框（不在录音时第一次打开开关，spec 用户故事 6）：在后台建一次 tap 和只含 tap 的
+    /// 聚合设备，建好后保留，直到 `releaseAuthorizationPromptHold`。建完马上拆掉的话，授权框还开着，用户之后点的
+    /// “允许”不会被记住（ticket 15）。不录、不写盘，和 start / stop 互不影响。
+    /// 授权框可能在建聚合设备时弹出、等用户回答后才返回，也可能马上返回。建好并保留时返回 true；
+    /// 建不起来（只记日志，开始录音时照常按建立失败处理）、或还没建好就被 release 掉时返回 false
+    func holdForAuthorizationPrompt() async -> Bool {
+        releaseAuthorizationPromptHold()
+        let generation = promptGeneration
+        let began = Date()
         do {
-            try await Self.onSetupQueue { Self.destroy(try Self.createTapAndAggregate()) }
-            log.info("已建立一次系统声音采集，以弹出授权框")
+            let created = try await Self.onSetupQueue { try Self.createTapAndAggregate() }
+            guard generation == promptGeneration else {
+                Self.setupQueue.async { Self.destroy(created) }
+                log.info("为弹出授权框建的系统声音采集还没建好就不要了，建好后拆掉")
+                return false
+            }
+            promptHold = created
+            log.info("已为弹出授权框建立系统声音采集并保留，建立用了 \(Self.milliseconds(since: began)) ms")
+            return true
         } catch {
             log.error("为弹出授权框建立系统声音采集失败：\(error.localizedDescription, privacy: .public)")
+            return false
         }
+    }
+
+    /// 拆掉为授权框保留的采集（在后台队列上拆，排在之后的建立前面）。还在建的那次作废，建好后直接拆掉。
+    /// 没有保留时什么也不做，可以重复调用
+    func releaseAuthorizationPromptHold() {
+        promptGeneration += 1
+        guard let promptHold else { return }
+        self.promptHold = nil
+        Self.setupQueue.async { Self.destroy(promptHold) }
+        log.info("已拆掉为授权框保留的系统声音采集")
     }
 
     // MARK: - 建立
@@ -148,7 +177,9 @@ final class SystemSoundCapture {
                        AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue,
                                                           Self.ioProc(writer: writer, format: format,
                                                                       level: level, live: live)))
+        let starting = Date()
         try Self.check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
+        log.info("启动系统声音采集用了 \(Self.milliseconds(since: starting)) ms")
         watchDevice(format: asbd)
         log.info("系统声音采集已开始：\(format.sampleRate) Hz，\(format.channelCount) 声道")
     }
@@ -264,6 +295,11 @@ final class SystemSoundCapture {
     }
 
     // MARK: - Core Audio
+
+    /// 日志里的耗时（授权框在哪一步等用户回答，要靠它在真机上看）
+    private nonisolated static func milliseconds(since date: Date) -> Int {
+        Int((Date().timeIntervalSince(date) * 1000).rounded())
+    }
 
     private nonisolated static func check(_ step: String, _ status: OSStatus) throws {
         guard status == noErr else { throw SystemSoundCaptureError.coreAudio(step: step, status: status) }
