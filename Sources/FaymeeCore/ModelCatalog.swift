@@ -81,7 +81,7 @@ public struct ModelParameters: Sendable, Hashable {
     public var contextTokens: Int?
     /// 热词最多占多少 token（与音频、输出共用上下文）。热词按 tokenizer 截的家族（`SegmentRecognizerAdapter.hotwordFitting`）必须带
     public var hotwordTokenBudget: Int?
-    /// 声纹库匹配阈值（余弦相似度）。阈值和模型相关，换模型必须带上自己的
+    /// 声纹库匹配阈值（余弦相似度）。阈值和模型相关，「声纹」用途的目录项必须带上自己的（`CatalogModel.init` 里查）
     public var matchThreshold: Float?
     /// 纪要模型的分段参数（每次调用留多少给输出）；nil 用 `MinutesChunking.standard`
     public var minutesChunking: MinutesChunking?
@@ -143,6 +143,8 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
         self.isHidden = isHidden
         self.license = license
         // 目录项自检：缺了这些参数，适配器只能悄悄用一个不属于这个模型的值。目录是静态的，测试一跑就会撞上
+        precondition(!roles.contains(.voiceprint) || parameters.matchThreshold != nil,
+                     "\(id)：声纹模型必须带自己的 matchThreshold（阈值和模型相关）")
         precondition(family.segmentRecognizer?.hotwordFitting == nil || parameters.hotwordTokenBudget != nil,
                      "\(id)：这个家族的热词和音频共用上下文，必须带 hotwordTokenBudget")
     }

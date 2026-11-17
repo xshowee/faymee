@@ -310,14 +310,17 @@ extension SherpaOnnxDiarizer {
     /// 目录里「声纹」用途的一项 → 区分引擎和它的声纹库匹配阈值。
     /// 引擎为 nil 表示现在没法用：没选、不是声纹家族、打进 App 的文件不在（直接 `swift run` 没打包）、
     /// 需要下载的还没下完（只看大小，哈希在 `prepare` 时校验），或打进 App 的文件不是已知的（没有哈希可校验）。
-    /// 阈值取目录项的 `matchThreshold`，没写时用 `VoiceprintLibrary.defaultMatchThreshold`
+    /// 阈值取目录项的 `matchThreshold`（「声纹」用途的目录项一定带，`CatalogModel.init` 里查）；
+    /// 没选或不是声纹模型时没有引擎，阈值用不上，给 `VoiceprintLibrary.defaultMatchThreshold`
     /// - Parameters:
     ///   - bundleResources: App 的 `Contents/Resources`（`Bundle.main.resourceURL`）
     ///   - modelsRoot: 下载模型的根目录（`LocalModel.defaultDirectory`）
     public static func engine(for model: CatalogModel?, bundleResources: URL?, modelsRoot: URL)
         -> (diarizer: SherpaOnnxDiarizer?, voiceprintThreshold: Float) {
-        let threshold = model?.parameters.matchThreshold ?? VoiceprintLibrary.defaultMatchThreshold
-        guard let model, model.family == .sherpaSpeakerEmbedding else { return (nil, threshold) }
+        guard let model, model.family == .sherpaSpeakerEmbedding, model.roles.contains(.voiceprint),
+              let threshold = model.parameters.matchThreshold else {
+            return (nil, VoiceprintLibrary.defaultMatchThreshold)
+        }
         switch model.source {
         case .system:
             return (nil, threshold)

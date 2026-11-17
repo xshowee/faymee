@@ -83,6 +83,22 @@ import Testing
         #expect(eres?.parameters.matchThreshold == 0.7)
     }
 
+    /// 阈值和模型相关：声纹模型没带阈值时不能悄悄用别的模型的值，目录项一建就停下
+    @Test func 声纹模型没带匹配阈值时目录项建不出来() async {
+        await #expect(processExitsWith: .failure) {
+            _ = CatalogModel(id: "test/voiceprint", roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
+                             source: .system, name: "没阈值的声纹模型")
+        }
+    }
+
+    /// 热词和音频共用上下文的家族，热词预算不能悄悄用别的模型的值
+    @Test func 要按预算截热词的家族没带预算时目录项建不出来() async {
+        await #expect(processExitsWith: .failure) {
+            _ = CatalogModel(id: "test/funasr", roles: [.transcription], family: .sherpaFunASRNano,
+                             source: .system, name: "没预算的 Fun-ASR-Nano")
+        }
+    }
+
     /// 纪要详情页按 `llama/` 前缀区分本机模型和在线模型（`Minutes.onlineModelLabel`）
     @Test func 纪要模型都是llamaGGUF_id以llama前缀开头() {
         for m in catalog.models(for: .minutes) {
