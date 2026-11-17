@@ -19,6 +19,13 @@ import Testing
         // 热词表的顺序就是用户排的优先级：一个放不下就停，不跳过它去塞后面的
         #expect(HotwordBudget.fit(["甲", "很长很长很长的词", "乙"], budget: 6, count: characters) == ["甲"])
     }
+
+    @Test func 按模型的拼法计数_Qwen3ASR用空格连接() {
+        // 拼成「甲乙 丙丁戊 己」计数：甲乙 丙丁戊 = 6；再加「 己」= 8
+        let words = ["甲乙", "丙丁戊", "己"]
+        #expect(HotwordBudget.fit(words, budget: 8, separator: " ", count: characters) == words)
+        #expect(HotwordBudget.fit(words, budget: 7, separator: " ", count: characters) == ["甲乙", "丙丁戊"])
+    }
 }
 
 private let counter = Result { try QwenTokenCounter(directory: LocalModel.funASRNano.directory().appendingPathComponent("Qwen3-0.6B")) }

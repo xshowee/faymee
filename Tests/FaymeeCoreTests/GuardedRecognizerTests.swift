@@ -71,6 +71,20 @@ private final class ScriptedRecognizer: SegmentRecognizer {
         }
     }
 
+    @Test func Qwen3ASR单独输出system时按泄漏处理() throws {
+        // 评估里 10:28 那场 01:08 一段 1.2 秒的话（补边后 1.8 秒），Qwen3-ASR 输出「system\n」：
+        // 不到 2 秒不切，直接丢掉；长段对半重转见上一个测试
+        let short = ScriptedRecognizer { _ in "system\n" }
+        #expect(try GuardedRecognizer(short).recognize(clip(10, 11.8)).text == "")
+        #expect(short.calls.count == 1)
+
+        let long = ScriptedRecognizer { r in
+            r.upperBound - r.lowerBound > 5 ? "system\n" : r.lowerBound == 10 ? "很多了。" : "好的。"
+        }
+        #expect(try GuardedRecognizer(long).recognize(clip(10, 18)).text == "很多了。好的。")
+        #expect(long.calls.count == 3)
+    }
+
     @Test func 不到2秒的短段不切_直接截短或丢掉() throws {
         let inner = ScriptedRecognizer { _ in self.runaway }
         #expect(try GuardedRecognizer(inner).recognize(clip(10, 11.5)).text == "我们现在这个这个这个")

@@ -3,12 +3,14 @@ import Foundation
 /// 大模型类 ASR 的热词要和音频、输出共用上下文（Fun-ASR-Nano 512 token），只能放进有限的 token。
 /// 按热词表的顺序放，放到预算用完为止
 public enum HotwordBudget {
-    /// 按顺序取热词，直到按模型拼法（`, ` 连接，同 sherpa 的提示词）计数的 token 超过 `budget`。
+    /// 按顺序取热词，直到按模型拼法（`separator` 连接，同 sherpa 拼进提示词的样子：Fun-ASR-Nano `, `，
+    /// Qwen3-ASR 空格）计数的 token 超过 `budget`。
     /// 一个词放不下就停：热词表的顺序是用户排的，不跳过它去塞后面更短的词
-    public static func fit(_ hotwords: [String], budget: Int, count: (String) -> Int) -> [String] {
+    public static func fit(_ hotwords: [String], budget: Int, separator: String = ", ",
+                           count: (String) -> Int) -> [String] {
         var kept: [String] = []
         for word in hotwords {
-            guard count((kept + [word]).joined(separator: ", ")) <= budget else { break }
+            guard count((kept + [word]).joined(separator: separator)) <= budget else { break }
             kept.append(word)
         }
         return kept
