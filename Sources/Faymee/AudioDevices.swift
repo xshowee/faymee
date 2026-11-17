@@ -1,4 +1,5 @@
 import CoreAudio
+import FaymeeCore
 import Foundation
 
 struct AudioInputDevice: Identifiable, Hashable {
@@ -54,6 +55,41 @@ enum AudioDevices {
         guard let id = uint32(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultInputDevice)
         else { return nil }
         return inputs().first { $0.id == id }
+    }
+
+    /// 设备的输入流布局（采样率、每个流的声道数），直接在设备上建 IOProc 采集时按它解读数据。
+    /// 读不到、没有输入流，或某个流不是 Float32 线性 PCM 时为 nil
+    static func inputLayout(_ id: AudioDeviceID) -> InputStreamLayout? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+                                                 mScope: kAudioObjectPropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr, size > 0 else { return nil }
+        var streams = [AudioStreamID](repeating: 0, count: Int(size) / MemoryLayout<AudioStreamID>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &streams) == noErr else { return nil }
+        var channels: [Int] = []
+        var sampleRate: Double?
+        for stream in streams {
+            var format = AudioStreamBasicDescription()
+            var formatAddress = AudioObjectPropertyAddress(mSelector: kAudioStreamPropertyVirtualFormat,
+                                                           mScope: kAudioObjectPropertyScopeGlobal,
+                                                           mElement: kAudioObjectPropertyElementMain)
+            var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            guard AudioObjectGetPropertyData(stream, &formatAddress, 0, nil, &formatSize, &format) == noErr,
+                  format.mFormatID == kAudioFormatLinearPCM, format.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+                  format.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0, format.mBitsPerChannel == 32,
+                  sampleRate == nil || sampleRate == format.mSampleRate
+            else { return nil }
+            sampleRate = format.mSampleRate
+            channels.append(Int(format.mChannelsPerFrame))
+        }
+        guard let sampleRate else { return nil }
+        return InputStreamLayout(sampleRate: sampleRate, channelsPerStream: channels)
+    }
+
+    /// 设备还在（拔掉、断开蓝牙后为 false）
+    static func isAlive(_ id: AudioDeviceID) -> Bool {
+        (uint32(id, kAudioDevicePropertyDeviceIsAlive) ?? 0) != 0
     }
 
     /// 设备插拔、系统默认输入变化时在主线程回调。在 App 生命周期内一直有效

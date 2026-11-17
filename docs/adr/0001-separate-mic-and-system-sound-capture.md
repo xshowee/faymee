@@ -1,6 +1,6 @@
 # 麦克风与系统声音分两路独立采集，整理时再混音；系统声音只用 Core Audio tap
 
-麦克风照旧由 `AVAudioEngine` 采集，系统声音用 Core Audio process tap 单独建一个只含 tap 的 aggregate device，两路各写各的分片，整理时作为两条音轨放进同一个 composition 混成 recording.m4a。不把麦克风和 tap 放进同一个 aggregate device：在蓝牙耳机和内置麦克风加扬声器上实测，合并后没有声音播放时整个设备不运行，连麦克风也录不到；而且麦克风这一路是录音可靠性的根基，不该受 tap 的时钟和故障牵连。录屏开启时也不用 ScreenCaptureKit 采声音，免得出现两条系统声音路径，也让只录声音的人不必授予屏幕录制权限。
+麦克风单独采集（原来用 `AVAudioEngine`，后改为直接在设备上建 IOProc，见 ADR-0002），系统声音用 Core Audio process tap 单独建一个只含 tap 的 aggregate device，两路各写各的分片，整理时作为两条音轨放进同一个 composition 混成 recording.m4a。不把麦克风和 tap 放进同一个 aggregate device：在蓝牙耳机和内置麦克风加扬声器上实测，合并后没有声音播放时整个设备不运行，连麦克风也录不到；而且麦克风这一路是录音可靠性的根基，不该受 tap 的时钟和故障牵连。录屏开启时也不用 ScreenCaptureKit 采声音，免得出现两条系统声音路径，也让只录声音的人不必授予屏幕录制权限。
 
 ## Consequences
 

@@ -1,5 +1,6 @@
 import Accelerate
 import AVFoundation
+import CoreAudio
 import FaymeeCore
 
 enum RecorderError: LocalizedError {
@@ -16,11 +17,14 @@ enum RecorderError: LocalizedError {
 
 /// 从 deviceResolver 指定的麦克风（或系统默认输入）采集音频，按固定时长写成一串 CAF 分片。
 ///
+/// - 直接在麦克风设备上建 IOProc 采集，只碰这一个输入设备。不用 AVAudioEngine：它的 inputNode 和输出共用
+///   一个 IO unit，从系统默认输入起步再换设备。默认输入是 AirPods 而用的是别的麦克风时，AirPods 被打开、
+///   切成通话模式，引擎随即收到配置变化停下；重建时 inputNode 报的还是 AirPods 的旧格式，`installTap`
+///   抛 Objective-C 异常（Swift 接不住，被 AppKit 吞掉后主线程状态坏掉、随后崩溃）。见 issue 16。
 /// - 分片用 16 位 PCM 的 CAF：进程被强杀后文件仍可读（已验证），不像 m4a 那样缺 moov 就整段报废。
-/// - 输入设备变化（插拔麦克风、蓝牙耳机连上）时 AVAudioEngine 会静默停止，
-///   这里监听配置变化并重建引擎，从新分片继续录。
+/// - 设备断开、采样率或流配置变化时重建采集，从新分片继续录；格式变了的数据不写进旧分片。
 /// - 设了 `liveTap` 时，每块音频写盘之后再交一份给实时字幕（分路自己拷贝、限长，不阻塞采集线程）。
-/// - 回调都在主线程触发。
+/// - 回调都在主线程触发；start、stop、restart 都在主线程调用。
 final class Recorder {
     static let segmentSeconds: Double = 60
 
@@ -33,8 +37,11 @@ final class Recorder {
     /// 正在录音的设备（跟随系统默认时为当时的默认输入）
     private(set) var currentDevice: AudioInputDevice?
 
-    private var engine: AVAudioEngine?
-    private var configObserver: NSObjectProtocol?
+    /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在写分片。同一时刻最多一次采集
+    private static let ioQueue = DispatchQueue(label: "faymee.mic-capture", qos: .userInitiated)
+    private var deviceID = AudioDeviceID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private let watch = DeviceWatch()
     private var retryScheduled = false
     /// 麦克风暂时不可用、正在每秒重试
     var isRetrying: Bool { retryScheduled }
@@ -49,6 +56,10 @@ final class Recorder {
     private var segmentDevice = (name: "未知设备", uid: String?.none)
     private var lastBufferAt = Date.distantPast
     private var tap: LiveAudioTap?
+    /// 电平按约 levelWindow 帧报一次（IOProc 每次只给约 10 ms），不必每块都切回主线程
+    private static let levelWindow = 4096
+    private var levelSquares: Float = 0
+    private var levelFrames = 0
 
     /// 实时字幕的音频分路。重建采集（切换麦克风）后照常往同一个分路送，格式变化由实时字幕自己处理
     var liveTap: LiveAudioTap? {
@@ -71,7 +82,7 @@ final class Recorder {
             lastBufferAt = Date()
         }
         do {
-            try startEngine()
+            try startCapture()
         } catch {
             lock.withLock { self.directory = nil }
             throw error
@@ -79,7 +90,7 @@ final class Recorder {
     }
 
     func stop() {
-        teardownEngine()
+        teardownCapture()
         lock.withLock { directory = nil }
         currentDevice = nil
     }
@@ -87,9 +98,9 @@ final class Recorder {
     /// 重建采集并开始新分片。设备变化、采集停滞时调用；失败则每秒重试，直到成功或 stop()
     func restart() {
         guard isRunning else { return }
-        teardownEngine()
+        teardownCapture()
         do {
-            try startEngine()
+            try startCapture()
         } catch {
             guard !retryScheduled else { return }
             report(error: "麦克风不可用，正在重试：\(error.localizedDescription)")
@@ -101,63 +112,62 @@ final class Recorder {
         }
     }
 
-    // MARK: - 引擎
+    // MARK: - 采集
 
-    private func startEngine() throws {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        // 只改本 App 的输入设备，不动系统设置
-        let chosen = deviceResolver?()
-        if let chosen {
-            var id = chosen.id
-            guard let unit = input.audioUnit,
-                  AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                       &id, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr
-            else { throw RecorderError.cannotUseDevice(chosen.name) }
+    private func startCapture() throws {
+        guard let device = deviceResolver?() ?? AudioDevices.defaultInput() else { throw RecorderError.noInputDevice }
+        guard let layout = AudioDevices.inputLayout(device.id), let format = layout.makeFormat() else {
+            throw RecorderError.cannotUseDevice(device.name)
         }
-        let device = chosen ?? AudioDevices.defaultInput()
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputDevice }
         currentDevice = device
-        lock.withLock { segmentDevice = (device?.name ?? "未知设备", device?.uid) }
-
+        lock.withLock {
+            segmentDevice = (device.name, device.uid)
+            levelSquares = 0
+            levelFrames = 0
+        }
         let segment = try lock.withLock { try openSegmentLocked(format: format) }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+
+        var procID: AudioDeviceIOProcID?
+        var status = AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, Self.ioQueue) { [weak self] _, input, _, _, _ in
+            guard let buffer = layout.deinterleave(input, format: format) else { return }
             self?.process(buffer)
         }
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            input.removeTap(onBus: 0)
-            lock.withLock { closeFileLocked(deleteIfEmpty: true) }
-            throw error
+        if status == noErr, let procID {
+            status = AudioDeviceStart(device.id, procID)
+            if status != noErr { AudioDeviceDestroyIOProcID(device.id, procID) }
         }
+        guard status == noErr, let procID else {
+            lock.withLock { closeFileLocked(deleteIfEmpty: true) }
+            currentDevice = nil
+            throw RecorderError.cannotUseDevice(device.name)
+        }
+        deviceID = device.id
+        self.procID = procID
 
-        self.engine = engine
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self, weak engine] _ in
-            guard let self, let engine else { return }
-            // 指定设备启动后也可能收到一次配置变化；引擎还在跑、设备也没变就不必重建，避免反复重启
-            let desired = self.deviceResolver?() ?? AudioDevices.defaultInput()
-            if engine.isRunning && desired?.uid == self.currentDevice?.uid { return }
+        // 设备断开、采样率或流配置变了：按建立时的布局再解读数据就错了，重建
+        let id = device.id
+        watch.start([(id, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal),
+                     (id, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal),
+                     (id, kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput),
+                     (id, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput)]) { [weak self] in
+            guard let self else { return }
+            if AudioDevices.isAlive(id), AudioDevices.inputLayout(id) == layout { return }
             self.restart()
         }
         let callback = onSegment
         DispatchQueue.main.async { MainActor.assumeIsolated { callback?(segment) } }
     }
 
-    private func teardownEngine() {
-        if let configObserver {
-            NotificationCenter.default.removeObserver(configObserver)
-            self.configObserver = nil
+    private func teardownCapture() {
+        watch.stop()
+        if let procID {
+            AudioDeviceStop(deviceID, procID)
+            AudioDeviceDestroyIOProcID(deviceID, procID)
+            self.procID = nil
+            deviceID = AudioDeviceID(kAudioObjectUnknown)
         }
-        if let engine {
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-            self.engine = nil
-        }
+        // 已经派发到队列上的回调执行完，才不会在关掉分片之后又写进来
+        Self.ioQueue.sync {}
         lock.withLock { closeFileLocked(deleteIfEmpty: true) }
     }
 
@@ -198,12 +208,20 @@ final class Recorder {
     // MARK: - 采集线程
 
     private func process(_ buffer: AVAudioPCMBuffer) {
-        let level = Self.levelDB(buffer)
+        let squares = Self.sumOfSquares(buffer)
+        var level: Float?
         var newSegment: Segment?
         var errorMessage: String?
 
         lock.lock()
         lastBufferAt = Date()
+        levelSquares += squares
+        levelFrames += Int(buffer.frameLength)
+        if levelFrames >= Self.levelWindow {
+            level = Self.levelDB(meanSquare: levelSquares / Float(levelFrames))
+            levelSquares = 0
+            levelFrames = 0
+        }
         if let file {
             do {
                 try file.write(from: buffer)
@@ -226,10 +244,11 @@ final class Recorder {
         // 写盘之后再分给实时字幕，分路出什么问题都不影响录音
         tap?.push(buffer, at: Date())
 
+        guard level != nil || newSegment != nil || errorMessage != nil else { return }
         let onLevel = onLevel, onSegment = onSegment, onError = onError
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                onLevel?(level)
+                if let level { onLevel?(level) }
                 if let newSegment { onSegment?(newSegment) }
                 if let errorMessage { onError?(errorMessage) }
             }
@@ -241,11 +260,16 @@ final class Recorder {
         DispatchQueue.main.async { MainActor.assumeIsolated { onError?(message) } }
     }
 
-    /// 第一个声道的 RMS 电平（dBFS），静音返回 -160
-    static func levelDB(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return -160 }
-        var meanSquare: Float = 0
-        vDSP_measqv(channels[0], 1, &meanSquare, vDSP_Length(buffer.frameLength))
-        return meanSquare > 0 ? max(10 * log10(meanSquare), -160) : -160
+    /// 第一个声道的平方和，攒够一个电平窗口再换算成 RMS 电平
+    static func sumOfSquares(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var sum: Float = 0
+        vDSP_svesq(channels[0], 1, &sum, vDSP_Length(buffer.frameLength))
+        return sum
+    }
+
+    /// RMS 电平（dBFS），静音返回 -160
+    static func levelDB(meanSquare: Float) -> Float {
+        meanSquare > 0 ? max(10 * log10(meanSquare), -160) : -160
     }
 }

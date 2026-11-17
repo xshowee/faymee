@@ -364,7 +364,12 @@ final class AppModel {
 
     private func segmentOpened(_ segment: Segment) {
         guard var m = current else { return }
-        m.segments.append(segment)
+        // 重建采集时空分片被删掉、编号复用，同名的那条换成新的，不重复记
+        if let i = m.segments.firstIndex(where: { $0.file == segment.file }) {
+            m.segments[i] = segment
+        } else {
+            m.segments.append(segment)
+        }
         recordingDevice = recorder.currentDevice
         if hasRecordingError {
             hasRecordingError = false
