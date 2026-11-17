@@ -107,7 +107,7 @@ public enum ASROutputGuard {
     }
 
     /// 输出有没有问题（先 `clean`）。有问题的段对半重转
-    /// - Parameter hotwords: 交给模型的热词（拼进了提示词），用来认出整串热词的泄漏
+    /// - Parameter hotwords: 交给模型的热词（拼进了提示词），用来认出整串热词的泄漏（Qwen3-ASR 据此不带热词重转）
     public static func problem(in text: String, hotwords: [String] = []) -> Problem? {
         if isPromptLeak(text) || isHotwordLeak(text, hotwords: hotwords) { return .promptLeak }
         if isForeign(text) { return .foreign }
@@ -116,8 +116,8 @@ public enum ASROutputGuard {
     }
 
     /// 重转后仍有问题时的兜底：复读截到 3 次；日文、提示词泄漏整段丢掉
-    public static func salvage(_ text: String, hotwords: [String] = []) -> String {
-        switch problem(in: text, hotwords: hotwords) {
+    public static func salvage(_ text: String) -> String {
+        switch problem(in: text) {
         case nil: text
         case .runaway: truncateRepeats(text)
         case .foreign, .promptLeak: ""

@@ -122,7 +122,6 @@ import Testing
                      "智能体、工具广场、模型广场"]
         for text in leaks {
             #expect(ASROutputGuard.problem(in: text, hotwords: hotwords) == .promptLeak, "\(text)")
-            #expect(ASROutputGuard.salvage(text, hotwords: hotwords) == "")
             #expect(ASROutputGuard.problem(in: text) == nil)
         }
         // 会上说到热词、说到两个连着的热词都正常；热词不到 3 个不判

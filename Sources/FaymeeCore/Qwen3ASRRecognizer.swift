@@ -11,7 +11,8 @@ import SherpaOnnxC
 /// - 带热词时偶尔把提示词当成结果输出（整串热词，或单独的「system」）：这一段不带热词再转一遍
 ///   （见 `Qwen3ASR.decodeAvoidingPromptLeak`）
 /// - sherpa 自己会截掉「只在两三个 token 间打转」的复读；其余复读（含整句重复到输出上限）、
-///   仍有的泄漏，由外面套的 `GuardedRecognizer` 处理
+///   不带热词仍有的泄漏（单独的「system」），由外面套的 `GuardedRecognizer` 处理。
+///   不带热词重转后输出里仍有整串热词，就是会上真说了，不再当泄漏
 public final class Qwen3ASRRecognizer: SegmentRecognizer {
     private let recognizer: OpaquePointer
     private let hotwords: [String]
@@ -130,8 +131,7 @@ extension SherpaOfflineTranscriber {
         return SherpaOfflineTranscriber(model: model, catalog: catalog, modelDirectory: modelDirectory,
                                         vadModel: vadModel) { hotwords in
             let fitted = try Qwen3ASR.fitHotwords(hotwords, budget: budget, modelDirectory: directory)
-            return GuardedRecognizer(try Qwen3ASRRecognizer(directory: directory, hotwords: fitted, threads: threads),
-                                     hotwords: fitted)
+            return GuardedRecognizer(try Qwen3ASRRecognizer(directory: directory, hotwords: fitted, threads: threads))
         }
     }
 }
