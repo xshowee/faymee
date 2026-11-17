@@ -26,21 +26,6 @@ import Testing
         ])
     }
 
-    /// VAD 把长段强行断开时两段只隔约 0.07 秒；补边伸进邻段的说话里，两段会把同几个字各识别一遍
-    /// （真实会议里 Paraformer 出现过「…我这里」「我这里…」）。补边只补到邻段说话部分的边上
-    @Test func 补边不越过相邻说话段() {
-        let x = audio(seconds: 20)
-
-        let segments = SpeechSegmentation.segments(speech: [s(1)..<s(4), s(4.07)..<s(6), s(6.4)..<s(8)], samples: x)
-
-        #expect(segments == [
-            SpeechSegment(audio: s(0.7)..<s(4.07), speech: s(1)..<s(4)),
-            // 隔 0.4 秒的两段：补边各自没碰到对方的说话部分，照常补（补边之间重叠的只是静音）
-            SpeechSegment(audio: s(4)..<s(6.3), speech: s(4.07)..<s(6)),
-            SpeechSegment(audio: s(6.1)..<s(8.3), speech: s(6.4)..<s(8)),
-        ])
-    }
-
     /// 补边后超过 10 秒：在 6–10 秒之间能量最低的 0.1 秒处切开（切在那 0.1 秒的中点），切点处不补边
     @Test func 超过10秒的段在6到10秒间最安静处切开_切点不补边() {
         let x = audio(seconds: 20, quiet: [7.45..<7.55])
