@@ -172,6 +172,28 @@ struct SherpaOnnxDiarizerContractTests {
         #expect(agreement(result.segments) >= 0.9)
     }
 
+    /// 重算声纹库：按句子分组算声纹，与区分时同一人的声纹一致；太短算不出的组为 nil
+    @Test func 按组算声纹_与区分结果里同一人的声纹一致() async throws {
+        let engine = SherpaOnnxDiarizer(modelDirectory: modelDirectory)
+        let url = try resource("two-speakers-zh")
+        let diarized = try await engine.diarize(audio: url, sentences: allSentences, speakerCount: 2) { _ in }
+        let a = try #require(label(of: "A", in: diarized.segments, within: 0...60, offset: 0))
+        let b = try #require(label(of: "B", in: diarized.segments, within: 0...60, offset: 0))
+        func spans(_ name: String) -> [ClosedRange<TimeInterval>] {
+            truth.filter { $0.speaker == name }.map { $0.start...$0.end }
+        }
+
+        let vectors = try await engine.voiceprints(audio: url, groups: [spans("A"), spans("B"), [1...1.05], []])
+
+        #expect(vectors.count == 4)
+        let va = try #require(vectors[0]), vb = try #require(vectors[1])
+        #expect(va.similarity(to: try #require(diarized.voiceprints[a])) > 0.99)
+        #expect(vb.similarity(to: try #require(diarized.voiceprints[b])) > 0.99)
+        #expect(va.similarity(to: vb) < SherpaOnnxDiarizer.recommendedMatchThreshold)
+        #expect(vectors[2] == nil)
+        #expect(vectors[3] == nil)
+    }
+
     @Test func 没有句子_没有说话人() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).caf")
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2))

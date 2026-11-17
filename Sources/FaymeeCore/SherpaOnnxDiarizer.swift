@@ -12,7 +12,7 @@ import SherpaOnnxC
 /// - 解码和逐句算声纹都是自己的循环，取消后最多再算完一句就抛 `CancellationError`
 /// - 每句一个说话片段（就是这句的起止时间）；太短算不出声纹的句子没有片段，归属为未知
 /// - 内存主要是整段录音解码后的样本（1 小时约 230MB）和聚类的相似度矩阵（1000 个长句约 8MB）
-public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
+public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @unchecked Sendable {
     public struct ModelFile: Sendable, Equatable {
         public let name: String
         /// 字节数
@@ -102,6 +102,68 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         }
     }
 
+    /// 重算声纹库：整段解码一次，每组句子各算一个声纹（各句按时长加权平均，同区分时每人的声纹）
+    public func voiceprints(audio: URL, groups: [[ClosedRange<TimeInterval>]]) async throws -> [Voiceprint?] {
+        try await prepare { _ in }
+        let flag = CancelFlag()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { c in
+                queue.async {
+                    c.resume(with: Result { try self.extract(audio: audio, groups: groups, flag: flag) })
+                }
+            }
+        } onCancel: {
+            flag.cancel()
+        }
+    }
+
+    private func extract(audio: URL, groups: [[ClosedRange<TimeInterval>]], flag: CancelFlag) throws -> [Voiceprint?] {
+        try flag.check()
+        guard groups.contains(where: { !$0.isEmpty }) else { return groups.map { _ in nil } }
+        let samples = try Self.decode(audio, flag: flag)
+        return try withExtractor { extractor, dim in
+            try groups.map { spans in
+                let embedded = try embed(spans, samples: samples, extractor: extractor, dim: dim, flag: flag)
+                guard !embedded.isEmpty else { return nil }
+                return Self.result(embedded, labels: embedded.map { _ in 0 }, dim: dim).voiceprints[0]
+            }
+        }
+    }
+
+    /// 建一个声纹提取器，用完销毁
+    private func withExtractor<T>(_ body: (OpaquePointer, Int) throws -> T) throws -> T {
+        let model = strdup(modelURL.path)
+        let cpu = strdup("cpu")
+        defer { free(model); free(cpu) }
+        var config = SherpaOnnxSpeakerEmbeddingExtractorConfig()
+        config.model = UnsafePointer(model)
+        config.num_threads = threads
+        config.provider = UnsafePointer(cpu)
+        guard let extractor = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config) else {
+            throw SherpaOnnxDiarizerError.engineUnavailable
+        }
+        defer { SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor) }
+        return try body(extractor, Int(SherpaOnnxSpeakerEmbeddingExtractorDim(extractor)))
+    }
+
+    /// 逐句算声纹；太短、算不出的句子跳过。每句之前检查取消，`each` 报告算完第几句
+    private func embed(_ sentences: [ClosedRange<TimeInterval>], samples: [Float], extractor: OpaquePointer, dim: Int,
+                       flag: CancelFlag, each: (Int) -> Void = { _ in })
+        throws -> [(range: ClosedRange<TimeInterval>, vector: [Float])] {
+        var embedded: [(range: ClosedRange<TimeInterval>, vector: [Float])] = []
+        for (i, r) in sentences.enumerated() {
+            try flag.check()
+            let lo = max(0, Int(r.lowerBound * Double(Self.sampleRate)))
+            let hi = min(samples.count, Int(r.upperBound * Double(Self.sampleRate)))
+            if hi - lo > Self.minimumSamples, let v = Self.embedding(samples[lo..<hi], extractor: extractor, dim: dim) {
+                embedded.append((r, v))
+            }
+            each(i)
+        }
+        try flag.check()
+        return embedded
+    }
+
     // MARK: - 区分
 
     private static let sampleRate = 16000
@@ -119,36 +181,18 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         }
         let samples = try Self.decode(audio, flag: flag) { progress.report($0 * Self.decodeShare) }
 
-        let model = strdup(modelURL.path)
-        let cpu = strdup("cpu")
-        defer { free(model); free(cpu) }
-        var config = SherpaOnnxSpeakerEmbeddingExtractorConfig()
-        config.model = UnsafePointer(model)
-        config.num_threads = threads
-        config.provider = UnsafePointer(cpu)
-        guard let extractor = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config) else {
-            throw SherpaOnnxDiarizerError.engineUnavailable
-        }
-        defer { SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor) }
-        let dim = Int(SherpaOnnxSpeakerEmbeddingExtractorDim(extractor))
-
-        var embedded: [(range: ClosedRange<TimeInterval>, vector: [Float])] = []
-        for (i, r) in sentences.enumerated() {
-            try flag.check()
-            let lo = max(0, Int(r.lowerBound * Double(Self.sampleRate)))
-            let hi = min(samples.count, Int(r.upperBound * Double(Self.sampleRate)))
-            if hi - lo > Self.minimumSamples, let v = Self.embedding(samples[lo..<hi], extractor: extractor, dim: dim) {
-                embedded.append((r, v))
+        return try withExtractor { extractor, dim in
+            let embedded = try embed(sentences, samples: samples, extractor: extractor, dim: dim, flag: flag) { i in
+                progress.report(Self.decodeShare + Double(i + 1) / Double(sentences.count) * (1 - Self.decodeShare))
             }
-            progress.report(Self.decodeShare + Double(i + 1) / Double(sentences.count) * (1 - Self.decodeShare))
+            let labels = SentenceClustering.cluster(
+                embedded.map {
+                    SentenceClustering.Item(vector: $0.vector, duration: $0.range.upperBound - $0.range.lowerBound)
+                },
+                speakerCount: speakerCount)
+            progress.report(1)
+            return Self.result(embedded, labels: labels, dim: dim)
         }
-        try flag.check()
-
-        let labels = SentenceClustering.cluster(
-            embedded.map { SentenceClustering.Item(vector: $0.vector, duration: $0.range.upperBound - $0.range.lowerBound) },
-            speakerCount: speakerCount)
-        progress.report(1)
-        return Self.result(embedded, labels: labels, dim: dim)
     }
 
     /// 每句一个片段；每人的声纹是他各句（单位化的）声纹按时长加权平均，再单位化
