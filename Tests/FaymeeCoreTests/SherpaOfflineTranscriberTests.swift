@@ -1,5 +1,4 @@
 import Foundation
-import SherpaOnnxC
 import Testing
 @testable import FaymeeCore
 
@@ -218,55 +217,23 @@ struct SileroVADContractTests {
     }
 }
 
-/// 只为契约测试的最小 Paraformer 识别器（正式的适配器见 ticket 03）：原样交出 sherpa 的文字和逐字开始时间。
-/// `punctuate` 模拟标点模型改文字
+/// 真实 Paraformer 的原始结果（不加标点模型的标点），`punctuate` 模拟标点模型改文字
 private final class RawParaformer: SegmentRecognizer, @unchecked Sendable {
-    private let recognizer: OpaquePointer
+    private let paraformer: ParaformerRecognizer
     private let punctuate: (String) -> String
 
     init(punctuate: @escaping (String) -> String) throws {
-        let dir = LocalModel.paraformer.directory()
-        let model = strdup(dir.appendingPathComponent("model.int8.onnx").path)
-        let tokens = strdup(dir.appendingPathComponent("tokens.txt").path)
-        let cpu = strdup("cpu"), greedy = strdup("greedy_search")
-        defer { free(model); free(tokens); free(cpu); free(greedy) }
-        var config = SherpaOnnxOfflineRecognizerConfig()
-        config.feat_config.sample_rate = 16000
-        config.feat_config.feature_dim = 80
-        config.model_config.paraformer.model = UnsafePointer(model)
-        config.model_config.tokens = UnsafePointer(tokens)
-        config.model_config.num_threads = 2
-        config.model_config.provider = UnsafePointer(cpu)
-        config.decoding_method = UnsafePointer(greedy)
-        guard let r = SherpaOnnxCreateOfflineRecognizer(&config) else {
-            throw SherpaModelError.engineUnavailable(model: "Paraformer")
-        }
-        recognizer = r
+        paraformer = try ParaformerRecognizer()
         self.punctuate = punctuate
     }
 
-    deinit { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
-
     func recognize(_ samples: ArraySlice<Float>) throws -> SegmentRecognition {
-        let stream = SherpaOnnxCreateOfflineStream(recognizer)
-        defer { SherpaOnnxDestroyOfflineStream(stream) }
-        samples.withUnsafeBufferPointer {
-            SherpaOnnxAcceptWaveformOffline(stream, 16000, $0.baseAddress, Int32($0.count))
-        }
-        SherpaOnnxDecodeOfflineStream(recognizer, stream)
-        guard let r = SherpaOnnxGetOfflineStreamResult(stream) else { return SegmentRecognition(text: "", tokens: nil) }
-        defer { SherpaOnnxDestroyOfflineRecognizerResult(r) }
-        let tokens = r.pointee.timestamps.map { times in
-            (0..<Int(r.pointee.count)).map {
-                SegmentRecognition.Token(text: String(cString: r.pointee.tokens_arr[$0]!), start: Double(times[$0]))
-            }
-        }
-        return SegmentRecognition(text: punctuate(r.pointee.text.map { String(cString: $0) } ?? ""), tokens: tokens)
+        let raw = paraformer.recognizeRaw(samples)
+        return SegmentRecognition(text: punctuate(raw.text), tokens: raw.tokens)
     }
 }
 
 /// 契约测试：真实 Silero VAD + 真实 Paraformer（ticket 01 下载到 ~/Library/Application Support/Faymee/Models）走通公共层
-/// （目录项依赖标点模型，文件检查要求它也在，虽然这里不用它）
 @Suite(.serialized, .enabled(if: vadPresent && LocalModel.paraformer.isDownloaded() && LocalModel.punctuation.isDownloaded(),
                              "需要 Silero VAD 和已下载的 Paraformer、标点模型"))
 struct SherpaOfflineParaformerContractTests {

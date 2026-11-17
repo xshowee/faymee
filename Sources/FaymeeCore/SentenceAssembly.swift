@@ -94,7 +94,7 @@ enum SentenceAssembly {
     }
 
     /// 文字里每个字的开始时间（相对这段音频开头）；token 拼起来的字和文字的字（不分大小写）对不上时为 nil
-    private static func align(_ characters: [Character], to tokens: [SegmentRecognition.Token]) -> [TimeInterval]? {
+    static func align(_ characters: [Character], to tokens: [SegmentRecognition.Token]) -> [TimeInterval]? {
         var stream: [(character: String, start: TimeInterval)] = []
         for token in tokens {
             for c in token.text.replacingOccurrences(of: "@@", with: "")
