@@ -367,8 +367,8 @@ struct ModelDownloadControls: View {
     enum Style: Equatable {
         case settings
         case minutes
-        /// 某个任务在等这个模型，参数是什么模型（如“转写”“声纹”），说明写成“等待下载转写模型”
-        case waiting(String)
+        /// 某个用途的任务在等这个模型，说明写成“等待下载转写模型”
+        case waiting(ModelRole)
     }
 
     @Environment(AppModel.self) private var model
@@ -420,7 +420,7 @@ extension ModelDownloadControls {
         switch style {
         case .settings: status.text
         case .minutes: status.minutesText
-        case let .waiting(purpose): status.waitText(for: purpose)
+        case let .waiting(role): status.waitText(for: role)
         }
     }
 }

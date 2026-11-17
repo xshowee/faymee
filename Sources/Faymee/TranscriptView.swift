@@ -375,11 +375,9 @@ struct TranscriptSection: View {
     /// 转写排队或进行中时不显示，由转写状态说明
     @ViewBuilder private var speakerStatusView: some View {
         let status = speakerStatus
-        if case let .queued(.modelDownload(id)) = status,
-           let entry = model.modelSelections.catalog.model(id: id),
-           let downloader = model.modelDownloads.downloader(for: entry) {
+        if case let .queued(.modelDownload(id)) = status, let downloader = downloader(forModel: id) {
             // 同转写等模型：说明要下多大的声纹模型，用户点“下载”才开始；下好后自动区分说话人
-            ModelDownloadControls(style: .waiting("声纹"), downloader: downloader)
+            ModelDownloadControls(style: .waiting(.voiceprint), downloader: downloader)
         } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)
@@ -405,6 +403,11 @@ struct TranscriptSection: View {
         }
     }
 
+    /// 排队在等下载的模型（`.queued(.modelDownload(id))`）的下载器
+    private func downloader(forModel id: String) -> ModelDownloader? {
+        model.modelSelections.catalog.model(id: id).flatMap { model.modelDownloads.downloader(for: $0) }
+    }
+
     /// “重新区分说话人”可选的人数上限
     private static let maxSpeakerCount = 8
 
@@ -420,11 +423,9 @@ struct TranscriptSection: View {
         let status = TranscriptionStatus(state: meeting.transcription,
                                          activity: model.transcription.activity(for: meeting.id),
                                          waitReason: model.transcription.waitReason(for: meeting.id))
-        if case let .queued(.modelDownload(id)) = status,
-           let entry = model.modelSelections.catalog.model(id: id),
-           let downloader = model.modelDownloads.downloader(for: entry) {
+        if case let .queued(.modelDownload(id)) = status, let downloader = downloader(forModel: id) {
             // 不静默下载：说明要下多大的模型，用户点“下载”才开始；下好后自动开始转写
-            ModelDownloadControls(style: .waiting("转写"), downloader: downloader)
+            ModelDownloadControls(style: .waiting(.transcription), downloader: downloader)
         } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)

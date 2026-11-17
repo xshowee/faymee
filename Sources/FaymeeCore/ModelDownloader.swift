@@ -265,10 +265,10 @@ public struct ModelDownloadStatus: Hashable, Sendable {
         }
     }
 
-    /// 别的任务在等这个模型时详情页的说明，如“等待下载转写模型（约 1.0 GB）”
-    /// - Parameter purpose: 什么模型，如“转写”“声纹”
-    public func waitText(for purpose: String) -> String {
-        switch phase {
+    /// 某个用途的任务（会后转写、区分说话人）在等这个模型时详情页的说明，如“等待下载转写模型（约 1.0 GB）”
+    public func waitText(for role: ModelRole) -> String {
+        let purpose = role.waitingName
+        return switch phase {
         case .notDownloaded: "等待下载\(purpose)模型（约 \(formatModelSize(totalBytes))）"
         case .downloading: "正在下载\(purpose)模型 \(percent)"
         case .paused: "\(purpose)模型下载已暂停（\(percent)）"
@@ -522,4 +522,17 @@ func sha256(of url: URL) throws -> String {
         hasher.update(data: chunk)
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
+private extension ModelRole {
+    /// “等待下载×模型”里的用途名：会后转写说“转写”，声纹说“声纹”
+    var waitingName: String {
+        switch self {
+        case .transcription: "转写"
+        case .liveCaptions: "实时字幕"
+        case .liveFinalize: "实时字幕定稿"
+        case .minutes: "纪要"
+        case .voiceprint: "声纹"
+        }
+    }
 }

@@ -156,11 +156,11 @@ final class AppModel {
     /// 声纹模型现在不能删的原因：正在转写（可能接着区分说话人）或重算声纹库时，引擎还要读模型文件
     var voiceprintModelDeleteBlockedReason: String? {
         if voiceprintRecomputation.isRunning { return "正在重算声纹库，结束后才能删除模型" }
-        if transcription.activeID != nil { return "正在转写或区分说话人，结束后才能删除模型" }
-        return nil
+        return transcriptionModelDeleteBlockedReason
     }
 
-    /// 会后转写模型现在不能删的原因：正在转写时引擎还要读模型文件（读到一半的模型会让 sherpa-onnx 直接退出进程）
+    /// 会后转写模型现在不能删的原因：正在转写（可能接着区分说话人）时引擎还要读模型文件
+    /// （读到一半的模型会让 sherpa-onnx 直接退出进程）
     var transcriptionModelDeleteBlockedReason: String? {
         transcription.activeID != nil ? "正在转写或区分说话人，结束后才能删除模型" : nil
     }

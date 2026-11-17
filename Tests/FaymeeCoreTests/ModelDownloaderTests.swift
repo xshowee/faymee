@@ -443,11 +443,11 @@ private final class Fixture {
         #expect(status(.failed("网络连接已中断")).minutesText == "模型下载失败：网络连接已中断")
 
         // 别的任务（会后转写、区分说话人）在等模型时的说明
-        #expect(status(.notDownloaded).waitText(for: "转写") == "等待下载转写模型（约 2.5 GB）")
-        #expect(status(.downloading, 950_000_000).waitText(for: "转写") == "正在下载转写模型 38%")
-        #expect(status(.paused, 950_000_000).waitText(for: "声纹") == "声纹模型下载已暂停（38%）")
-        #expect(status(.verifying).waitText(for: "转写") == "正在校验模型…")
-        #expect(status(.failed("网络连接已中断")).waitText(for: "转写") == "转写模型下载失败：网络连接已中断")
+        #expect(status(.notDownloaded).waitText(for: .transcription) == "等待下载转写模型（约 2.5 GB）")
+        #expect(status(.downloading, 950_000_000).waitText(for: .transcription) == "正在下载转写模型 38%")
+        #expect(status(.paused, 950_000_000).waitText(for: .voiceprint) == "声纹模型下载已暂停（38%）")
+        #expect(status(.verifying).waitText(for: .transcription) == "正在校验模型…")
+        #expect(status(.failed("网络连接已中断")).waitText(for: .transcription) == "转写模型下载失败：网络连接已中断")
 
         // 不到 1 GB 的模型用 MB
         let small = ModelDownloadStatus(phase: .paused, receivedBytes: 40_000_000, totalBytes: 169_347_218)
