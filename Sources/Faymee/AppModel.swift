@@ -166,9 +166,9 @@ final class AppModel {
     }
 
     /// 会后转写、字幕定稿选择框里的模型现在不能删的原因。Paraformer、Fun-ASR-Nano 两个用途共用同一份模型文件，
-    /// 哪边在用都不能删：正在转写（同上），或本场录音的字幕定稿正拿着它（删到一半同样会让 sherpa-onnx 退出进程）
+    /// 哪边在用都不能删：正在转写（同上），或本场录音的实时字幕定稿正拿着它（删到一半同样会让 sherpa-onnx 退出进程）
     func asrModelDeleteBlockedReason(_ m: CatalogModel) -> String? {
-        if liveFinalizeModelID == m.id { return "正在用它给本场录音的字幕定稿，录音结束后才能删除" }
+        if liveFinalizeModelID == m.id { return "本场录音的实时字幕定稿正在用它，录音结束后才能删除" }
         return m.roles.contains(.transcription) ? transcriptionModelDeleteBlockedReason : nil
     }
 
@@ -251,7 +251,7 @@ final class AppModel {
     /// 本场录音的实时字幕在用的模型 id（所选模型没下载完时是 SpeechAnalyzer）；不在录音时为 nil。
     /// 设置里据此不让删正在用的模型
     private(set) var liveCaptionModelID: String?
-    /// 本场录音的字幕定稿在用的模型 id；不定稿（选了“不用”或所选模型没下载完）或不在录音时为 nil。
+    /// 本场录音的实时字幕定稿在用的模型 id；不用（选了“不用”或所选模型没下载完）或不在录音时为 nil。
     /// 设置里据此不让删正在用的模型
     private(set) var liveFinalizeModelID: String?
     /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
