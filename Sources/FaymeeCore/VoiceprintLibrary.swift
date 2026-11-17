@@ -34,16 +34,38 @@ public struct VoiceprintSample: Codable, Hashable, Sendable {
     /// 该说话人在来源会议里的有效发言时长（秒）
     public var speechDuration: TimeInterval
     public var addedAt: Date
+    /// 来自来源会议里的哪个说话人。换声纹模型时据此从来源会议找回这个人的句子重算；
+    /// 早于 model-catalog 的样本没有（nil），重算时按别的线索找
+    public var source: VoiceprintSampleSource?
 
-    public init(voiceprint: Voiceprint, meetingID: String, speechDuration: TimeInterval, addedAt: Date) {
+    public init(voiceprint: Voiceprint, meetingID: String, speechDuration: TimeInterval, addedAt: Date,
+                source: VoiceprintSampleSource? = nil) {
         self.voiceprint = voiceprint
         self.meetingID = meetingID
         self.speechDuration = speechDuration
         self.addedAt = addedAt
+        self.source = source
     }
 
     private enum CodingKeys: String, CodingKey {
-        case voiceprint, meetingID = "meetingId", speechDuration, addedAt
+        case voiceprint, meetingID = "meetingId", speechDuration, addedAt, source
+    }
+}
+
+/// 样本的来源说话人。说话人编号只在一次区分结果内有意义：重新区分后编号重排，
+/// 所以连同那次区分的时间一起记，时间对得上才认这个编号
+public struct VoiceprintSampleSource: Codable, Hashable, Sendable {
+    public var speakerID: String
+    /// 来源转写稿的 `Diarization.speakersCreatedAt`
+    public var speakersCreatedAt: Date
+
+    public init(speakerID: String, speakersCreatedAt: Date) {
+        self.speakerID = speakerID
+        self.speakersCreatedAt = speakersCreatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case speakerID = "speakerId", speakersCreatedAt
     }
 }
 
@@ -62,8 +84,11 @@ extension VoiceprintLibrary {
     public mutating func enroll(speaker id: String, from transcript: Transcript, meetingID: String,
                                 now: Date = Date(), newID: () -> String = { UUID().uuidString }) throws -> String {
         let (speaker, name, model) = try Self.enrollable(speaker: id, in: transcript)
+        let source = transcript.diarization.map {
+            VoiceprintSampleSource(speakerID: speaker.id, speakersCreatedAt: $0.speakersCreatedAt)
+        }
         let sample = VoiceprintSample(voiceprint: speaker.voiceprint, meetingID: meetingID,
-                                      speechDuration: speaker.speechDuration, addedAt: now)
+                                      speechDuration: speaker.speechDuration, addedAt: now, source: source)
         guard let i = people.firstIndex(where: { $0.name == name }) else {
             let person = VoiceprintPerson(id: newID(), name: name, voiceprintModel: model, samples: [sample])
             people.append(person)
