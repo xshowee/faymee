@@ -39,9 +39,7 @@ struct SettingsView: View {
                     }
 
                     ModelPicker(role: .liveFinalize, title: "字幕定稿",
-                                deleteBlockedReason: { m in
-                                    model.liveFinalizeModelID == m.id ? "正在用它给本场录音的字幕定稿，录音结束后才能删除" : nil
-                                })
+                                deleteBlockedReason: { m in model.asrModelDeleteBlockedReason(m) })
                     Text(liveFinalizeNote)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -64,7 +62,7 @@ struct SettingsView: View {
 
                 if online.transcriptionMode == .local {
                     ModelPicker(role: .transcription, title: "转写模型",
-                                deleteBlockedReason: { _ in model.transcriptionModelDeleteBlockedReason })
+                                deleteBlockedReason: { m in model.asrModelDeleteBlockedReason(m) })
                     if model.modelSelections.selected(for: .transcription)?.family == .speechAnalyzer {
                         // 已有安装升级后默认还用 SpeechAnalyzer：只提示，不弹窗
                         Label("有更准的本机模型可以下载", systemImage: "sparkles")
