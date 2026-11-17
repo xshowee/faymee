@@ -20,7 +20,7 @@ public struct SilenceWatch: Sendable {
     /// 最近一次系统声音达到阈值的时刻；从没有过为 nil。没有声音播放时系统声音可能完全没有数据，
     /// 所以不记“从何时起安静”，没数据就是安静
     private var systemSoundHeardAt: Date?
-    /// 已经提醒过的那段无声从何时算起。有过声音后无声的起点变了，才会再提醒
+    /// 已经提醒过的那段无声从何时算起。有过声音后无声的起点变晚了，才会再提醒
     private var notifiedQuietSince: Date?
 
     public init() {}
@@ -46,7 +46,10 @@ public struct SilenceWatch: Sendable {
               now.timeIntervalSince(since) >= Self.alertAfter else {
             return Check(isSilent: false, notice: nil)
         }
-        guard canNotify, notifiedQuietSince != since else { return Check(isSilent: true, notice: nil) }
+        // 只有起点晚于提醒过的那段（中间有过声音）才再提醒；切换系统声音开关会让起点前后跳，不算
+        guard canNotify, notifiedQuietSince.map({ since > $0 }) ?? true else {
+            return Check(isSilent: true, notice: nil)
+        }
         notifiedQuietSince = since
         let what = includesSystemSound ? "麦克风和系统声音已经 \(Int(Self.alertAfter)) 秒都没有声音了"
                                        : "已经 \(Int(Self.alertAfter)) 秒没有声音了"

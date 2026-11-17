@@ -121,6 +121,18 @@ private let bothNotice = MeetingNotice(
         #expect(watch.check(at: at(20), includesSystemSound: false, canNotify: true).notice == micOnlyNotice)
     }
 
+    /// 提醒过之后切换系统声音开关、两路仍然都静：同一段无声不再提醒
+    @Test func 提醒过后切换开关不重复提醒() {
+        var watch = SilenceWatch()
+        watch.micLevel(quiet, at: at(0))
+        watch.systemSoundLevel(loud, at: at(10))
+        #expect(watch.check(at: at(30), includesSystemSound: true, canNotify: true).notice == bothNotice)
+        let off = watch.check(at: at(31), includesSystemSound: false, canNotify: true)
+        #expect(off.isSilent)
+        #expect(off.notice == nil)
+        #expect(watch.check(at: at(32), includesSystemSound: true, canNotify: true).notice == nil)
+    }
+
     @Test func 面板提示按是否在录系统声音() {
         #expect(SilenceWatch.statusText(includesSystemSound: false) == "长时间没有声音，请检查麦克风。")
         #expect(SilenceWatch.statusText(includesSystemSound: true) == "麦克风和系统声音都长时间没有声音，请检查麦克风。")
