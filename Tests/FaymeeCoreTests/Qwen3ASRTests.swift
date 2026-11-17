@@ -12,6 +12,40 @@ private let repoVADModel = URL(fileURLWithPath: #filePath)
     .appendingPathComponent("Resources/VAD/silero_vad.onnx")
 private let vadPresent = (try? SileroVAD.check(repoVADModel)) != nil
 
+@Suite struct Qwen3ASRLeakRetryTests {
+    private let hotwords = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场"]
+
+    /// 按流选项回答的假解码：带热词时输出整串热词（真实输出），不带热词时输出真实内容
+    private func decoder(leak: String) -> (calls: () -> [[String: String]], decode: ([String: String]) -> String) {
+        var calls: [[String: String]] = []
+        return ({ calls }, { options in
+            calls.append(options)
+            return options["hotwords"] == "" ? "很多都研发的，使用成本高的，推广性性价比。" : leak
+        })
+    }
+
+    @Test func 输出泄漏了提示词时不带热词重转这一段() {
+        for leak in ["DeerFlow LangChain Harness Agent 智能体 工具广场 模型广场 端到端研发的，使用成本高的推广性性价比。",
+                     "system\n"] {
+            let fake = decoder(leak: leak)
+            #expect(Qwen3ASR.decodeAvoidingPromptLeak(hotwords: hotwords, decode: fake.decode)
+                == "很多都研发的，使用成本高的，推广性性价比。")
+            #expect(fake.calls() == [[:], ["hotwords": ""]])
+        }
+    }
+
+    @Test func 没泄漏或没给热词时只转一次() {
+        let fine = decoder(leak: "我们用 DeerFlow 和 LangChain 搭。")
+        #expect(Qwen3ASR.decodeAvoidingPromptLeak(hotwords: hotwords, decode: fine.decode) == "我们用 DeerFlow 和 LangChain 搭。")
+        #expect(fine.calls() == [[:]])
+
+        // 没给热词：泄漏与热词无关，交给 GuardedRecognizer 对半重转
+        let noHotwords = decoder(leak: "system\n")
+        #expect(Qwen3ASR.decodeAvoidingPromptLeak(hotwords: [], decode: noHotwords.decode) == "system\n")
+        #expect(noHotwords.calls() == [[:]])
+    }
+}
+
 /// 契约测试：真实 Silero VAD + 已下载的 Qwen3-ASR（~/Library/Application Support/Faymee/Models）走通会后转写。
 /// 模型不在时跳过
 @Suite(.serialized, .enabled(if: vadPresent && LocalModel.qwen3ASR.isDownloaded(), "需要 Silero VAD 和已下载的 Qwen3-ASR"))

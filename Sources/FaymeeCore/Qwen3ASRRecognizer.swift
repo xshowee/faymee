@@ -8,10 +8,13 @@ import SherpaOnnxC
 ///   模型先输出 `language Chinese<asr_text>` 再输出文字，sherpa 会去掉这个前缀。
 ///   热词、音频、输出共用 `max_total_len`（512）的上下文，超了 sherpa 会悄悄截掉音频，
 ///   所以热词先按 `Qwen3ASR.fitHotwords` 截到预算内
+/// - 带热词时偶尔把提示词当成结果输出（整串热词，或单独的「system」）：这一段不带热词再转一遍
+///   （见 `Qwen3ASR.decodeAvoidingPromptLeak`）
 /// - sherpa 自己会截掉「只在两三个 token 间打转」的复读；其余复读（含整句重复到输出上限）、
-///   单独的「system」、把整串热词当成结果输出，由外面套的 `GuardedRecognizer` 处理
+///   仍有的泄漏，由外面套的 `GuardedRecognizer` 处理
 public final class Qwen3ASRRecognizer: SegmentRecognizer {
     private let recognizer: OpaquePointer
+    private let hotwords: [String]
 
     /// - Parameters:
     ///   - directory: 模型目录（`LocalModel.qwen3ASR.directory(in:)`），文件要先按大小确认齐全
@@ -49,12 +52,14 @@ public final class Qwen3ASRRecognizer: SegmentRecognizer {
             throw SherpaModelError.engineUnavailable(model: Qwen3ASR.name)
         }
         recognizer = r
+        self.hotwords = Qwen3ASR.sanitizedHotwords(hotwords)
     }
 
     deinit { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
 
     public func recognize(_ samples: ArraySlice<Float>) throws -> SegmentRecognition {
-        SegmentRecognition(text: rawText(samples).trimmingCharacters(in: .whitespacesAndNewlines), tokens: nil)
+        let text = Qwen3ASR.decodeAvoidingPromptLeak(hotwords: hotwords) { rawText(samples, options: $0) }
+        return SegmentRecognition(text: text.trimmingCharacters(in: .whitespacesAndNewlines), tokens: nil)
     }
 
     /// sherpa 的原始输出。`options` 是按流的选项（`language`、`hotwords`、`max_new_tokens`…）
@@ -84,13 +89,27 @@ public enum Qwen3ASR {
     /// 交给 sherpa 的 `hotwords` 参数：逗号连接（sherpa 按 ASCII `,` 拆开，再用空格连接拼进提示词）。
     /// 热词里的分隔符先换成空格，同 Fun-ASR-Nano
     static func hotwordsArgument(_ hotwords: [String]) -> String {
-        FunASRNano.sanitize(hotwords).joined(separator: ",")
+        sanitizedHotwords(hotwords).joined(separator: ",")
+    }
+
+    static func sanitizedHotwords(_ hotwords: [String]) -> [String] {
+        FunASRNano.sanitize(hotwords)
+    }
+
+    /// 解码一段；输出泄漏了提示词（整串热词、单独的「system」）且这次带了热词时，这一段用按流选项去掉热词再解一次。
+    /// 三场真实会议上这样的泄漏都只在带热词时出现，不带热词重转都得到正常内容；对半重转常常仍有一半泄漏而被丢掉
+    /// - Parameter decode: 按流选项解码（`[:]` = 用识别器的热词，`["hotwords": ""]` = 不带热词）
+    static func decodeAvoidingPromptLeak(hotwords: [String], decode: ([String: String]) -> String) -> String {
+        let text = decode([:])
+        guard !hotwords.isEmpty,
+              ASROutputGuard.problem(in: ASROutputGuard.clean(text), hotwords: hotwords) == .promptLeak else { return text }
+        return decode(["hotwords": ""])
     }
 
     /// 按 Qwen3 tokenizer 的实际计数把热词截到预算内（按热词表顺序，放不下就停）。
     /// 计的是 system 段里空格连接的热词串（Qwen3-ASR 的 tokenizer 与 Fun-ASR-Nano 的 Qwen3-0.6B 是同一份）
     public static func fitHotwords(_ hotwords: [String], budget: Int, modelDirectory: URL) throws -> [String] {
-        let words = FunASRNano.sanitize(hotwords)
+        let words = sanitizedHotwords(hotwords)
         guard !words.isEmpty else { return [] }
         let counter = try QwenTokenCounter(directory: modelDirectory.appendingPathComponent("tokenizer"))
         return HotwordBudget.fit(words, budget: budget, separator: " ", count: counter.count)

@@ -70,6 +70,8 @@ import Testing
         #expect(ASROutputGuard.problem(in: "ええ、あ、このように集中したのかな、この。") == .foreign)
         #expect(ASROutputGuard.problem(in: "あんまりないですね。") == .foreign)
         #expect(ASROutputGuard.problem(in: "안녕하세요") == .foreign)
+        // Qwen3-ASR 在一段 0.9 秒的「嗯」上输出过俄文字母
+        #expect(ASROutputGuard.problem(in: "стьы") == .foreign)
         #expect(ASROutputGuard.problem(in: "system") == .promptLeak)
         #expect(ASROutputGuard.problem(in: "热词列表：[DeerFlow, LangChain]") == .promptLeak)
         #expect(ASROutputGuard.problem(in: "那那那那那那那那那。") == .runaway)

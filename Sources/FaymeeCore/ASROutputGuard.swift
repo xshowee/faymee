@@ -100,7 +100,7 @@ public enum ASROutputGuard {
     public enum Problem: Equatable, Sendable {
         /// 失控复读
         case runaway
-        /// 整段不是中文（偶发的日文输出）
+        /// 整段不是中文（偶发的日文、韩文、俄文输出）
         case foreign
         /// 输出了提示词（如单独的「system」、热词列表）
         case promptLeak
@@ -124,13 +124,14 @@ public enum ASROutputGuard {
         }
     }
 
-    /// 假名、谚文占（不算 ASCII 的）字的三成以上。中文里偶尔夹一个「の」不算；英文、数字不算
+    /// 假名、谚文、西里尔字母占（不算 ASCII 的）字的三成以上。中文里偶尔夹一个「の」不算；英文、数字不算
     static func isForeign(_ text: String) -> Bool {
         let chars = text.unicodeScalars.filter { $0.value > 0x7F && isContent(Character($0)) }
         let foreign = chars.filter { s in
             switch s.value {
             case 0x3041...0x3096, 0x30A1...0x30FA, 0x31F0...0x31FF, // 平假名、片假名（不含长音符「ー」）
-                 0x1100...0x11FF, 0x3131...0x318E, 0xAC00...0xD7A3: true // 谚文
+                 0x1100...0x11FF, 0x3131...0x318E, 0xAC00...0xD7A3, // 谚文
+                 0x0400...0x04FF: true // 西里尔字母（Qwen3-ASR 偶尔输出俄文）
             default: false
             }
         }
