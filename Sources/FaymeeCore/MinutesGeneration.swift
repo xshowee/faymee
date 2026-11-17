@@ -35,7 +35,8 @@ public func generateMinutes(
     let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty, gapReasons: gapReasons)
     let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
     let budget = Budget(generator, system: system,
-                        outputTokens: min(generator.maxOutputTokens, generator.contextTokens * 2 / 5))
+                        outputTokens: min(generator.maxOutputTokens,
+                                         generator.minutesChunking.extractionOutput.of(generator.contextTokens)))
 
     let lineBudget = budget.promptTokens - generator.countTokens(extractionPrompt(meeting, lines: [], partial: true))
     let segments = try segment(transcript.items, lineBudget: lineBudget, countTokens: generator.countTokens,
@@ -63,7 +64,8 @@ public func generateMinutes(
     }
     let draft = drafts.count > 1
         ? try await merge(drafts, meeting: meeting, template: template, generator: generator,
-                          outputTokens: min(generator.maxOutputTokens, generator.contextTokens / 2))
+                          outputTokens: min(generator.maxOutputTokens,
+                                           generator.minutesChunking.mergeOutput.of(generator.contextTokens)))
         : drafts.first ?? [:]
     if segments.count > 1 { step() }
     // 转写稿一句都没有、也没有区间：同 v0.4 直接到 1
@@ -90,7 +92,7 @@ public func generateMinutes(
 }
 
 /// 一次调用的 token 预算：系统提示 + 提示词 + 输出 ≤ contextTokens。
-/// 留给输出的比例按 Qwen3 4B 实测定（ticket 04）：
+/// 留给输出的比例由引擎的 `minutesChunking` 给（随目录项），Qwen3 4B 的按实测定（ticket 04）：
 /// - 提取 2/5：内容密集的转写稿，输出可达转写稿行的 0.6–0.7 倍（37 句周会 970 token 出约 650；
 ///   合成的密集转写稿 4.1k 出 2.5k–2.7k+），原来的 1/4、试过的 1/3 都会截断
 /// - 合并 1/2：输出和输入的条目差不多长，留一半才装得下

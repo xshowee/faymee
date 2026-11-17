@@ -82,6 +82,22 @@ import Testing
         #expect(eres?.parameters.matchThreshold == 0.7)
     }
 
+    /// 纪要详情页按 `llama/` 前缀区分本机模型和在线模型（`Minutes.onlineModelLabel`）
+    @Test func 纪要模型都是llamaGGUF_id以llama前缀开头() {
+        for m in catalog.models(for: .minutes) {
+            #expect(m.family == .llamaGGUF)
+            #expect(m.id.hasPrefix("llama/"))
+        }
+    }
+
+    @Test func Qwen3_4B带上下文长度_分段参数_关闭思考() {
+        let qwen = catalog.model(id: "llama/qwen3-4b-q4km")
+        #expect(qwen?.parameters.contextTokens == 8192)
+        #expect(qwen?.parameters.minutesChunking
+            == MinutesChunking(extractionOutput: TokenShare(2, 5), mergeOutput: TokenShare(1, 2)))
+        #expect(qwen?.parameters.thinking == false)
+    }
+
     @Test func 显示的大小_不到1GB用MB() {
         #expect(formatModelSize(75_519_198) == "76 MB")
         #expect(formatModelSize(2_497_280_256) == "2.5 GB")
@@ -108,6 +124,24 @@ import Testing
 
         // 后来有了会议也不改
         #expect(make(existing: true).selectedID(for: .transcription) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
+    @Test func 选择变了通知每个订阅者_选同一个或选不了的不通知() {
+        let s = make(existing: true)
+        var first: [ModelRole] = [], second: [ModelRole] = []
+        s.observe { first.append($0) }
+        s.observe { second.append($0) }
+
+        s.select("apple/speechanalyzer", for: .transcription)
+        s.select("sherpa-onnx/x-asr-480ms-zh-en-punct-int8-2026-06-05", for: .transcription)
+        #expect(first.isEmpty)
+
+        s.select("sherpa-onnx/paraformer-zh-2023-09-14", for: .transcription)
+        s.select(nil, for: .liveFinalize)
+        s.select("sherpa-onnx/paraformer-zh-2023-09-14", for: .liveFinalize)
+        #expect(first == [.transcription, .liveFinalize])
+        #expect(second == first)
         defaults.removePersistentDomain(forName: suite)
     }
 

@@ -2,10 +2,11 @@ import Foundation
 import llama
 import os
 
-/// 用 llama.cpp 在本机跑 GGUF 模型（目前是 Qwen3 4B，Metal 全部层放 GPU）的 `TextGenerator`。
+/// 用 llama.cpp 在本机跑 GGUF 模型（目录里家族 `llamaGGUF` 的纪要模型，Metal 全部层放 GPU）的 `TextGenerator`。
 ///
-/// - 对话模板手写 ChatML，并在 assistant 开头预填空的 `<think>` 块，等价于 Qwen3 官方模板的
-///   `enable_thinking=false`：关闭思考，输出直接是正文
+/// - 对话模板手写 ChatML（Qwen 系列的模板）。不开思考时在 assistant 开头预填空的 `<think>` 块，等价于
+///   Qwen3 官方模板的 `enable_thinking=false`，输出直接是正文；开思考时不预填，模型先写 `<think>…</think>`，
+///   文法从 `</think>` 之后才开始约束，返回前去掉思考部分
 /// - 阻塞的 llama.cpp 调用都在一条专用的串行队列上跑，不占 Swift 并发的线程池；同一时间只有一个
 ///   `load` 或 `generate` 在跑，其余排队
 /// - 取消：`generate`、`load` 所在的 Task 被取消，或调用 `unload()`，都会让正在跑的 llama.cpp 调用
@@ -26,6 +27,9 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
     /// 固定时每次调用用 `seed + 调用次数`，可复现又不让“解析失败重试”拿到同一份输出；nil 时随机
     let seed: UInt32?
     let contextLength: Int
+    /// 是否开思考模式（目录项的 `thinking`）
+    public let thinking: Bool
+    public let minutesChunking: MinutesChunking
     var sampling = Sampling()
 
     /// 上一次 `generate` 的统计，调优和测试用
@@ -47,11 +51,25 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         self.init(model: model, directory: directory, seed: nil)
     }
 
+    /// 按目录项建引擎：用它的文件、上下文长度、分段参数和思考模式（没给的用 Qwen3 4B 的值）。
+    /// 目录项须是家族 `llamaGGUF`、需要下载的模型
+    public convenience init(catalogModel: CatalogModel, directory: URL = LocalModel.defaultDirectory) {
+        precondition(catalogModel.family == .llamaGGUF, "\(catalogModel.id) 不是 llama.cpp 模型")
+        guard let local = catalogModel.download else { preconditionFailure("\(catalogModel.id) 没有模型文件") }
+        let p = catalogModel.parameters
+        self.init(model: local, directory: directory,
+                  contextLength: p.contextTokens ?? Self.defaultContextLength,
+                  minutesChunking: p.minutesChunking ?? .standard, thinking: p.thinking ?? false, seed: nil)
+    }
+
     init(model: LocalModel = .qwen3_4B, directory: URL = LocalModel.defaultDirectory,
-         contextLength: Int = LlamaTextGenerator.defaultContextLength, seed: UInt32?) {
+         contextLength: Int = LlamaTextGenerator.defaultContextLength,
+         minutesChunking: MinutesChunking = .standard, thinking: Bool = false, seed: UInt32?) {
         self.model = model
         self.directory = directory
         self.contextLength = contextLength
+        self.minutesChunking = minutesChunking
+        self.thinking = thinking
         self.seed = seed
         liveEngines.add(self)
     }
@@ -173,7 +191,9 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         tokens += tokenize(system, vocab: vocab, parseSpecial: false)
         tokens += tokenize("<|im_end|>\n<|im_start|>user\n", vocab: vocab, parseSpecial: true)
         tokens += tokenize(prompt, vocab: vocab, parseSpecial: false)
-        tokens += tokenize("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", vocab: vocab, parseSpecial: true)
+        tokens += tokenize(thinking ? "<|im_end|>\n<|im_start|>assistant\n"
+                                    : "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                           vocab: vocab, parseSpecial: true)
         guard tokens.count + maxTokens <= Int(llama_n_ctx(ctx)) else {
             throw LlamaError.promptTooLong(tokens: tokens.count, maxTokens: maxTokens)
         }
@@ -182,6 +202,8 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         let start = Date()
         llama_memory_clear(llama_get_memory(ctx), true) // 每次调用都是独立的一轮对话
         let sampler = try makeSampler(vocab: vocab, grammar: grammar)
+        // 开思考时思考部分不受文法约束，写完 `</think>` 才开始
+        sampler.grammarActive = !thinking
 
         let batchSize = Int(llama_n_batch(ctx))
         var i = 0
@@ -203,6 +225,9 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
             if llama_vocab_is_eog(vocab, token) { stats.endedByEOG = true; break }
             bytes += piece(token, vocab: vocab)
             stats.outputTokens += 1
+            if !sampler.grammarActive, bytes.suffix(Self.thinkEnd.count + 8).contains(Self.thinkEnd) {
+                sampler.grammarActive = true
+            }
             try check(llama_decode(ctx, llama_batch_get_one(&token, 1)))
         }
         stats.totalSeconds = Date().timeIntervalSince(start)
@@ -210,6 +235,8 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
         // 中文一个字可能拆在两个 token 里，所以先攒字节、最后再解码
         return stripLeadingThinkBlock(String(decoding: bytes, as: UTF8.self))
     }
+
+    private static let thinkEnd = Array("</think>".utf8)
 
     /// llama_decode 的返回值：0 成功，1 KV 放不下，2 被 abort 回调中止，其余为错误
     private func check(_ rc: Int32) throws {
@@ -297,6 +324,8 @@ public final class LlamaTextGenerator: TextGenerator, @unchecked Sendable {
 private final class Sampler {
     let chain: UnsafeMutablePointer<llama_sampler>
     let grammar: UnsafeMutablePointer<llama_sampler>?
+    /// false 时先不用文法（开思考时思考部分）；之后选中的 token 才交给文法
+    var grammarActive = true
     private var candidates: [llama_token_data]
 
     init(chain: UnsafeMutablePointer<llama_sampler>, grammar: UnsafeMutablePointer<llama_sampler>?, vocabSize: Int) {
@@ -312,7 +341,7 @@ private final class Sampler {
 
     /// 按最后一个位置的 logits 选一个 token，并让采样器（含文法）记下它
     func sample(_ ctx: OpaquePointer) -> llama_token {
-        guard let grammar else { return llama_sampler_sample(chain, ctx, -1) }
+        guard let grammar, grammarActive else { return llama_sampler_sample(chain, ctx, -1) }
         let logits = llama_get_logits_ith(ctx, -1)!
         var token = select(logits, through: [chain])
         var single = llama_token_data(id: token, logit: 1, p: 0)

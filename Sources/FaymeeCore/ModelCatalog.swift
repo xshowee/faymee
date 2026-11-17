@@ -83,11 +83,18 @@ public struct ModelParameters: Sendable, Hashable {
     public var hotwordTokenBudget: Int?
     /// 声纹库匹配阈值（余弦相似度）。阈值和模型相关，换模型必须带上自己的
     public var matchThreshold: Float?
+    /// 纪要模型的分段参数（每次调用留多少给输出）；nil 用 `MinutesChunking.standard`
+    public var minutesChunking: MinutesChunking?
+    /// 纪要模型是否开思考模式；nil 是不开
+    public var thinking: Bool?
 
-    public init(contextTokens: Int? = nil, hotwordTokenBudget: Int? = nil, matchThreshold: Float? = nil) {
+    public init(contextTokens: Int? = nil, hotwordTokenBudget: Int? = nil, matchThreshold: Float? = nil,
+                minutesChunking: MinutesChunking? = nil, thinking: Bool? = nil) {
         self.contextTokens = contextTokens
         self.hotwordTokenBudget = hotwordTokenBudget
         self.matchThreshold = matchThreshold
+        self.minutesChunking = minutesChunking
+        self.thinking = thinking
     }
 }
 
@@ -253,7 +260,8 @@ extension ModelCatalog {
             source: .download(.qwen3_4B), name: "Qwen3 4B（Q4_K_M）",
             // 内存、速度待 ticket 11 按评估填
             verdicts: [.minutes: "纪要在本机生成，不上传任何数据"],
-            parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength),
+            parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
+                                        minutesChunking: .standard, thinking: false),
             license: "Apache-2.0"),
 
         // MARK: 声纹

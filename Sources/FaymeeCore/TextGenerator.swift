@@ -10,6 +10,8 @@ public protocol TextGenerator {
     /// 单次调用允许的最大输出长度（token），与 `contextTokens` 解耦。
     /// 默认按 `contextTokens / 2` 计算，保持本机模型的既有预算行为
     var maxOutputTokens: Int { get }
+    /// 纪要每次调用留多少给输出（随模型的输出习惯定，见 `MinutesChunking`）。默认 `.standard`
+    var minutesChunking: MinutesChunking { get }
     /// 一段文字的 token 数，用分词器计算。分段时用它保证每段都在预算内
     func countTokens(_ text: String) -> Int
     /// 模型文件是否已下载。未下载时管线不开始，任务保持排队
@@ -27,10 +29,41 @@ public protocol TextGenerator {
 
 extension TextGenerator {
     public var maxOutputTokens: Int { contextTokens / 2 }
+    public var minutesChunking: MinutesChunking { .standard }
 
     public func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
         try await generate(system: system, prompt: prompt, maxTokens: maxTokens)
     }
+}
+
+/// 纪要的分段参数：每次调用的上下文里留多少给输出，其余给系统提示和转写稿（留给提示词的越多，分的段越少）。
+/// 和模型的输出习惯有关，由目录项带上（`ModelParameters.minutesChunking`）
+public struct MinutesChunking: Sendable, Hashable {
+    /// 提取（逐段）和展开会中标注时留给输出的比例
+    public var extractionOutput: TokenShare
+    /// 合并各段草稿时留给输出的比例
+    public var mergeOutput: TokenShare
+
+    public init(extractionOutput: TokenShare, mergeOutput: TokenShare) {
+        self.extractionOutput = extractionOutput
+        self.mergeOutput = mergeOutput
+    }
+
+    /// 按 Qwen3 4B 实测定的比例（ticket 04，见 `Budget`）：提取 2/5，合并 1/2
+    public static let standard = MinutesChunking(extractionOutput: TokenShare(2, 5), mergeOutput: TokenShare(1, 2))
+}
+
+/// 上下文的几分之几。用整数分子分母，算出的 token 数和原来的 `contextTokens * 2 / 5` 一致，不受浮点误差影响
+public struct TokenShare: Sendable, Hashable {
+    public var numerator: Int
+    public var denominator: Int
+
+    public init(_ numerator: Int, _ denominator: Int) {
+        self.numerator = numerator
+        self.denominator = denominator
+    }
+
+    public func of(_ tokens: Int) -> Int { tokens * numerator / denominator }
 }
 
 /// 去掉模型输出开头的 `<think>…</think>` 推理块，保留后续正文

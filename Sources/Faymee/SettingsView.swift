@@ -74,7 +74,7 @@ struct SettingsView: View {
 
             Section("纪要") {
                 Picker("纪要引擎", selection: $online.minutesMode) {
-                    Text("本机 Qwen3 4B").tag(EngineMode.local)
+                    Text("本机模型").tag(EngineMode.local)
                     Text("在线模型").tag(EngineMode.online)
                 }
                 .pickerStyle(.segmented)

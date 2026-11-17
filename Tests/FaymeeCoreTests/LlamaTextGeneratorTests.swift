@@ -35,6 +35,35 @@ struct LlamaTextGeneratorDownloadTests {
         #expect(LlamaTextGenerator(directory: dir).isDownloaded)
     }
 
+    @Test func 按目录项建引擎_用它的文件_上下文长度_分段参数和思考模式() throws {
+        let dir = try temporaryDirectory()
+        let entry = CatalogModel(
+            id: "llama/fake-2b", roles: [.minutes], family: .llamaGGUF,
+            source: .download(LocalModel(id: "llama/fake-2b", fileName: "fake-2b.gguf", size: 3, sha256: "",
+                                         downloadURLs: [])),
+            name: "假模型",
+            parameters: ModelParameters(contextTokens: 4096, minutesChunking: MinutesChunking(
+                extractionOutput: TokenShare(1, 3), mergeOutput: TokenShare(1, 2)), thinking: true))
+
+        let generator = LlamaTextGenerator(catalogModel: entry, directory: dir)
+
+        #expect(generator.model.id == "llama/fake-2b")
+        #expect(generator.contextTokens == 4096 - 32)
+        #expect(generator.minutesChunking.extractionOutput == TokenShare(1, 3))
+        #expect(generator.thinking)
+        #expect(!generator.isDownloaded)
+        try placeFile("fake-2b.gguf", size: 3, in: dir)
+        #expect(generator.isDownloaded)
+    }
+
+    @Test func Qwen3_4B目录项建出的引擎和原来一样() throws {
+        let entry = try #require(ModelCatalog.builtIn.model(id: "llama/qwen3-4b-q4km"))
+        let generator = LlamaTextGenerator(catalogModel: entry, directory: try temporaryDirectory())
+        #expect(generator.contextTokens == 8192 - 32)
+        #expect(generator.minutesChunking == .standard)
+        #expect(!generator.thinking)
+    }
+
     @Test func 默认位置在ApplicationSupport的Faymee_Models下() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         #expect(LocalModel.qwen3_4B.url().path == support.path + "/Faymee/Models/Qwen3-4B-Q4_K_M.gguf")
@@ -86,6 +115,26 @@ struct LlamaTextGeneratorModelTests {
         let items = try #require(object["overview"] as? [[String: Any]])
         #expect(!items.isEmpty)
         #expect(items.allSatisfy { (($0["refs"] as? [String]) ?? []).count <= 3 })
+    }
+
+    /// 开思考模式（目录项 `thinking: true`）：不预填空的 think 块，思考部分不受文法约束，
+    /// `</think>` 之后的正文符合文法，返回的只有正文。Qwen3 4B 本身支持思考，用它验证机制
+    @Test func 开思考模式_先思考再按文法输出_返回时去掉思考() async throws {
+        engine.unload()
+        let thinker = LlamaTextGenerator(contextLength: 4096, thinking: true, seed: 42)
+        defer { thinker.unload() }
+        try await thinker.load { _ in }
+        let output = try await thinker.generate(
+            // 提示词要一句话，文法只放行 JSON：输出是 JSON 说明文法在思考之后起了作用
+            system: "你是助手。", prompt: "一加一等于几？用一句完整的中文回答。",
+            maxTokens: 1500, grammar: #"root ::= "{\"answer\": " [0-9]+ "}""#)
+
+        // 数字是模型被文法逼出来的，不一定对，只看形状
+        #expect(output.wholeMatch(of: #/\{"answer": [0-9]+\}/#) != nil, "\(output)")
+        let stats = try #require(thinker.lastStats)
+        #expect(stats.endedByEOG)
+        // 输出 token 远多于正文的几个：先思考了
+        #expect(stats.outputTokens > 20, "\(stats)")
     }
 
     /// 模型习惯在末尾多写一个空数组的键，文法要放行，不然它会接着往最后一节里加条目

@@ -131,9 +131,11 @@ final class AppModel {
     /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定
     @ObservationIgnored private(set) var modelSelections: ModelSelections!
 
-    /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
-    @ObservationIgnored private(set) lazy var modelDownloader: ModelDownloader =
-        modelDownloads.downloader(for: ModelCatalog.builtIn.model(id: MinutesEngine.model.id)!)!
+    /// 选中的纪要模型的下载器（详情页纪要等模型时显示它）。只在用户点“下载”时开始；
+    /// 下载完成或删除模型时通知纪要管线（见 init）
+    var modelDownloader: ModelDownloader {
+        modelDownloads.downloader(for: MinutesEngine.selectedModel(modelSelections))!
+    }
 
     /// 在线转写与在线纪要设置，API Key 存于系统钥匙串；默认保持纯本机模式
     @ObservationIgnored let onlineSettings = OnlineModelSettings(
@@ -145,7 +147,10 @@ final class AppModel {
         settings: onlineSettings,
         transport: httpTransport,
         makeTranscription: { TranscriptionEngine.make(settings: $0, transport: $1) },
-        makeMinutes: { MinutesEngine.make(settings: $0, transport: $1) },
+        makeMinutes: { [unowned self] in
+            MinutesEngine.make(settings: $0, transport: $1, selections: modelSelections)
+        },
+        selections: modelSelections,
         syncDebounce: .milliseconds(500)
     )
 
@@ -233,7 +238,8 @@ final class AppModel {
     /// 手动生成调 enqueue；会议的纪要状态在 meeting.minutes 里，由本类作为 MinutesHost 写入。
     /// 和转写管线互相让行（coordinate），录音、整理、启动恢复期间和转写一起暂停
     @ObservationIgnored private(set) lazy var minutes: MinutesPipeline = {
-        let engine = MinutesEngine.make(settings: onlineSettings, transport: httpTransport)
+        let engine = MinutesEngine.make(settings: onlineSettings, transport: httpTransport,
+                                        selections: modelSelections)
         let pipeline = MinutesPipeline(store: store, generator: engine.generator, model: engine.name,
                                        requiresPower: engine.requiresPower, isOnlineEngine: engine.isOnline,
                                        host: self)
@@ -288,8 +294,13 @@ final class AppModel {
             guard let self, self.minutes.isOnPower != onPower else { return }
             self.minutes.isOnPower = onPower
         }
-        // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”
-        modelDownloader.onAvailabilityChange = { [weak self] in self?.minutes.modelAvailabilityChanged() }
+        // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”。
+        // 每个纪要模型的下载器都接上：管线只看当前引擎的模型在不在
+        for entry in modelSelections.catalog.models(for: .minutes) {
+            modelDownloads.downloader(for: entry)?.onAvailabilityChange = { [weak self] in
+                self?.minutes.modelAvailabilityChanged()
+            }
+        }
         Notifier.onAction = { [weak self] in self?.handleNoticeAction($0) }
         Notifier.setUp()
         onlineCoordinator.bind(transcription: transcription, minutes: minutes)

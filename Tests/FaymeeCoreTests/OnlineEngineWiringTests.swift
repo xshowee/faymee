@@ -375,13 +375,85 @@ private final class StubTranscriber: Transcriber, @unchecked Sendable {
         let reloaded = try #require(try f.store.loadTranscript("m1"))
         #expect(reloaded.engine == "openai/gpt-transcribe")
     }
+
+    // MARK: - 纪要模型从目录选择
+
+    @Test func 切换纪要模型_进行中的用旧模型跑完_排队的和之后的用新模型() async throws {
+        let f = WiringFixture()
+        f.minutes.isOnPower = true
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+
+        f.localGenerator.block = true
+        f.minutes.enqueue("m1")
+        var started = f.localGenerator.started.makeAsyncIterator()
+        await started.next()
+        f.minutes.enqueue("m2")
+
+        // m1 生成中切到第二个模型
+        f.selections.select(WiringFixture.secondMinutesID, for: .minutes)
+        #expect(f.minutes.activeID == "m1")
+
+        f.localGenerator.block = false
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.model == "llama/qwen3-4b-q4km")
+        #expect(try f.store.loadMinutes("m2")?.model == WiringFixture.secondMinutesID)
+        #expect(f.localGenerator.generateCalls == 1)
+        #expect(f.secondGenerator.generateCalls == 1)
+        // 旧模型跑完后释放
+        #expect(f.localGenerator.unloadCalls >= 1)
+
+        // “重新生成”用当前选择
+        f.minutes.enqueue("m1")
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.model == WiringFixture.secondMinutesID)
+        #expect(f.localGenerator.generateCalls == 1)
+        #expect(f.secondGenerator.generateCalls == 2)
+    }
+
+    @Test func 切到未下载的纪要模型_排队等下载_下好后自动开始() async throws {
+        let f = WiringFixture()
+        f.minutes.isOnPower = true
+        f.secondGenerator.downloaded = false
+        f.selections.select(WiringFixture.secondMinutesID, for: .minutes)
+
+        f.addMeeting("m1")
+        f.minutes.enqueue("m1")
+        #expect(f.minutes.waitReason(for: "m1") == .model)
+
+        f.secondGenerator.downloaded = true
+        f.minutes.modelAvailabilityChanged()
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.model == WiringFixture.secondMinutesID)
+    }
+
+    @Test func 纪要模型选择不变不重建引擎_在线模式下切换等回到本机才生效() async throws {
+        let f = WiringFixture()
+        f.minutes.isOnPower = true
+        let builds = f.localGeneratorBuildCount
+        f.selections.select("llama/qwen3-4b-q4km", for: .minutes)
+        #expect(f.localGeneratorBuildCount == builds)
+
+        f.settings.minutesMode = .online
+        let onlineBuilds = f.localGeneratorBuildCount
+        f.selections.select(WiringFixture.secondMinutesID, for: .minutes)
+        #expect(f.localGeneratorBuildCount == onlineBuilds)
+
+        f.settings.minutesMode = .local
+        f.addMeeting("m1")
+        f.minutes.enqueue("m1")
+        try await f.drain()
+        #expect(try f.store.loadMinutes("m1")?.model == WiringFixture.secondMinutesID)
+    }
 }
 
 private final class StubGenerator: TextGenerator, @unchecked Sendable {
     let modelID: String
     let contextTokens = 8_192
     var block = false
+    var downloaded = true
     private(set) var unloadCalls = 0
+    private(set) var generateCalls = 0
     let started: AsyncStream<Void>
     private let startedCont: AsyncStream<Void>.Continuation
 
@@ -390,11 +462,12 @@ private final class StubGenerator: TextGenerator, @unchecked Sendable {
         (started, startedCont) = AsyncStream.makeStream()
     }
 
-    var isDownloaded: Bool { true }
+    var isDownloaded: Bool { downloaded }
     func countTokens(_ text: String) -> Int { max(1, text.count) }
     func load(progress: @escaping (Double) -> Void) async throws { progress(1) }
     func unload() { unloadCalls += 1 }
     func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
+        generateCalls += 1
         startedCont.yield()
         while block { try await Task.sleep(for: .milliseconds(5)) }
         return #"{"overview":[{"text":"本机纪要","refs":["s1"]}],"decisions":[],"actions":[],"questions":[]}"#
@@ -460,6 +533,17 @@ private final class WiringFixture {
     ])
     let diarizer = StubDiarizer()
     let localGenerator = StubGenerator(modelID: "llama/qwen3-4b-q4km")
+    /// 目录里假的第二个纪要模型
+    let secondGenerator = StubGenerator(modelID: WiringFixture.secondMinutesID)
+    static let secondMinutesID = "llama/fake-2b"
+    /// 两个 llamaGGUF 纪要模型的目录：Qwen3 4B（默认）和一个假的
+    static let catalog = ModelCatalog(models: ModelCatalog.builtIn.models + [
+        CatalogModel(id: secondMinutesID, roles: [.minutes], family: .llamaGGUF,
+                     source: .download(LocalModel(id: secondMinutesID, fileName: "fake-2b.gguf", size: 3,
+                                                  sha256: "", downloadURLs: [])),
+                     name: "假模型 2B", parameters: ModelParameters(contextTokens: 4096)),
+    ])
+    let selections: ModelSelections
     private final class Counter { var value = 0 }
     private let buildCounter = Counter()
     var localGeneratorBuildCount: Int { buildCounter.value }
@@ -473,10 +557,12 @@ private final class WiringFixture {
             .appendingPathComponent("FaymeeWiringTests-\(UUID().uuidString)", isDirectory: true))
         host = WiringHost(store: store)
         settings = OnlineModelSettings(defaults: defaults, credentials: InMemoryCredentialStore())
+        selections = ModelSelections(defaults: defaults, catalog: Self.catalog, isExistingInstall: { true })
 
         let localT = localTranscriber
         let refT = referenceTranscriber
-        let localG = localGenerator
+        let generators = [localGenerator.modelID: localGenerator, secondGenerator.modelID: secondGenerator]
+        let selections = selections
         let counter = buildCounter
 
         let makeT: @MainActor (OnlineModelSettings, any HTTPTransport) -> (transcriber: any Transcriber, name: String, isReady: Bool) = { s, t in
@@ -493,7 +579,8 @@ private final class WiringFixture {
                 transport: t,
                 local: {
                     counter.value += 1
-                    return (localG, localG.modelID)
+                    let id = selections.selectedID(for: .minutes)!
+                    return (generators[id]!, id)
                 }
             )
         }
@@ -523,6 +610,7 @@ private final class WiringFixture {
             transport: transport,
             makeTranscription: makeT,
             makeMinutes: makeM,
+            selections: selections,
             syncDebounce: syncDebounce,
             dashScopeTestPollInterval: .milliseconds(1)
         )

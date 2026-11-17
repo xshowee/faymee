@@ -13,6 +13,7 @@ public final class ModelSelections {
     @ObservationIgnored private let isExistingInstall: () -> Bool
     /// 各用途当前的选择（nil 是“不用”）。读的时候才决定默认值，所以不在 init 里填
     private var resolved: [ModelRole: String?] = [:]
+    @ObservationIgnored private var observers: [@MainActor (ModelRole) -> Void] = []
 
     static let noneValue = "none"
 
@@ -43,8 +44,16 @@ public final class ModelSelections {
     /// 选一个模型（nil 是“不用”）。不适用于这个用途的选择不接受
     public func select(_ id: String?, for role: ModelRole) {
         guard isSelectable(id, for: role) else { return }
+        let changed = selectedID(for: role) != id
         resolved[role] = id
         defaults.set(id ?? Self.noneValue, forKey: Self.key(for: role))
+        if changed { observers.forEach { $0(role) } }
+    }
+
+    /// 某个用途的选择变了（在 `select` 里、写入之后同步调用）时调用 `handler`，用来把新选择同步到管线。
+    /// 可以有多个：各用途的管线各自订阅、只看自己的用途。选同一个模型不调用
+    public func observe(_ handler: @escaping @MainActor (ModelRole) -> Void) {
+        observers.append(handler)
     }
 
     private func isSelectable(_ id: String?, for role: ModelRole) -> Bool {

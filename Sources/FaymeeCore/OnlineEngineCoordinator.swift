@@ -13,7 +13,8 @@ public enum ConnectionTestState: Equatable, Sendable {
     }
 }
 
-/// 连接 `OnlineModelSettings` 与两条管线，负责运行期无重启热切换、连接测试及过期测试取消
+/// 连接 `OnlineModelSettings`、本机模型选择（`ModelSelections`）与两条管线，负责运行期无重启热切换、
+/// 连接测试及过期测试取消。本机模式下所选模型变了也重建引擎；在线模式下改本机选择不动，回到本机时才用上
 @MainActor @Observable
 public final class OnlineEngineCoordinator {
     public typealias TranscriptionFactory = @MainActor (OnlineModelSettings, any HTTPTransport) -> (
@@ -30,6 +31,7 @@ public final class OnlineEngineCoordinator {
     @ObservationIgnored private let transport: any HTTPTransport
     @ObservationIgnored private let makeTranscription: TranscriptionFactory
     @ObservationIgnored private let makeMinutes: MinutesFactory
+    @ObservationIgnored private let selections: ModelSelections?
     @ObservationIgnored private let syncDebounce: Duration
     @ObservationIgnored private let dashScopeTestPollInterval: Duration
 
@@ -47,6 +49,7 @@ public final class OnlineEngineCoordinator {
         transport: any HTTPTransport,
         makeTranscription: @escaping TranscriptionFactory,
         makeMinutes: @escaping MinutesFactory,
+        selections: ModelSelections? = nil,
         syncDebounce: Duration = .zero,
         dashScopeTestPollInterval: Duration = .seconds(1)
     ) {
@@ -54,9 +57,10 @@ public final class OnlineEngineCoordinator {
         self.transport = transport
         self.makeTranscription = makeTranscription
         self.makeMinutes = makeMinutes
+        self.selections = selections
         self.syncDebounce = syncDebounce
         self.dashScopeTestPollInterval = dashScopeTestPollInterval
-        self.specs = SpecSnapshots(settings: settings)
+        self.specs = SpecSnapshots(settings: settings, minutesModel: selections?.selectedID(for: .minutes))
     }
 
     /// 绑定管线并订阅配置变化；调用前管线应已按当前 `settings` 初始化，避免启动时重复创建引擎
@@ -67,10 +71,14 @@ public final class OnlineEngineCoordinator {
         settings.onChange = { [weak self] in
             self?.handleSettingsChanged()
         }
+        // 本机模型选择是离散的改动，立即同步
+        selections?.observe { [weak self] role in
+            if role == .minutes { self?.flushSync() }
+        }
     }
 
     private func syncObservedAndAppliedSpecs() {
-        specs = SpecSnapshots(settings: settings)
+        specs = SpecSnapshots(settings: settings, minutesModel: selections?.selectedID(for: .minutes))
     }
 
     /// 立即同步尚未落地的配置改动（取消输入防抖）
@@ -92,7 +100,8 @@ public final class OnlineEngineCoordinator {
         let nextM = EffectiveSpec(
             mode: settings.minutesMode,
             provider: settings.minutesProvider,
-            config: settings.activeMinutesConfig
+            config: settings.activeMinutesConfig,
+            localModel: selections?.selectedID(for: .minutes)
         )
         if nextM != specs.appliedMinutes {
             specs.appliedMinutes = nextM
@@ -214,7 +223,7 @@ private struct SpecSnapshots {
     var appliedMinutes: EffectiveSpec<OnlineMinutesProvider>
 
     @MainActor
-    init(settings: OnlineModelSettings) {
+    init(settings: OnlineModelSettings, minutesModel: String?) {
         let transcription = ObservedSpec(
             mode: settings.transcriptionMode,
             provider: settings.transcriptionProvider,
@@ -228,7 +237,7 @@ private struct SpecSnapshots {
         observedTranscription = transcription
         observedMinutes = minutes
         appliedTranscription = EffectiveSpec(transcription)
-        appliedMinutes = EffectiveSpec(minutes)
+        appliedMinutes = EffectiveSpec(minutes, localModel: minutesModel)
     }
 }
 
@@ -238,17 +247,18 @@ private struct ObservedSpec<Provider: Equatable>: Equatable {
     var config: OnlineEndpointConfig
 }
 
+/// 实际生效的引擎。本机时带上所选的目录项 id（还没接目录的用途为 nil），换了模型也算变化
 private enum EffectiveSpec<Provider: Equatable>: Equatable {
-    case local
+    case local(model: String?)
     case online(provider: Provider, config: OnlineEndpointConfig)
 
-    init(_ observed: ObservedSpec<Provider>) {
-        self.init(mode: observed.mode, provider: observed.provider, config: observed.config)
+    init(_ observed: ObservedSpec<Provider>, localModel: String? = nil) {
+        self.init(mode: observed.mode, provider: observed.provider, config: observed.config, localModel: localModel)
     }
 
-    init(mode: EngineMode, provider: Provider, config: OnlineEndpointConfig) {
+    init(mode: EngineMode, provider: Provider, config: OnlineEndpointConfig, localModel: String? = nil) {
         switch mode {
-        case .local: self = .local
+        case .local: self = .local(model: localModel)
         case .online: self = .online(provider: provider, config: config)
         }
     }
