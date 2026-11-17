@@ -35,6 +35,8 @@ private struct Decoded {
     var duration: TimeInterval
     /// 有声的时段（秒），按 10 毫秒窗口的 RMS 判定，相邻的窗口合并
     var loud: [Burst]
+    /// 各有声时段里的峰值（各声道取最大）
+    var peaks: [Float]
 }
 
 private func decode(_ url: URL) throws -> Decoded {
@@ -65,7 +67,20 @@ private func decode(_ url: URL) throws -> Decoded {
         }
         start = end
     }
-    return Decoded(channels: Int(format.channelCount), duration: Double(file.length) / rate, loud: loud)
+    let peaks = loud.map { burst in
+        let range = Int(burst.start * rate)..<min(Int(burst.end * rate), frames)
+        return (0..<Int(format.channelCount)).map { c in
+            range.map { abs(buffer.floatChannelData![c][$0]) }.max() ?? 0
+        }.max() ?? 0
+    }
+    return Decoded(channels: Int(format.channelCount), duration: Double(file.length) / rate, loud: loud, peaks: peaks)
+}
+
+/// 两路等权重：0.3 振幅的信号混进单声道后峰值仍约 0.3（立体声不因下混变响 3 dB，约 0.42）
+private func expectUnityLevel(_ peaks: [Float], sourceLocation: SourceLocation = #_sourceLocation) {
+    for peak in peaks {
+        #expect(abs(peak - 0.3) < 0.05, "峰值 \(peak)", sourceLocation: sourceLocation)
+    }
 }
 
 /// 有声时段与预期一致，起止误差在 tolerance 秒内
@@ -136,8 +151,10 @@ private struct Fixture {
         #expect(abs(result.duration - 4) < 0.05)
         let recording = try decode(f.recording)
         expectLoud(recording.loud, [(0.2, 0.4), (1.5, 1.7), (2.5, 2.7)])
+        expectUnityLevel(recording.peaks)
         let system = try decode(f.systemSound)
         expectLoud(system.loud, [(1.5, 1.7), (2.5, 2.7)])
+        expectUnityLevel(system.peaks)
     }
 
     /// 连续的系统声音跨过两个首尾相接的麦克风分片的边界（录音 2 秒处）：接缝处不重复、不丢失
@@ -188,6 +205,7 @@ private struct Fixture {
         #expect(abs(recording.duration - 3) < 0.05)
         #expect(abs(system.duration - recording.duration) < 0.05)
         expectLoud(recording.loud, [(0.2, 0.4), (1.5, 1.7)])
+        expectUnityLevel(recording.peaks)
         expectLoud(system.loud, [(1.5, 1.7)])
     }
 

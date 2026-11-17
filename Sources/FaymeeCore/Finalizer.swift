@@ -178,6 +178,8 @@ private struct MicComposition {
     var duration = CMTime.zero
     /// composition 只引用源文件的音轨，源 asset 要活到导出结束
     var assets: [AVURLAsset] = []
+    /// 每个并入录音的分片在录音里的起点和声道数，混成单声道时用来定音量
+    var channelCounts: [(at: CMTime, count: Int)] = []
 
     init(segments: [URL]) async throws {
         guard let track = composition.addMutableTrack(withMediaType: .audio,
@@ -196,6 +198,7 @@ private struct MicComposition {
             }
             try track.insertTimeRange(range, of: source, at: duration)
             assets.append(asset)
+            channelCounts.append((duration, await channelCount(source)))
             placements.append(SegmentPlacement(file: url, offset: duration.seconds, duration: range.duration.seconds))
             duration = duration + range.duration
         }
@@ -239,8 +242,9 @@ private struct MicComposition {
                   range.duration > .zero
             else { continue }
             assets.append(asset)
+            let channels = await channelCount(source)
             for piece in timeline.pieces(from: segment.startedAt, duration: range.duration.seconds) {
-                pieces.append((source, range.start, piece, segment.channels))
+                pieces.append((source, range.start, piece, channels))
             }
         }
         guard !pieces.isEmpty,
@@ -262,20 +266,34 @@ private struct MicComposition {
             }
             try track.insertTimeRange(CMTimeRange(start: start + time(piece.source + trim), duration: time(length)),
                                       of: source, at: time(at))
-            // 立体声下混到单声道按 −3 dB 声像律相加，L=R 时比原来响 3 dB；乘 1/√2 后单声道等于两声道的平均，
-            // 与麦克风等权重
-            volume.setVolume(channels > 1 ? Float(0.5.squareRoot()) : 1, at: time(at))
+            volume.setVolume(downmixGain(channels), at: time(at))
             cursor = at + length
         }
-        return SystemSoundTrack(mic: self.track, system: volume, assets: assets)
+        let micVolume = AVMutableAudioMixInputParameters(track: self.track)
+        for (at, count) in channelCounts { micVolume.setVolume(downmixGain(count), at: at) }
+        return SystemSoundTrack(mic: micVolume, system: volume, assets: assets)
     }
 
     private func time(_ seconds: Double) -> CMTime { CMTime(seconds: seconds, preferredTimescale: 48000) }
 }
 
+/// 两路等权重相加。多声道下混到单声道时按 −3 dB 声像律相加，L=R 时比原来响 3 dB；
+/// 乘 1/√2 后单声道等于两声道的平均
+private func downmixGain(_ channels: Int) -> Float {
+    channels > 1 ? Float(0.5.squareRoot()) : 1
+}
+
+/// 读不出格式时当单声道
+private func channelCount(_ track: AVAssetTrack) async -> Int {
+    guard let format = try? await track.load(.formatDescriptions).first,
+          let description = CMAudioFormatDescriptionGetStreamBasicDescription(format)
+    else { return 1 }
+    return Int(description.pointee.mChannelsPerFrame)
+}
+
 /// 已摆进 composition 的系统声音音轨
 private struct SystemSoundTrack {
-    var mic: AVMutableCompositionTrack
+    var mic: AVMutableAudioMixInputParameters
     var system: AVMutableAudioMixInputParameters
     /// 源 asset 要活到导出结束
     var assets: [AVURLAsset]
@@ -283,13 +301,13 @@ private struct SystemSoundTrack {
     /// systemOnly 时麦克风音量为 0：麦克风音轨仍在混音里，导出的文件才和 recording.m4a 一样长
     func audioMix(systemOnly: Bool) -> AVAudioMix {
         let mix = AVMutableAudioMix()
-        var parameters: [AVAudioMixInputParameters] = [system]
+        var muted: AVMutableAudioMixInputParameters?
         if systemOnly {
-            let muted = AVMutableAudioMixInputParameters(track: mic)
-            muted.setVolume(0, at: .zero)
-            parameters.append(muted)
+            muted = AVMutableAudioMixInputParameters()
+            muted!.trackID = mic.trackID
+            muted!.setVolume(0, at: .zero)
         }
-        mix.inputParameters = parameters
+        mix.inputParameters = [system, muted ?? mic]
         return mix
     }
 }
