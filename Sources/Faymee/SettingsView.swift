@@ -37,6 +37,15 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    ModelPicker(role: .liveFinalize, title: "字幕定稿",
+                                deleteBlockedReason: { m in
+                                    model.liveFinalizeModelID == m.id ? "正在用它给本场录音的字幕定稿，录音结束后才能删除" : nil
+                                })
+                    Text(liveFinalizeNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -156,6 +165,20 @@ extension SettingsView {
         }
         guard !ready else { return nil }
         return "\(selected.name) 还没下载，实时字幕暂时用 SpeechAnalyzer（系统自带）；下载完成后，下一场录音起改用它"
+    }
+
+    /// 字幕定稿的说明：做什么；所选模型没下载完时说明暂不定稿；录音中改了选择时说明从下一场起生效
+    private var liveFinalizeNote: String {
+        let about = "每句说完后用整段模型再转一遍、替换面板里的这一句，更准但更占内存；只影响会中面板"
+        let selected = model.modelSelections.selected(for: .liveFinalize)
+        let ready = selected.map { model.modelDownloads.downloader(for: $0)?.isReady ?? true } ?? true
+        let wanted = ready ? selected?.id : nil
+        if model.isRecording, model.liveFinalizeModelID != wanted {
+            let inUse = model.liveFinalizeModelID.map { ModelCatalog.builtIn.model(id: $0)?.name ?? $0 }
+            return about + "。" + (inUse.map { "本场录音仍用 \($0) 定稿" } ?? "本场录音不定稿") + "，下一场录音起生效"
+        }
+        guard let selected, !ready else { return about }
+        return about + "。\(selected.name) 还没下载，暂不定稿；下载完成后，下一场录音起定稿"
     }
 }
 

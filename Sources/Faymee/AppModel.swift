@@ -227,6 +227,9 @@ final class AppModel {
     /// 本场录音的实时字幕在用的模型 id（所选模型没下载完时是 SpeechAnalyzer）；不在录音时为 nil。
     /// 设置里据此不让删正在用的模型
     private(set) var liveCaptionModelID: String?
+    /// 本场录音的字幕定稿在用的模型 id；不定稿（选了“不用”或所选模型没下载完）或不在录音时为 nil。
+    /// 设置里据此不让删正在用的模型
+    private(set) var liveFinalizeModelID: String?
     /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
     private(set) var liveCaptions: LiveCaptions? {
         didSet {
@@ -827,7 +830,10 @@ final class AppModel {
         guard let m = current else { return }
         let choice = LiveCaptionEngine.make(selections: modelSelections)
         liveCaptionModelID = choice.modelID
-        liveCaptions = LiveCaptions(engine: choice.engine, recordingStartedAt: m.startedAt, hotwords: hotwords)
+        let finalizer = LiveCaptionFinalizerModel(selected: modelSelections.selected(for: .liveFinalize))
+        liveFinalizeModelID = finalizer?.id
+        liveCaptions = LiveCaptions(engine: choice.engine, recordingStartedAt: m.startedAt, hotwords: hotwords,
+                                    finalizer: finalizer)
         if opensLivePanelOnStart { livePanel.show() }
     }
 
@@ -837,6 +843,7 @@ final class AppModel {
         livePanel.close()
         liveCaptions = nil
         liveCaptionModelID = nil
+        liveFinalizeModelID = nil
     }
 
     // MARK: - 会中标注

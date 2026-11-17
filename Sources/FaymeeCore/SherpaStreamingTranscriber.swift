@@ -30,11 +30,12 @@ public final class SherpaStreamingTranscriber: StreamingTranscriber {
         self.usesHotwords = usesHotwords
     }
 
-    /// 正在用识别器（加载、解码）的转写任务。转写任务开始前进入、放掉识别器后离开
+    /// 正在用识别器（加载、解码）的转写任务，以及实时字幕定稿的工作线程（`SentenceFinalizer`）。
+    /// 开始前进入、放掉识别器后离开
     static let inFlight = DispatchGroup()
 
-    /// 等所有转写任务放掉识别器（取消或结束之后，最多再等加载完一次，通常不到 1 秒）。App 退出前在主线程调用；
-    /// 转写任务不需要主线程。超时返回 false
+    /// 等实时字幕的流式识别器和定稿模型都放掉（取消或结束之后，最多再等加载完一次或识别完手上这句）。
+    /// App 退出前在主线程调用；它们都不需要主线程。超时返回 false
     @discardableResult
     public static func waitUntilReleased(timeout: TimeInterval) -> Bool {
         inFlight.wait(timeout: .now() + timeout) == .success

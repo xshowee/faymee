@@ -44,6 +44,11 @@ enum SpeechSegmentation {
         }
     }
 
+    /// 一整段音频（如实时字幕的一句）切成 ≤ 10 秒的几段，规矩同 `segments`（切点处不补边）
+    static func pieces(of samples: [Float]) -> [Range<Int>] {
+        samples.isEmpty ? [] : cut(0..<samples.count, samples: samples)
+    }
+
     /// 把一段切成每段 ≤ 10 秒
     private static func cut(_ range: Range<Int>, samples: [Float]) -> [Range<Int>] {
         var pieces: [Range<Int>] = []

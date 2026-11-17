@@ -128,8 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
         model.saveHotwords()
-        // 停录音时实时字幕已取消，但 X-ASR 的识别器可能还在加载或解完手上这块：这时退出进程，onnxruntime
-        // 会崩在已析构的全局表上。等它放掉（通常不到 1 秒），最多等 3 秒
-        SherpaStreamingTranscriber.waitUntilReleased(timeout: 3)
+        // 停录音时实时字幕已取消，但 X-ASR 的识别器可能还在加载或解完手上这块、定稿模型可能还在加载或重转手上这句：
+        // 这时退出进程，onnxruntime 会崩在已析构的全局表上。等它们放掉（X-ASR 通常不到 1 秒，Fun-ASR-Nano 加载要 2–3 秒），最多等 10 秒
+        SherpaStreamingTranscriber.waitUntilReleased(timeout: 10)
     }
 }
