@@ -585,6 +585,65 @@ private final class Fixture {
         #expect(t.items == expected)
     }
 
+    /// 合盖空白和系统声音时段的起止由 App 各取各的当前时间：合着盖开始、停止录音时，系统声音时段比合盖晚一点开始、
+    /// 早一点结束。拆出来的零碎段并进邻段，不多出几行几毫秒的“合盖，未录到声音”（同会议详情的合盖说明）
+    @Test func 合盖拆出的零碎段并进邻段() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: t0, end: at(300), reason: .lidClosed),
+                                    Gap(start: at(500), end: at(600), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: at(0.5), end: at(599.9))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 0, end: 300, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 500, end: 600, reason: .lidClosedSystemSoundOnly)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合盖 100–200：系统声音正常到 150，150–152 不可用，152 秒关掉。先把零碎的 150–152 并进前一段，
+    /// 再合并相邻同原因的段，分界落在 152（与会议详情的合盖说明一致）
+    @Test func 先并零碎段再合并同原因的段() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(100), end: at(200), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0, end: at(152))],
+                             unavailable: [WallClockPeriod(start: at(150), end: at(152))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 100, end: 152, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 152, end: 200, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合着盖停止录音时，不可用时段比合盖晚几毫秒结束：去掉合盖后剩下的零碎一截不标；
+    /// 本来就很短的不可用时段（100–102）照常标
+    @Test func 不可用被合盖截剩的零碎一截不标_本来就短的照常标() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(500), end: at(600), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0)],
+                             unavailable: [WallClockPeriod(start: at(100), end: at(102)),
+                                           WallClockPeriod(start: at(400), end: at(600.003))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 100, end: 102, reason: .systemSoundMissing)),
+            .gap(.init(start: 400, end: 500, reason: .systemSoundMissing)),
+            .gap(.init(start: 500, end: 600, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
     /// 开关关着时，不可用时段不算（只有开着的系统声音才谈得上没录到）
     @Test func 开关关着时不可用不标空白() async throws {
         let f = Fixture()
