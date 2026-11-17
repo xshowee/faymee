@@ -318,8 +318,6 @@ struct MicrophonePicker: View {
         switch device.kind {
         case .builtIn where SystemState.isLidClosed == true && !model.isRecording:
             notes.append(("已合盖，内置麦克风无法收音。请打开盖子或接入外接麦克风", true))
-        case .bluetooth:
-            notes.append(("蓝牙耳机做麦克风时音质较差，且只能收到佩戴者的声音", true))
         case .virtual:
             notes.append(("这是虚拟音频设备，不是真实麦克风", true))
         default:
