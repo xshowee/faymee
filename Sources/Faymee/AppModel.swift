@@ -81,6 +81,11 @@ final class AppModel {
     }
     /// 系统声音采集此刻真的在跑（开关打开但建不起来时为 false），菜单栏图标据此区别显示
     private(set) var isCapturingSystemSound = false
+    /// 录音中系统声音那一路是否可用、要不要重试。打开开关（或开着开关开始录音）时换一个新的，停止录音、
+    /// 关掉开关时复位
+    private(set) var systemSoundAvailability = SystemSoundAvailability()
+    /// 录音中系统声音不可用的原因，菜单栏面板据此显示“系统声音不可用”
+    var systemSoundUnavailableReason: SystemSoundUnavailableReason? { systemSoundAvailability.unavailableReason }
 
     /// 按当前选择和设备状态，开始录音时会用哪个麦克风
     var plannedDevice: AudioInputDevice? {
@@ -250,6 +255,8 @@ final class AppModel {
         recorder.onSegment = { [weak self] in self?.segmentOpened($0) }
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
+        systemSound.onDeviceLost = { [weak self] in self?.systemSoundDeviceLost() }
+        systemSound.onFormatChanged = { [weak self] in self?.restartSystemSoundCapture() }
         // 睡眠期间 host time 不走而墙钟在走，唤醒后接着用原来的换算会把系统声音摆早：重建采集和时钟换算
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                                           queue: .main) { [weak self] _ in
@@ -334,6 +341,7 @@ final class AppModel {
         timer = nil
         m.endedAt = endedAt
         m.endOpenPeriods(at: endedAt)
+        systemSoundAvailability = SystemSoundAvailability()
         current = nil
         isSilent = false
         hasRecordingError = false
@@ -357,23 +365,33 @@ final class AppModel {
     // MARK: - 系统声音
 
     /// 让录音中的系统声音跟上开关：打开时开一段时段、开始采集，关闭时停止采集、结束这段。
-    /// 不在录音时什么也不做（开始录音时再调一次）。采集建不起来时只记日志，麦克风照常录，
-    /// 时段照样记（它记的是开关），完整的故障处理另做
+    /// 不在录音时什么也不做（开始录音时再调一次）。采集不可用时麦克风照常录，时段照样记（它记的是开关）
     private func syncSystemSound(at date: Date = Date()) {
         guard var m = current else { return }
         if systemSoundEnabled, !m.isSystemSoundPeriodOpen {
-            // 时段先记下、写盘，再建采集：时段记的是开关，不等 tap 建好（建的时候可能在等授权）
+            // 时段先记下、写盘，再建采集：时段记的是开关，不等 tap 建好（建的时候可能在等授权）。
+            // 一开始就不可用时，不可用时段和开关时段起点相同
             m.beginSystemSoundPeriod(at: date)
             update(m)
-            startSystemSoundCapture(for: m.id)
+            systemSoundAvailability = SystemSoundAvailability()
+            updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
         } else if !systemSoundEnabled, m.isSystemSoundPeriodOpen {
             for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(SystemSoundSegment(segment)) }
+            // 仍在进行的不可用时段一起结束
             m.endSystemSoundPeriod(at: date)
             update(m)
+            systemSoundAvailability = SystemSoundAvailability()
         }
     }
 
-    private func startSystemSoundCapture(for id: String) {
+    /// 开始（或重试、重建）系统声音采集的唯一入口：先查授权，拒绝就不建；建不起来时只记下不可用，
+    /// 麦克风照常录。不可用时段和通知由调用方包在 updatingSystemSoundAvailability 里处理
+    private func startSystemSoundCapture(for id: String, at date: Date) {
+        let authorization = SystemSoundAuthorizationQuery.current()
+        guard systemSoundAvailability.shouldStart(authorization: authorization, at: date) else {
+            systemSoundLog.error("没有系统录音授权，不采集系统声音")
+            return
+        }
         do {
             try systemSound.start(directory: store.systemSoundSegmentsDirectory(id),
                                   onSegment: { [weak self] segment in
@@ -383,8 +401,10 @@ final class AppModel {
                                   },
                                   onError: { message in systemSoundLog.error("\(message, privacy: .public)") })
             isCapturingSystemSound = true
+            systemSoundAvailability.started()
         } catch {
             isCapturingSystemSound = false
+            systemSoundAvailability.startFailed()
             systemSoundLog.error("系统声音采集没能开始：\(error.localizedDescription, privacy: .public)")
         }
     }
@@ -395,15 +415,75 @@ final class AppModel {
         return systemSound.stop()
     }
 
-    /// 唤醒后重建采集：时钟换算按此刻重新锚定，分片接着编号
-    private func restartSystemSoundCapture() {
-        guard var m = current, m.isSystemSoundPeriodOpen else { return }
+    /// 停止采集，把报过的分片补记进正在录的会议
+    private func stopSystemSoundCaptureKeepingSegments() {
+        let segments = stopSystemSoundCapture()
+        guard var m = current else { return }
         var changed = false
-        for segment in stopSystemSoundCapture() {
+        for segment in segments {
             changed = m.addSystemSoundSegment(SystemSoundSegment(segment)) || changed
         }
         if changed { update(m) }
-        startSystemSoundCapture(for: m.id)
+    }
+
+    /// 唤醒后、格式变了时重建采集：时钟换算按此刻重新锚定，分片接着编号
+    private func restartSystemSoundCapture() {
+        guard let m = current, m.isSystemSoundPeriodOpen else { return }
+        stopSystemSoundCaptureKeepingSegments()
+        let date = Date()
+        updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
+    }
+
+    /// 运行中聚合设备失效：停掉采集，能重试就马上重建一次。重建成功的话不算不可用，不开时段、不发通知
+    private func systemSoundDeviceLost() {
+        guard let m = current, m.isSystemSoundPeriodOpen, systemSound.isRunning else { return }
+        let date = Date()
+        updatingSystemSoundAvailability(at: date) {
+            stopSystemSoundCaptureKeepingSegments()
+            systemSoundAvailability.deviceLost()
+            if systemSoundAvailability.isRetryDue(at: date, deviceChanged: true) {
+                startSystemSoundCapture(for: m.id, at: date)
+            }
+        }
+    }
+
+    /// 不可用时自动重试：定时（tick）或设备变化时
+    private func retrySystemSoundIfDue(deviceChanged: Bool) {
+        let date = Date()
+        guard let m = current, m.isSystemSoundPeriodOpen, !systemSound.isRunning,
+              systemSoundAvailability.isRetryDue(at: date, deviceChanged: deviceChanged) else { return }
+        updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
+    }
+
+    /// 授权未决定时建好的采集在等用户回答授权框：再查一次，查到拒绝就停掉，判为没有授权
+    private func recheckSystemSoundAuthorization() {
+        guard current != nil, systemSoundAvailability.awaitsAuthorization else { return }
+        let date = Date()
+        updatingSystemSoundAvailability(at: date) {
+            if systemSoundAvailability.authorizationResolved(SystemSoundAuthorizationQuery.current()) {
+                stopSystemSoundCaptureKeepingSegments()
+            }
+        }
+    }
+
+    /// 执行 body，可用与否变了时记进会议：变为不可用时开一段不可用时段，屏幕可见时发一条无声通知；
+    /// 恢复时结束这段。仍不可用、只是原因变了（重试又失败）时什么也不做
+    private func updatingSystemSoundAvailability(at date: Date, _ body: () -> Void) {
+        let wasAvailable = systemSoundAvailability.isAvailable
+        body()
+        guard wasAvailable != systemSoundAvailability.isAvailable, var m = current else { return }
+        if let reason = systemSoundAvailability.unavailableReason {
+            m.beginSystemSoundUnavailablePeriod(at: date)
+            update(m)
+            systemSoundLog.error("系统声音不可用：\(String(describing: reason), privacy: .public)")
+            if SystemState.hasVisibleScreen {
+                Notifier.post(reason.notice.title, reason.notice.body, silent: true)
+            }
+        } else {
+            m.endSystemSoundUnavailablePeriod(at: date)
+            update(m)
+            systemSoundLog.info("系统声音已恢复")
+        }
     }
 
     /// 系统声音分片打开时记进 meeting.json。按会议 id 找而不是看 current：回调切回主线程时
@@ -443,6 +523,8 @@ final class AppModel {
         // 先切设备再判断合盖：合盖时若有外接麦克风，直接切过去，不产生空白
         reconcileDevice()
         checkLid()
+        recheckSystemSoundAuthorization()
+        retrySystemSoundIfDue(deviceChanged: false)
 
         if let since = silentSince, Date().timeIntervalSince(since) >= Self.silenceAlertAfter {
             isSilent = true
@@ -487,6 +569,7 @@ final class AppModel {
         inputDevices = AudioDevices.inputs()
         defaultInputUID = AudioDevices.defaultInput()?.uid
         reconcileDevice()
+        retrySystemSoundIfDue(deviceChanged: true)
     }
 
     /// 录音中，如果按当前选择应该用的麦克风变了（插上外接麦克风、合盖、改了选择），切过去

@@ -36,8 +36,16 @@ final class SystemSoundCapture {
     /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在往写盘模块交数据
     private let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
     private let opened = OpenedSegments()
+    private let watch = DeviceWatch()
 
     var isRunning: Bool { procID != nil }
+
+    /// 运行中聚合设备失效（`kAudioDevicePropertyDeviceIsAlive` 变为 0），在主线程调用。
+    /// 采集已经录不到了，调用方停掉它、按“运行中出错”重建
+    var onDeviceLost: (@MainActor () -> Void)?
+    /// tap 的格式变了（建立时只读一次格式，之后按它解读回调的数据），在主线程调用。
+    /// 实测切换输出设备时格式不变；万一变了，调用方重建采集，不算不可用
+    var onFormatChanged: (@MainActor () -> Void)?
 
     /// 开始采集，分片写进 directory。建不起来时抛错，已经建好的部分都拆掉
     func start(directory: URL,
@@ -105,11 +113,14 @@ final class SystemSoundCapture {
             writer.push(inputData, format: format, hostTime: hostTime)
         })
         try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
+        watchDevice(format: asbd)
         log.info("系统声音采集已开始：\(format.sampleRate) Hz，\(format.channelCount) 声道")
     }
 
     /// 按建立的反序拆掉，哪一步没建都跳过
     private func teardown() {
+        // 先停掉监听：拆聚合设备本身会让它“失效”，不能当成运行中出错报出去
+        watch.stop()
         if let procID {
             AudioDeviceStop(aggregateID, procID)
             AudioDeviceDestroyIOProcID(aggregateID, procID)
@@ -126,6 +137,31 @@ final class SystemSoundCapture {
         if tapID != kAudioObjectUnknown {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioObjectID(kAudioObjectUnknown)
+        }
+    }
+
+    // MARK: - 失效、格式变化
+
+    private func watchDevice(format: AudioStreamBasicDescription) {
+        let tapID = tapID
+        let aggregateID = aggregateID
+        let properties = [(aggregateID, kAudioDevicePropertyDeviceIsAlive), (tapID, kAudioTapPropertyFormat)]
+        watch.start(properties) { [weak self] in
+            guard let self else { return }
+            var alive = UInt32(1)
+            if Self.getProperty(aggregateID, kAudioDevicePropertyDeviceIsAlive, &alive) != noErr || alive == 0 {
+                log.error("系统声音聚合设备失效")
+                self.onDeviceLost?()
+                return
+            }
+            var current = AudioStreamBasicDescription()
+            if Self.getProperty(tapID, kAudioTapPropertyFormat, &current) == noErr,
+               current.mSampleRate != format.mSampleRate || current.mChannelsPerFrame != format.mChannelsPerFrame
+               || current.mFormatID != format.mFormatID || current.mFormatFlags != format.mFormatFlags
+               || current.mBitsPerChannel != format.mBitsPerChannel {
+                log.info("系统声音格式变了：\(current.mSampleRate) Hz，\(current.mChannelsPerFrame) 声道")
+                self.onFormatChanged?()
+            }
         }
     }
 
@@ -172,5 +208,39 @@ private final class OpenedSegments: @unchecked Sendable {
             defer { segments = [] }
             return segments
         }
+    }
+}
+
+/// 监听这次建立的聚合设备和 tap 的属性变化，在主线程回调。停止后、或已经换了一次建立，
+/// 迟到的通知一律丢掉（每次 start 换一代）。和 SystemSoundCapture 一样只在主线程用
+private final class DeviceWatch: @unchecked Sendable {
+    private var registered: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    private var generation = 0
+
+    func start(_ properties: [(AudioObjectID, AudioObjectPropertySelector)], onChange: @escaping @MainActor () -> Void) {
+        stop()
+        let generation = generation
+        for (object, selector) in properties {
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                                     mElement: kAudioObjectPropertyElementMain)
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.generation == generation else { return }
+                    onChange()
+                }
+            }
+            if AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr {
+                registered.append((object, address, block))
+            }
+        }
+    }
+
+    func stop() {
+        generation += 1
+        for (object, address, block) in registered {
+            var address = address
+            AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
+        }
+        registered = []
     }
 }

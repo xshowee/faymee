@@ -58,7 +58,9 @@ enum AudioDevices {
 
     /// 设备插拔、系统默认输入变化时在主线程回调。在 App 生命周期内一直有效
     static func observeChanges(_ handler: @escaping @MainActor () -> Void) {
-        for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice] {
+        // 默认输出设备变化也通知：系统声音不可用时按设备变化重试
+        for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice,
+                         kAudioHardwarePropertyDefaultOutputDevice] {
             var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
                                                      mElement: kAudioObjectPropertyElementMain)
             AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main) { _, _ in

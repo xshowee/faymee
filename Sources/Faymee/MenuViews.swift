@@ -7,7 +7,8 @@ struct MenuBarLabel: View {
 
     var body: some View {
         let indicator = MenuBarIndicator(isRecording: model.isRecording,
-                                         hasWarning: model.isSilent || model.hasRecordingError || model.isLidGapOpen,
+                                         hasWarning: model.isSilent || model.hasRecordingError || model.isLidGapOpen
+                                             || model.systemSoundUnavailableReason != nil,
                                          showsMarkFlag: model.showsMarkFlag,
                                          capturesSystemSound: model.isCapturingSystemSound)
         Group {
@@ -108,6 +109,13 @@ struct MenuContent: View {
 
         MicrophonePicker()
         SystemSoundToggle()
+
+        if let reason = model.systemSoundUnavailableReason {
+            Label(reason.menuText, systemImage: "speaker.slash.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
 
         if model.isLidGapOpen {
             Label("已合盖，内置麦克风被断开，现在没有在录。请打开盖子，或改用外接麦克风。",

@@ -65,7 +65,7 @@ public enum MenuBarIndicator: Hashable, Sendable {
     case recording
     /// 正常录音中，同时在录系统声音
     case recordingSystemSound
-    /// 录音中有告警：长时间没声音、录音出错、合盖断开了内置麦克风
+    /// 录音中有告警：长时间没声音、录音出错、合盖断开了内置麦克风、系统声音不可用
     case warning
     /// 刚标记了重点（约 2 秒），确认标上了。不发声音、不发通知，只靠这个图标
     case markFlag
