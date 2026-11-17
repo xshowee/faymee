@@ -3,32 +3,22 @@ import SherpaOnnxC
 
 /// Paraformer 中文（2023-09-14 int8，唯一带逐字时间的一版）+ 离线标点模型：一段 16 kHz 音频 → 带标点的文字和真实逐字开始时间。
 ///
-/// - 会后转写：`SherpaOfflineTranscriber.paraformer(...)` 每场建一个
-/// - 实时字幕定稿：会话开始时建一个，对每句音频直接 `recognize`（不切段、不要 VAD），会话结束释放
-/// - 创建时按大小确认 Paraformer 和标点模型文件齐全（坏文件会让 sherpa-onnx `_Exit` 整个进程），然后加载两个模型
+/// - 会后转写：每场建一个；实时字幕定稿：会话开始时建一个，对每句音频直接 `recognize`（不切段、不要 VAD），会话结束释放。
+///   都经 `SegmentRecognizerLoader` 建：它先按大小确认 Paraformer 和标点模型文件齐全（坏文件会让 sherpa-onnx `_Exit` 整个进程）
 /// - 每段识别后单独加标点，标点按字序并回识别结果（标点模型改了字就不用它的标点）；再合并英文单个字母（「a i」→「AI」）
 /// - 不支持热词
 public final class ParaformerRecognizer: SegmentRecognizer, @unchecked Sendable {
-    /// 写进转写稿的引擎名，同目录项 id
-    public static let engine = LocalModel.paraformer.id
-
     private let recognizer: OpaquePointer
     private let punctuation: OpaquePointer
 
     /// - Parameters:
-    ///   - modelDirectory: 模型根目录（下面是 Paraformer 和标点模型各自的目录）
+    ///   - directory: 目录项的模型目录；`punctuationDirectory` 是它依赖的标点模型的目录。文件要先按大小确认齐全
+    ///   - name: 错误信息里的模型名
     ///   - threads: 每个模型的推理线程数
-    public init(modelDirectory: URL = LocalModel.defaultDirectory, threads: Int = 2) throws {
-        let paraformerName = ModelCatalog.builtIn.model(id: LocalModel.paraformer.id)?.name ?? "Paraformer"
-        let punctuationName = ModelCatalog.builtIn.model(id: LocalModel.punctuation.id)?.name ?? "标点模型"
-        try LocalModel.paraformer.checkFiles(name: paraformerName, in: modelDirectory)
-        try LocalModel.punctuation.checkFiles(name: punctuationName, in: modelDirectory)
-
-        let dir = LocalModel.paraformer.directory(in: modelDirectory)
-        let model = strdup(dir.appendingPathComponent("model.int8.onnx").path)
-        let tokens = strdup(dir.appendingPathComponent("tokens.txt").path)
-        let punctModel = strdup(LocalModel.punctuation.directory(in: modelDirectory)
-            .appendingPathComponent("model.int8.onnx").path)
+    init(directory: URL, punctuationDirectory: URL, name: String, threads: Int = 2) throws {
+        let model = strdup(directory.appendingPathComponent("model.int8.onnx").path)
+        let tokens = strdup(directory.appendingPathComponent("tokens.txt").path)
+        let punctModel = strdup(punctuationDirectory.appendingPathComponent("model.int8.onnx").path)
         let cpu = strdup("cpu"), greedy = strdup("greedy_search")
         defer { free(model); free(tokens); free(punctModel); free(cpu); free(greedy) }
 
@@ -41,7 +31,7 @@ public final class ParaformerRecognizer: SegmentRecognizer, @unchecked Sendable 
         config.model_config.provider = UnsafePointer(cpu)
         config.decoding_method = UnsafePointer(greedy)
         guard let recognizer = SherpaOnnxCreateOfflineRecognizer(&config) else {
-            throw SherpaModelError.engineUnavailable(model: paraformerName)
+            throw SherpaModelError.engineUnavailable(model: name)
         }
 
         var punctConfig = SherpaOnnxOfflinePunctuationConfig()
@@ -50,7 +40,7 @@ public final class ParaformerRecognizer: SegmentRecognizer, @unchecked Sendable 
         punctConfig.model.provider = UnsafePointer(cpu)
         guard let punctuation = SherpaOnnxCreateOfflinePunctuation(&punctConfig) else {
             SherpaOnnxDestroyOfflineRecognizer(recognizer)
-            throw SherpaModelError.engineUnavailable(model: punctuationName)
+            throw SherpaModelError.engineUnavailable(model: "\(name)的标点模型")
         }
         self.recognizer = recognizer
         self.punctuation = punctuation
@@ -93,21 +83,6 @@ public final class ParaformerRecognizer: SegmentRecognizer, @unchecked Sendable 
         guard let out = SherpaOfflinePunctuationAddPunct(punctuation, text) else { return nil }
         defer { SherpaOfflinePunctuationFreeText(out) }
         return String(cString: out)
-    }
-}
-
-extension SherpaOfflineTranscriber {
-    /// Paraformer 会后转写（转写稿 `engine` 用 `ParaformerRecognizer.engine`）。热词参数忽略：Paraformer 不支持热词
-    /// - Parameters:
-    ///   - vadModel: 静音切段模型，App 里传 `SileroVAD.bundledModel`
-    ///   - threads: Paraformer 和标点模型各自的推理线程数
-    public static func paraformer(modelDirectory: URL = LocalModel.defaultDirectory, vadModel: URL?,
-                                  threads: Int = 4) -> SherpaOfflineTranscriber {
-        let model = ModelCatalog.builtIn.model(id: LocalModel.paraformer.id)!
-        return SherpaOfflineTranscriber(model: model, catalog: .builtIn, modelDirectory: modelDirectory,
-                                        vadModel: vadModel) { _ in
-            try ParaformerRecognizer(modelDirectory: modelDirectory, threads: threads)
-        }
     }
 }
 

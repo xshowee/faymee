@@ -13,18 +13,10 @@ import SherpaOnnxC
 /// - 每句一个说话片段（就是这句的起止时间）；太短算不出声纹的句子没有片段，归属为未知
 /// - 内存主要是整段录音解码后的样本（1 小时约 230MB）和聚类的相似度矩阵（1000 个长句约 8MB）
 public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @unchecked Sendable {
-    public struct ModelFile: Sendable, Equatable {
-        public let name: String
-        /// 字节数
-        public let size: Int64
-        /// 小写 hex
-        public let sha256: String
-    }
-
-    /// 文件名、大小、sha256 与 scripts/fetch-diarization-models.sh 保持一致
+    /// 打进 App 的声纹模型（没有下载地址）。文件名、大小、sha256 与 scripts/fetch-diarization-models.sh 保持一致
     public static let embeddingModel = ModelFile(
-        name: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", size: 39_593_761,
-        sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b")
+        path: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", size: 39_593_761,
+        sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b", downloadURLs: [])
     public static let models = [embeddingModel]
 
     /// 声纹库匹配的推荐阈值（余弦相似度），App 传给 `TranscriptionPipeline.voiceprintThreshold`。
@@ -36,7 +28,7 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
     public static func modelsPresent(in directory: URL) -> Bool {
         models.allSatisfy { m in
             let attributes = try? FileManager.default.attributesOfItem(
-                atPath: directory.appendingPathComponent(m.name).path)
+                atPath: directory.appendingPathComponent(m.path).path)
             return (attributes?[.size] as? NSNumber)?.int64Value == m.size
         }
     }
@@ -58,7 +50,7 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
 
     /// 打进 App 的 ERes2Net base，模型文件在 `modelDirectory` 下
     public convenience init(modelDirectory: URL, threads: Int = 4) {
-        self.init(modelURL: modelDirectory.appendingPathComponent(Self.embeddingModel.name), file: Self.embeddingModel,
+        self.init(modelURL: modelDirectory.appendingPathComponent(Self.embeddingModel.path), file: Self.embeddingModel,
                   voiceprintModel: ModelCatalog.eres2netBaseID, isDownloaded: false, threads: threads)
     }
 
@@ -296,8 +288,8 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
 
     private static func verify(_ model: ModelFile, at url: URL, isDownloaded: Bool) throws {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelMissing(model.name)
-                : SherpaOnnxDiarizerError.modelMissing(model.name)
+            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelMissing(model.path)
+                : SherpaOnnxDiarizerError.modelMissing(model.path)
         }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -308,8 +300,8 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @un
         }
         let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard size == model.size, hex == model.sha256 else {
-            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelCorrupted(model.name)
-                : SherpaOnnxDiarizerError.modelCorrupted(model.name)
+            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelCorrupted(model.path)
+                : SherpaOnnxDiarizerError.modelCorrupted(model.path)
         }
     }
 }
@@ -330,7 +322,7 @@ extension SherpaOnnxDiarizer {
         case .system:
             return (nil, threshold)
         case let .bundled(directory, fileName):
-            guard let bundleResources, let file = models.first(where: { $0.name == fileName }) else {
+            guard let bundleResources, let file = models.first(where: { $0.path == fileName }) else {
                 return (nil, threshold)
             }
             let url = bundleResources.appendingPathComponent(directory, isDirectory: true)
@@ -341,9 +333,8 @@ extension SherpaOnnxDiarizer {
         case let .download(local):
             // 声纹模型是单个 onnx 文件
             guard local.files.count == 1, local.isDownloaded(in: modelsRoot) else { return (nil, threshold) }
-            let f = local.files[0]
-            let file = ModelFile(name: (f.path as NSString).lastPathComponent, size: f.size, sha256: f.sha256)
-            return (SherpaOnnxDiarizer(modelURL: local.url(of: f, in: modelsRoot), file: file,
+            let file = local.files[0]
+            return (SherpaOnnxDiarizer(modelURL: local.url(of: file, in: modelsRoot), file: file,
                                        voiceprintModel: model.id, isDownloaded: true), threshold)
         }
     }

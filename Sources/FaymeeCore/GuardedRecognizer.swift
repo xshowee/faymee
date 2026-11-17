@@ -9,7 +9,7 @@ import Foundation
 ///
 /// 会后转写（`SherpaOfflineTranscriber`）和实时字幕定稿都套这一层
 public final class GuardedRecognizer: SegmentRecognizer {
-    private let inner: any SegmentRecognizer
+    let inner: any SegmentRecognizer
 
     /// 两半各多带的样本数（0.2 秒）
     static let overlap = 3200

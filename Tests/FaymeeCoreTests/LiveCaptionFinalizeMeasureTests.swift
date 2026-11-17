@@ -98,17 +98,12 @@ struct LiveCaptionFinalizeMeasureTests {
         case "funasr": id = LocalModel.funASRNano.id
         default: return nil
         }
+        let entry = try #require(ModelCatalog.builtIn.model(id: id))
         guard let threads = env["FAYMEE_FINALIZE_THREADS"].flatMap(Int.init) else {
-            return try #require(LiveCaptionFinalizerModel(selected: ModelCatalog.builtIn.model(id: id)))
+            return try #require(LiveCaptionFinalizerModel(selected: entry))
         }
-        if modelName == "paraformer" {
-            return LiveCaptionFinalizerModel(id: id) { _ in try ParaformerRecognizer(threads: threads) }
-        }
-        return LiveCaptionFinalizerModel(id: id) { words in
-            let dir = LocalModel.funASRNano.directory(in: LocalModel.defaultDirectory)
-            let fitted = try FunASRNano.fitHotwords(words, budget: 150, modelDirectory: dir)
-            return GuardedRecognizer(try FunASRNanoRecognizer(directory: dir, hotwords: fitted, threads: threads))
-        }
+        let loader = try #require(SegmentRecognizerLoader(model: entry))
+        return LiveCaptionFinalizerModel(id: id) { words in try loader.makeRecognizer(hotwords: words, threads: threads) }
     }
 
     @Test func 实时送一段录音_记下定稿() async throws {

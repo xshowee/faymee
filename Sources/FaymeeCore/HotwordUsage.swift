@@ -18,34 +18,18 @@ public enum HotwordUsage: Hashable, Sendable {
             self = .unused(model: model.name)
             return
         }
-        guard let budget = model.parameters.hotwordTokenBudget else {
+        // 用模型自己的 tokenizer 按它的预算截断（和转写时一样）；家族不按预算截热词时全部生效
+        guard let loader = SegmentRecognizerLoader(model: model, modelDirectory: modelDirectory),
+              loader.adapter.hotwordFitting != nil else {
             self = .all
             return
         }
-        // 按家族用模型自己的 tokenizer 截断（和转写时一样）；新家族支持热词预算时在这加分支
-        let fitted: (used: Int, total: Int)?
-        switch model.family {
-        case .sherpaFunASRNano:
-            let local = LocalModel.funASRNano
-            fitted = local.isDownloaded(in: modelDirectory)
-                ? (try? FunASRNano.fitHotwords(hotwords, budget: budget,
-                                               modelDirectory: local.directory(in: modelDirectory)))
-                    .map { ($0.count, FunASRNano.sanitize(hotwords).count) }
-                : nil
-        case .sherpaQwen3ASR:
-            let local = LocalModel.qwen3ASR
-            fitted = local.isDownloaded(in: modelDirectory)
-                ? (try? Qwen3ASR.fitHotwords(hotwords, budget: budget, modelDirectory: local.directory(in: modelDirectory)))
-                    .map { ($0.count, Qwen3ASR.sanitizedHotwords(hotwords).count) }
-                : nil
-        default:
-            fitted = nil
-        }
-        guard let fitted else {
+        guard loader.isDownloaded, let fitted = try? loader.fitHotwords(hotwords) else {
             self = .unknown
             return
         }
-        self = fitted.used < fitted.total ? .partial(model: model.name, used: fitted.used, total: fitted.total) : .all
+        self = fitted.fitted.count < fitted.total
+            ? .partial(model: model.name, used: fitted.fitted.count, total: fitted.total) : .all
     }
 
     /// 热词页上的一句提示；不用提示时为 nil

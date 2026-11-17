@@ -14,7 +14,7 @@ private let vadPresent = (try? SileroVAD.check(repoVADModel)) != nil
 
 @Suite struct FunASRNanoHotwordTests {
     @Test func 热词里的分隔符换成空格_免得sherpa把一个词拆开() {
-        #expect(FunASRNano.sanitize(["A,B", "张三；李四", " 智能体 ", "", "，"]) == ["A B", "张三 李四", "智能体"])
+        #expect(SherpaHotwords.sanitize(["A,B", "张三；李四", " 智能体 ", "", "，"]) == ["A B", "张三 李四", "智能体"])
     }
 }
 
@@ -28,7 +28,9 @@ struct FunASRNanoContractTests {
 
     @Test func 转出关键词_有标点_句子落在对应的那段话里() async throws {
         let model = try #require(ModelCatalog.builtIn.model(id: LocalModel.funASRNano.id))
-        let transcriber = SherpaOfflineTranscriber.funASRNano(model: model, vadModel: repoVADModel)
+        let loader = try #require(SegmentRecognizerLoader(model: model))
+        let transcriber = SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory,
+                                                   vadModel: repoVADModel)
 
         // 不给热词：关键词要靠模型自己认出来（热词路径见下面的预算测试）
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }
@@ -46,19 +48,19 @@ struct FunASRNanoContractTests {
         #expect(turn(of: "支付模块") == 2)
         #expect(turn(of: "对接接口") == 3)
         #expect(zip(sentences, sentences.dropFirst()).allSatisfy { $0.end <= $1.start })
-        #expect(FunASRNano.engine == "sherpa-onnx/funasr-nano-int8-2025-12-30")
     }
 
     @Test func 热词按tokenizer计数截到预算内() throws {
         let directory = LocalModel.funASRNano.directory()
+        let fitting = try #require(SegmentRecognizerAdapter.funASRNano.hotwordFitting)
         // 8 个评估用的热词拼起来 33 token（Hugging Face tokenizers 计数），预算 150 放得下
         let eval = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场", "模型广场", "端到端研发"]
-        #expect(try FunASRNano.fitHotwords(eval, budget: 150, modelDirectory: directory) == eval)
-        #expect(try FunASRNano.fitHotwords(eval, budget: 32, modelDirectory: directory) == Array(eval.prefix(7)))
+        #expect(try fitting.fit(eval, budget: 150, modelDirectory: directory) == eval)
+        #expect(try fitting.fit(eval, budget: 32, modelDirectory: directory) == Array(eval.prefix(7)))
 
         // 一长串：截到 150 以内，且再多放一个就超
         let many = (1...200).map { "项目代号\($0)" }
-        let fitted = try FunASRNano.fitHotwords(many, budget: 150, modelDirectory: directory)
+        let fitted = try fitting.fit(many, budget: 150, modelDirectory: directory)
         let counter = try QwenTokenCounter(directory: directory.appendingPathComponent("Qwen3-0.6B"))
         #expect(fitted == Array(many.prefix(fitted.count)))
         #expect(counter.count(fitted.joined(separator: ", ")) <= 150)

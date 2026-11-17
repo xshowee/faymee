@@ -79,7 +79,7 @@ public struct ModelCapabilities: Sendable, Hashable {
 public struct ModelParameters: Sendable, Hashable {
     /// 上下文窗口（token）：Fun-ASR-Nano / Qwen3-ASR 的 LLM 上下文，纪要模型的 n_ctx
     public var contextTokens: Int?
-    /// 热词最多占多少 token（与音频、输出共用上下文）
+    /// 热词最多占多少 token（与音频、输出共用上下文）。热词按 tokenizer 截的家族（`SegmentRecognizerAdapter.hotwordFitting`）必须带
     public var hotwordTokenBudget: Int?
     /// 声纹库匹配阈值（余弦相似度）。阈值和模型相关，换模型必须带上自己的
     public var matchThreshold: Float?
@@ -142,6 +142,9 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
         self.dependencies = dependencies
         self.isHidden = isHidden
         self.license = license
+        // 目录项自检：缺了这些参数，适配器只能悄悄用一个不属于这个模型的值。目录是静态的，测试一跑就会撞上
+        precondition(family.segmentRecognizer?.hotwordFitting == nil || parameters.hotwordTokenBudget != nil,
+                     "\(id)：这个家族的热词和音频共用上下文，必须带 hotwordTokenBudget")
     }
 
     /// 需要下载时的文件清单
@@ -231,7 +234,8 @@ extension ModelCatalog {
             memory: "约 1.9 GB", speed: "20 分钟会议约 2 分钟",
             capabilities: ModelCapabilities(punctuation: true, wordTimings: .estimated, hotwords: true),
             verdicts: [.transcription: "干净录音最准；多人会议、远场收音时可能编造内容"],
-            parameters: ModelParameters(hotwordTokenBudget: 150),
+            // 提示词、音频（10 秒段）、热词（≤ 150）加上最多 128 个输出 token 放得进 512
+            parameters: ModelParameters(contextTokens: 512, hotwordTokenBudget: 150),
             dependencies: [sileroVADID], license: "Apache-2.0"),
         CatalogModel(
             id: speechAnalyzerID, roles: [.transcription, .liveCaptions], family: .speechAnalyzer,
@@ -269,7 +273,7 @@ extension ModelCatalog {
         // MARK: 声纹
         CatalogModel(
             id: eres2netBaseID, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
-            source: .bundled(directory: "Diarization", fileName: SherpaOnnxDiarizer.embeddingModel.name),
+            source: .bundled(directory: "Diarization", fileName: SherpaOnnxDiarizer.embeddingModel.path),
             name: "ERes2Net base（中文）",
             verdicts: [.voiceprint: "已打进 App，不用下载"],
             parameters: ModelParameters(matchThreshold: SherpaOnnxDiarizer.recommendedMatchThreshold),

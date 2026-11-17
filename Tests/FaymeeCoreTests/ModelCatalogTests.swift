@@ -71,7 +71,8 @@ import Testing
 
     @Test func 隐藏的模型不出现在选择框里_但按id仍能找到() {
         let hidden = CatalogModel(id: "test/hidden", roles: [.transcription], family: .sherpaQwen3ASR,
-                                  source: .system, name: "隐藏", isHidden: true)
+                                  source: .system, name: "隐藏",
+                                  parameters: ModelParameters(hotwordTokenBudget: 150), isHidden: true)
         let c = ModelCatalog(models: ModelCatalog.builtIn.models + [hidden])
         #expect(!c.models(for: .transcription).contains { $0.id == "test/hidden" })
         #expect(c.model(id: "test/hidden") != nil)

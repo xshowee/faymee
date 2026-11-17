@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-/// 实时字幕定稿（第二遍）用的模型：设置里“实时字幕定稿”选中的整段模型（Paraformer、Fun-ASR-Nano）。
+/// 实时字幕定稿用的模型：设置里“实时字幕定稿”选中的整段模型（Paraformer、Fun-ASR-Nano）。
 /// 实时字幕会话开始时在后台建一个识别器，会话结束时释放；流式引擎每定稿一句，就把这一句的音频交给它重转
 public struct LiveCaptionFinalizerModel: Sendable {
     /// 目录项 id
@@ -18,31 +18,21 @@ public struct LiveCaptionFinalizerModel: Sendable {
     static let threads = 2
 
     /// 所选的定稿模型；“不用”、不是能定稿的模型，或模型（含标点模型等依赖）没下载完时为 nil（不定稿）。
-    /// 录音开始时选一次，录音中改设置从下一场起生效
+    /// 文件取自目录项自己的 `download`（`SegmentRecognizerLoader`）。录音开始时选一次，录音中改设置从下一场起生效
     public init?(selected: CatalogModel?, catalog: ModelCatalog = .builtIn,
                  directory: URL = LocalModel.defaultDirectory) {
-        guard let selected, selected.roles.contains(.liveFinalize), let model = selected.download else { return nil }
-        let downloads = [model] + catalog.dependencies(of: selected).compactMap(\.download)
-        guard downloads.allSatisfy({ $0.isDownloaded(in: directory) }) else { return nil }
-        switch selected.family {
-        case .sherpaParaformer:
-            self.init(id: selected.id) { _ in
-                try ParaformerRecognizer(modelDirectory: directory, threads: Self.threads)
-            }
-        case .sherpaFunASRNano:
-            let budget = selected.parameters.hotwordTokenBudget ?? 150
-            let name = selected.name
-            self.init(id: selected.id) { hotwords in
-                // 坏文件会让 sherpa-onnx `_Exit` 整个进程：加载前再按大小确认一次（会中可能被删）
-                try model.checkFiles(name: name, in: directory)
-                let modelDirectory = model.directory(in: directory)
-                let fitted = try FunASRNano.fitHotwords(hotwords, budget: budget, modelDirectory: modelDirectory)
-                return GuardedRecognizer(try FunASRNanoRecognizer(directory: modelDirectory, hotwords: fitted,
-                                                                  threads: Self.threads))
-            }
-        default:
-            return nil
-        }
+        self.init(selected: selected, catalog: catalog, directory: directory, adapter: \.segmentRecognizer)
+    }
+
+    /// 测试用：`adapter` 代替 `ModelFamily.segmentRecognizer`（换掉加载）
+    init?(selected: CatalogModel?, catalog: ModelCatalog, directory: URL,
+          adapter: (ModelFamily) -> SegmentRecognizerAdapter?) {
+        guard let selected, selected.roles.contains(.liveFinalize),
+              let loader = SegmentRecognizerLoader(model: selected, catalog: catalog, modelDirectory: directory,
+                                                   adapter: adapter),
+              loader.isDownloaded else { return nil }
+        // 加载时再按大小确认一次文件（会中可能被删；坏文件会让 sherpa-onnx `_Exit` 整个进程）
+        self.init(id: selected.id) { hotwords in try loader.makeRecognizer(hotwords: hotwords, threads: Self.threads) }
     }
 }
 

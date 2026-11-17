@@ -35,7 +35,7 @@ private func place(size: Int64, at url: URL) throws {
     @Test func 打进App的ERes2Netbase_文件在时用它和0点7的阈值() throws {
         let resources = try temporaryDirectory()
         try place(size: SherpaOnnxDiarizer.embeddingModel.size,
-                  at: resources.appendingPathComponent("Diarization/\(SherpaOnnxDiarizer.embeddingModel.name)"))
+                  at: resources.appendingPathComponent("Diarization/\(SherpaOnnxDiarizer.embeddingModel.path)"))
 
         let engine = SherpaOnnxDiarizer.engine(for: base, bundleResources: resources, modelsRoot: try temporaryDirectory())
 
@@ -90,7 +90,7 @@ private func place(size: Int64, at url: URL) throws {
             case let .download(local): #expect(local.files.count == 1, "\(m.id) 声纹模型应是单个 onnx 文件")
             case let .bundled(directory, fileName):
                 #expect(directory == "Diarization", "\(m.id)")
-                #expect(SherpaOnnxDiarizer.models.contains { $0.name == fileName }, "\(m.id) 打进 App 的文件没有哈希")
+                #expect(SherpaOnnxDiarizer.models.contains { $0.path == fileName }, "\(m.id) 打进 App 的文件没有哈希")
             case .system: Issue.record("\(m.id) 不能是系统自带")
             }
         }
@@ -139,7 +139,7 @@ private final class NoTranscriber: Transcriber {
                                    transport: ServeFile(data: secondModelFile))
         resources = try temporaryDirectory()
         try place(size: SherpaOnnxDiarizer.embeddingModel.size,
-                  at: resources.appendingPathComponent("Diarization/\(SherpaOnnxDiarizer.embeddingModel.name)"))
+                  at: resources.appendingPathComponent("Diarization/\(SherpaOnnxDiarizer.embeddingModel.path)"))
         binding = VoiceprintModelBinding(selections: selections, downloads: downloads, bundleResources: resources)
         let engine = binding.makeEngine()
         pipeline = TranscriptionPipeline(store: MeetingStore(root: try temporaryDirectory()), transcriber: NoTranscriber(),

@@ -54,9 +54,14 @@ struct Qwen3ASRContractTests {
     private let truth: [Range<Double>] = [0.00..<8.47, 9.07..<17.43, 18.03..<25.48, 26.08..<33.58, 34.18..<41.22,
                                           41.82..<48.21]
 
+    private func transcriber(for model: CatalogModel) throws -> SherpaOfflineTranscriber {
+        let loader = try #require(SegmentRecognizerLoader(model: model))
+        return SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory, vadModel: repoVADModel)
+    }
+
     @Test func 转出关键词_有标点_句子落在对应的那段话里() async throws {
         let model = try #require(ModelCatalog.builtIn.model(id: LocalModel.qwen3ASR.id))
-        let transcriber = SherpaOfflineTranscriber.qwen3ASR(model: model, vadModel: repoVADModel)
+        let transcriber = try transcriber(for: model)
 
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }
 
@@ -73,23 +78,23 @@ struct Qwen3ASRContractTests {
         #expect(turn(of: "支付模块") == 2)
         #expect(turn(of: "对接接口") == 3)
         #expect(zip(sentences, sentences.dropFirst()).allSatisfy { $0.end <= $1.start })
-        #expect(Qwen3ASR.engine == LocalModel.qwen3ASR.id)
     }
 
     @Test func 带热词也能转_热词按tokenizer计数截到预算内() async throws {
         let model = try #require(ModelCatalog.builtIn.model(id: LocalModel.qwen3ASR.id))
-        let transcriber = SherpaOfflineTranscriber.qwen3ASR(model: model, vadModel: repoVADModel)
+        let transcriber = try transcriber(for: model)
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"),
                                                          hotwords: ["登录模块", "支付模块"]) { _ in }
         #expect(sentences.map(\.text).joined().contains("支付模块"))
 
         let directory = LocalModel.qwen3ASR.directory()
+        let fitting = try #require(SegmentRecognizerAdapter.qwen3ASR.hotwordFitting)
         // 评估用的 8 个热词：Qwen3-ASR 用空格连接，拼起来远小于 150
         let eval = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场", "模型广场", "端到端研发"]
-        #expect(try Qwen3ASR.fitHotwords(eval, budget: 150, modelDirectory: directory) == eval)
+        #expect(try fitting.fit(eval, budget: 150, modelDirectory: directory) == eval)
 
         let many = (1...200).map { "项目代号\($0)" }
-        let fitted = try Qwen3ASR.fitHotwords(many, budget: 150, modelDirectory: directory)
+        let fitted = try fitting.fit(many, budget: 150, modelDirectory: directory)
         let counter = try QwenTokenCounter(directory: directory.appendingPathComponent("tokenizer"))
         #expect(fitted == Array(many.prefix(fitted.count)))
         #expect(counter.count(fitted.joined(separator: " ")) <= 150)

@@ -162,6 +162,17 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
                   inFlight: SherpaBackgroundWork.inFlight, makeRecognizer: makeRecognizer)
     }
 
+    /// 目录项的整段识别器（`SegmentRecognizerLoader`）做会后转写，写进转写稿的引擎名是目录项 id
+    /// - Parameters:
+    ///   - vadModel: 静音切段模型，App 里传 `SileroVAD.bundledModel`
+    ///   - threads: 推理线程数
+    public convenience init(loader: SegmentRecognizerLoader, catalog: ModelCatalog = .builtIn, modelDirectory: URL,
+                            vadModel: URL?, threads: Int = 4) {
+        self.init(model: loader.model, catalog: catalog, modelDirectory: modelDirectory, vadModel: vadModel) { hotwords in
+            try loader.makeRecognizer(hotwords: hotwords, threads: threads)
+        }
+    }
+
     /// 测试用：`segmenter` 代替 VAD 给出说话段，`inFlight` 代替全局的那个（免得与并行的其他测试互相等）
     init(model: CatalogModel, catalog: ModelCatalog, modelDirectory: URL, vadModel: URL?,
          segmenter: @escaping Segmenter, inFlight: DispatchGroup, makeRecognizer: @escaping MakeRecognizer) {

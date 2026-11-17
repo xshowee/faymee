@@ -15,11 +15,21 @@ private let repoVADModel = URL(fileURLWithPath: #filePath)
 private let truth: [Range<Double>] = [0.00..<8.47, 9.07..<17.43, 18.03..<25.48, 26.08..<33.58, 34.18..<41.22,
                                       41.82..<48.21]
 
+private let paraformerEntry = ModelCatalog.builtIn.model(id: LocalModel.paraformer.id)!
+
+/// 已下载的 Paraformer（目录里的那一项，经 `SegmentRecognizerLoader` 加载）
+func paraformer(threads: Int = 2) throws -> ParaformerRecognizer {
+    let loader = try #require(SegmentRecognizerLoader(model: paraformerEntry))
+    let recognizer = try loader.makeRecognizer(hotwords: [], threads: threads)
+    return try #require(recognizer as? ParaformerRecognizer)
+}
+
 @Suite struct ParaformerRecognizerModelTests {
     @Test func 模型文件缺了不加载_报缺哪个文件() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let loader = try #require(SegmentRecognizerLoader(model: paraformerEntry, modelDirectory: root))
         #expect(throws: SherpaModelError.missing(model: "Paraformer", file: "model.int8.onnx")) {
-            try ParaformerRecognizer(modelDirectory: root)
+            try loader.makeRecognizer(hotwords: [], threads: 2)
         }
     }
 }
@@ -31,7 +41,7 @@ struct ParaformerContractTests {
     @Test func 单句音频直接识别_有标点_逐字时间对得上文字() throws {
         // 实时字幕定稿的用法：不切段，直接把一句话的音频交给识别器
         let samples = try SherpaOnnxDiarizer.decode(try resource("two-speakers-zh"))
-        let recognizer = try ParaformerRecognizer()
+        let recognizer = try paraformer()
 
         let result = try recognizer.recognize(samples[0..<Int(truth[0].upperBound * 16000)])
 
@@ -46,7 +56,9 @@ struct ParaformerContractTests {
 
     @Test(.enabled(if: (try? SileroVAD.check(repoVADModel)) != nil, "需要 Silero VAD"))
     func 会后转写_关键词在对应的那段话里_有标点_句子时间单调() async throws {
-        let transcriber = SherpaOfflineTranscriber.paraformer(vadModel: repoVADModel)
+        let loader = try #require(SegmentRecognizerLoader(model: paraformerEntry))
+        let transcriber = SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory,
+                                                   vadModel: repoVADModel)
 
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"),
                                                          hotwords: ["忽略"]) { _ in }

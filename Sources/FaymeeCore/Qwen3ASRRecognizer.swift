@@ -7,7 +7,7 @@ import SherpaOnnxC
 /// - 提示词由 sherpa 拼：热词用空格连接放在 system 段（`<|im_start|>system\n甲 乙<|im_end|>`），
 ///   模型先输出 `language Chinese<asr_text>` 再输出文字，sherpa 会去掉这个前缀。
 ///   热词、音频、输出共用 `max_total_len`（512）的上下文，超了 sherpa 会悄悄截掉音频，
-///   所以热词先按 `Qwen3ASR.fitHotwords` 截到预算内
+///   所以热词先按目录项的预算截断（`SegmentRecognizerLoader`）
 /// - 带热词时偶尔把提示词当成结果输出（整串热词，或单独的「system」）：这一段不带热词再转一遍
 ///   （见 `Qwen3ASR.decodeAvoidingPromptLeak`）
 /// - sherpa 自己会截掉「只在两三个 token 间打转」的复读；其余复读（含整句重复到输出上限）、
@@ -18,16 +18,19 @@ public final class Qwen3ASRRecognizer: SegmentRecognizer {
     private let hotwords: [String]
 
     /// - Parameters:
-    ///   - directory: 模型目录（`LocalModel.qwen3ASR.directory(in:)`），文件要先按大小确认齐全
+    ///   - directory: 目录项的模型目录，文件要先按大小确认齐全（由 `SegmentRecognizerLoader` 给出）
+    ///   - name: 错误信息里的模型名
+    ///   - contextTokens: 提示词 + 音频 + 输出的上限（sherpa `max_total_len`）；nil 用 sherpa 的默认值（512）
     ///   - hotwords: 已截到预算内的热词
-    public init(directory: URL, hotwords: [String] = [], threads: Int = 4, debug: Bool = false) throws {
+    init(directory: URL, name: String, contextTokens: Int?, hotwords: [String] = [], threads: Int = 4,
+         debug: Bool = false) throws {
         func path(_ name: String) -> UnsafeMutablePointer<CChar> {
             strdup(directory.appendingPathComponent(name).path)
         }
         let frontend = path("conv_frontend.onnx"), encoder = path("encoder.int8.onnx")
         let decoder = path("decoder.int8.onnx"), tokenizer = path("tokenizer")
         let cpu = strdup("cpu"), greedy = strdup("greedy_search")
-        let words = strdup(Qwen3ASR.hotwordsArgument(hotwords))
+        let words = strdup(SherpaHotwords.argument(hotwords))
         defer { [frontend, encoder, decoder, tokenizer, cpu, greedy, words].forEach { free($0) } }
 
         var config = SherpaOnnxOfflineRecognizerConfig()
@@ -43,17 +46,17 @@ public final class Qwen3ASRRecognizer: SegmentRecognizer {
         config.model_config.qwen3_asr.tokenizer = UnsafePointer(tokenizer)
         // C API 里 0 表示默认值，这里显式写出 sherpa 的默认（同评估）：贪心解码（温度 ≤ 1e-6 即贪心）。
         // 提示词、音频（10 秒段）、热词（≤ 150）加上最多 128 个输出 token 放得进 512
-        config.model_config.qwen3_asr.max_total_len = Int32(Qwen3ASR.contextTokens)
+        config.model_config.qwen3_asr.max_total_len = Int32(contextTokens ?? 0)
         config.model_config.qwen3_asr.max_new_tokens = 128
         config.model_config.qwen3_asr.temperature = 1e-6
         config.model_config.qwen3_asr.top_p = 0.8
         config.model_config.qwen3_asr.seed = 42
         config.model_config.qwen3_asr.hotwords = UnsafePointer(words)
         guard let r = SherpaOnnxCreateOfflineRecognizer(&config) else {
-            throw SherpaModelError.engineUnavailable(model: Qwen3ASR.name)
+            throw SherpaModelError.engineUnavailable(model: name)
         }
         recognizer = r
-        self.hotwords = Qwen3ASR.sanitizedHotwords(hotwords)
+        self.hotwords = SherpaHotwords.sanitize(hotwords)
     }
 
     deinit { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
@@ -79,24 +82,8 @@ public final class Qwen3ASRRecognizer: SegmentRecognizer {
     }
 }
 
-/// Qwen3-ASR 的固定参数
+/// Qwen3-ASR 的提示词泄漏处理
 public enum Qwen3ASR {
-    public static let name = "Qwen3-ASR"
-    /// 写进转写稿的引擎名（与目录 id 相同）
-    public static let engine = LocalModel.qwen3ASR.id
-    /// 提示词 + 音频 + 输出的上限（sherpa `max_total_len`）
-    static let contextTokens = 512
-
-    /// 交给 sherpa 的 `hotwords` 参数：逗号连接（sherpa 按 ASCII `,` 拆开，再用空格连接拼进提示词）。
-    /// 热词里的分隔符先换成空格，同 Fun-ASR-Nano
-    static func hotwordsArgument(_ hotwords: [String]) -> String {
-        sanitizedHotwords(hotwords).joined(separator: ",")
-    }
-
-    static func sanitizedHotwords(_ hotwords: [String]) -> [String] {
-        FunASRNano.sanitize(hotwords)
-    }
-
     /// 解码一段；输出泄漏了提示词（整串热词、单独的「system」）且这次带了热词时，这一段用按流选项去掉热词再解一次。
     /// 三场真实会议上这样的泄漏都只在带热词时出现，不带热词重转都得到正常内容；对半重转常常仍有一半泄漏而被丢掉
     /// - Parameter decode: 按流选项解码（`[:]` = 用识别器的热词，`["hotwords": ""]` = 不带热词）
@@ -105,33 +92,5 @@ public enum Qwen3ASR {
         guard !hotwords.isEmpty,
               ASROutputGuard.problem(in: ASROutputGuard.clean(text), hotwords: hotwords) == .promptLeak else { return text }
         return decode(["hotwords": ""])
-    }
-
-    /// 按 Qwen3 tokenizer 的实际计数把热词截到预算内（按热词表顺序，放不下就停）。
-    /// 计的是 system 段里空格连接的热词串（Qwen3-ASR 的 tokenizer 与 Fun-ASR-Nano 的 Qwen3-0.6B 是同一份）
-    public static func fitHotwords(_ hotwords: [String], budget: Int, modelDirectory: URL) throws -> [String] {
-        let words = sanitizedHotwords(hotwords)
-        guard !words.isEmpty else { return [] }
-        let counter = try QwenTokenCounter(directory: modelDirectory.appendingPathComponent("tokenizer"))
-        return HotwordBudget.fit(words, budget: budget, separator: " ", count: counter.count)
-    }
-}
-
-extension SherpaOfflineTranscriber {
-    /// 用 Qwen3-ASR 的会后转写：热词按目录项的预算截断，识别器套上输出防护（`GuardedRecognizer`）。
-    /// 写进转写稿的引擎名是 `Qwen3ASR.engine`
-    /// - Parameters:
-    ///   - model: Qwen3-ASR 的目录项（`LocalModel.qwen3ASR.id`）
-    ///   - vadModel: 静音切段模型，App 里传 `SileroVAD.bundledModel`
-    public static func qwen3ASR(model: CatalogModel, catalog: ModelCatalog = .builtIn,
-                                modelDirectory: URL = LocalModel.defaultDirectory, vadModel: URL?,
-                                threads: Int = 4) -> SherpaOfflineTranscriber {
-        let budget = model.parameters.hotwordTokenBudget ?? 150
-        let directory = LocalModel.qwen3ASR.directory(in: modelDirectory)
-        return SherpaOfflineTranscriber(model: model, catalog: catalog, modelDirectory: modelDirectory,
-                                        vadModel: vadModel) { hotwords in
-            let fitted = try Qwen3ASR.fitHotwords(hotwords, budget: budget, modelDirectory: directory)
-            return GuardedRecognizer(try Qwen3ASRRecognizer(directory: directory, hotwords: fitted, threads: threads))
-        }
     }
 }

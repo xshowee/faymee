@@ -154,11 +154,11 @@ struct SherpaOnnxDiarizerContractTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let base = SherpaOnnxDiarizer.embeddingModel
         let local = LocalModel(id: "test/downloaded-eres2net", directoryName: "downloaded-eres2net", files: [
-            ModelFile(path: base.name, size: base.size, sha256: base.sha256,
-                      downloadURLs: [URL(string: "https://example.com/\(base.name)")!]),
+            ModelFile(path: base.path, size: base.size, sha256: base.sha256,
+                      downloadURLs: [URL(string: "https://example.com/\(base.path)")!]),
         ])
         try FileManager.default.createDirectory(at: local.directory(in: root), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.name), to: local.url(in: root))
+        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.path), to: local.url(in: root))
         let entry = CatalogModel(id: local.id, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
                                  source: .download(local), name: "下载的", parameters: ModelParameters(matchThreshold: 0.6))
 
@@ -224,12 +224,12 @@ struct SherpaOnnxDiarizerContractTests {
 
         let base = SherpaOnnxDiarizer.embeddingModel
         let local = LocalModel(id: "test/downloaded-eres2net", directoryName: "downloaded-eres2net", files: [
-            ModelFile(path: base.name, size: base.size, sha256: base.sha256,
-                      downloadURLs: [URL(string: "https://example.com/\(base.name)")!]),
+            ModelFile(path: base.path, size: base.size, sha256: base.sha256,
+                      downloadURLs: [URL(string: "https://example.com/\(base.path)")!]),
         ])
         let models = root.appendingPathComponent("Models", isDirectory: true)
         try FileManager.default.createDirectory(at: local.directory(in: models), withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.name), to: local.url(in: models))
+        try FileManager.default.copyItem(at: modelDirectory.appendingPathComponent(base.path), to: local.url(in: models))
         let entry = CatalogModel(id: local.id, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
                                  source: .download(local), name: "下载的", parameters: ModelParameters(matchThreshold: 0.7))
         let extractor = try #require(SherpaOnnxDiarizer.engine(for: entry, bundleResources: nil, modelsRoot: models).diarizer)
@@ -267,8 +267,8 @@ struct SherpaOnnxDiarizerModelTests {
     }
 
     /// 放一个大小对、内容不对的文件
-    private func placeFake(_ model: SherpaOnnxDiarizer.ModelFile, in dir: URL) throws {
-        let url = dir.appendingPathComponent(model.name)
+    private func placeFake(_ model: ModelFile, in dir: URL) throws {
+        let url = dir.appendingPathComponent(model.path)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         let handle = try FileHandle(forWritingTo: url)
         try handle.truncate(atOffset: UInt64(model.size))
@@ -279,7 +279,7 @@ struct SherpaOnnxDiarizerModelTests {
         let dir = try directory()
 
         #expect(!SherpaOnnxDiarizer.modelsPresent(in: dir))
-        await #expect(throws: SherpaOnnxDiarizerError.modelMissing(SherpaOnnxDiarizer.embeddingModel.name)) {
+        await #expect(throws: SherpaOnnxDiarizerError.modelMissing(SherpaOnnxDiarizer.embeddingModel.path)) {
             try await SherpaOnnxDiarizer(modelDirectory: dir).prepare { _ in }
         }
     }
@@ -290,7 +290,7 @@ struct SherpaOnnxDiarizerModelTests {
         let engine = SherpaOnnxDiarizer(modelDirectory: dir)
 
         #expect(SherpaOnnxDiarizer.modelsPresent(in: dir))
-        let corrupted = SherpaOnnxDiarizerError.modelCorrupted(SherpaOnnxDiarizer.embeddingModel.name)
+        let corrupted = SherpaOnnxDiarizerError.modelCorrupted(SherpaOnnxDiarizer.embeddingModel.path)
         await #expect(throws: corrupted) { try await engine.prepare { _ in } }
         await #expect(throws: corrupted) {
             try await engine.diarize(audio: dir.appendingPathComponent("none.m4a"), sentences: [0...1],

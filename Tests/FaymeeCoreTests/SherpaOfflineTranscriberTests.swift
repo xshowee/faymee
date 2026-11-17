@@ -297,7 +297,7 @@ private final class RawParaformer: SegmentRecognizer, @unchecked Sendable {
     private let punctuate: (String) -> String
 
     init(punctuate: @escaping (String) -> String) throws {
-        paraformer = try ParaformerRecognizer()
+        paraformer = try FaymeeCoreTests.paraformer()
         self.punctuate = punctuate
     }
 
