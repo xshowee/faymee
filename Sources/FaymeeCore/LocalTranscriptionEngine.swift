@@ -10,10 +10,16 @@ public enum LocalTranscriptionEngine {
     ///   - vadModel: 静音切段模型，App 里传 `SileroVAD.bundledModel`
     public static func transcriber(for model: CatalogModel, catalog: ModelCatalog = .builtIn,
                                    modelDirectory: URL, vadModel: URL?) -> (any Transcriber)? {
+        transcriber(for: model, catalog: catalog, modelDirectory: modelDirectory, vadModel: vadModel,
+                    adapter: \.segmentRecognizer)
+    }
+
+    /// 测试用：`adapter` 代替 `ModelFamily.segmentRecognizer`（换掉加载）
+    static func transcriber(for model: CatalogModel, catalog: ModelCatalog, modelDirectory: URL, vadModel: URL?,
+                            adapter: (ModelFamily) -> SegmentRecognizerAdapter?) -> (any Transcriber)? {
         if model.family == .speechAnalyzer { return SpeechAnalyzerTranscriber() }
-        return SegmentRecognizerLoader(model: model, catalog: catalog, modelDirectory: modelDirectory).map {
-            SherpaOfflineTranscriber(loader: $0, catalog: catalog, modelDirectory: modelDirectory, vadModel: vadModel)
-        }
+        return SegmentRecognizerLoader(model: model, catalog: catalog, modelDirectory: modelDirectory,
+                                       adapter: adapter).map { SherpaOfflineTranscriber(loader: $0, vadModel: vadModel) }
     }
 
     /// 按现在的选择建本机转写引擎。`waitReason` 为 nil 表示就绪（系统自带的总是就绪）。

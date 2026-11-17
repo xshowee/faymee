@@ -166,9 +166,9 @@ public final class SherpaOfflineTranscriber: Transcriber, @unchecked Sendable {
     /// - Parameters:
     ///   - vadModel: 静音切段模型，App 里传 `SileroVAD.bundledModel`
     ///   - threads: 推理线程数
-    public convenience init(loader: SegmentRecognizerLoader, catalog: ModelCatalog = .builtIn, modelDirectory: URL,
-                            vadModel: URL?, threads: Int = 4) {
-        self.init(model: loader.model, catalog: catalog, modelDirectory: modelDirectory, vadModel: vadModel) { hotwords in
+    public convenience init(loader: SegmentRecognizerLoader, vadModel: URL?, threads: Int = 4) {
+        self.init(model: loader.model, catalog: loader.catalog, modelDirectory: loader.modelDirectory,
+                  vadModel: vadModel) { hotwords in
             try loader.makeRecognizer(hotwords: hotwords, threads: threads)
         }
     }

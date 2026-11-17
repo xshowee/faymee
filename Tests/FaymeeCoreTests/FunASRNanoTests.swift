@@ -29,8 +29,7 @@ struct FunASRNanoContractTests {
     @Test func 转出关键词_有标点_句子落在对应的那段话里() async throws {
         let model = try #require(ModelCatalog.builtIn.model(id: LocalModel.funASRNano.id))
         let loader = try #require(SegmentRecognizerLoader(model: model))
-        let transcriber = SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory,
-                                                   vadModel: repoVADModel)
+        let transcriber = SherpaOfflineTranscriber(loader: loader, vadModel: repoVADModel)
 
         // 不给热词：关键词要靠模型自己认出来（热词路径见下面的预算测试）
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }

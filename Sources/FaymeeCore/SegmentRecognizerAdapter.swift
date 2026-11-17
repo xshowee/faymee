@@ -97,10 +97,13 @@ extension ModelFamily {
 /// 会后转写、实时字幕定稿、热词页都从这里拿，不按模型写死文件位置
 public struct SegmentRecognizerLoader: Sendable {
     public let model: CatalogModel
+    /// 目录项所在的目录（找依赖的辅助模型）
+    public let catalog: ModelCatalog
+    /// 模型根目录
+    public let modelDirectory: URL
     let adapter: SegmentRecognizerAdapter
     /// 要按大小确认齐全的模型（目录项和需要下载的辅助模型），带错误信息里的名字
     private let required: [Required]
-    private let root: URL
     private let punctuationDirectory: URL?
 
     private struct Required: Sendable {
@@ -128,22 +131,23 @@ public struct SegmentRecognizerLoader: Sendable {
             punctuationDirectory = punctuation.directory(in: modelDirectory)
         }
         self.model = model
+        self.catalog = catalog
         self.adapter = adapter
         required = ([model] + dependencies).compactMap { m in m.download.map { Required(name: m.name, model: $0) } }
-        root = modelDirectory
+        self.modelDirectory = modelDirectory
         self.punctuationDirectory = punctuationDirectory
     }
 
     /// 目录项（含辅助模型）的文件都在、大小对
-    public var isDownloaded: Bool { required.allSatisfy { $0.model.isDownloaded(in: root) } }
+    public var isDownloaded: Bool { required.allSatisfy { $0.model.isDownloaded(in: modelDirectory) } }
 
     /// 按大小确认文件齐全，缺了抛 `SherpaModelError`
     public func checkFiles() throws {
-        for r in required { try r.model.checkFiles(name: r.name, in: root) }
+        for r in required { try r.model.checkFiles(name: r.name, in: modelDirectory) }
     }
 
     /// 目录项自己的模型目录
-    private var directory: URL { model.download!.directory(in: root) }
+    private var directory: URL { model.download!.directory(in: modelDirectory) }
 
     /// 热词截到目录项的预算内。家族不用热词时为空；返回值第二项是去掉空词、重复后的热词数
     public func fitHotwords(_ hotwords: [String]) throws -> (fitted: [String], total: Int) {

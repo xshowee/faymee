@@ -57,8 +57,7 @@ struct ParaformerContractTests {
     @Test(.enabled(if: (try? SileroVAD.check(repoVADModel)) != nil, "需要 Silero VAD"))
     func 会后转写_关键词在对应的那段话里_有标点_句子时间单调() async throws {
         let loader = try #require(SegmentRecognizerLoader(model: paraformerEntry))
-        let transcriber = SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory,
-                                                   vadModel: repoVADModel)
+        let transcriber = SherpaOfflineTranscriber(loader: loader, vadModel: repoVADModel)
 
         let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"),
                                                          hotwords: ["忽略"]) { _ in }

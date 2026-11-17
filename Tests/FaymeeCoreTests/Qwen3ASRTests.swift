@@ -56,7 +56,7 @@ struct Qwen3ASRContractTests {
 
     private func transcriber(for model: CatalogModel) throws -> SherpaOfflineTranscriber {
         let loader = try #require(SegmentRecognizerLoader(model: model))
-        return SherpaOfflineTranscriber(loader: loader, modelDirectory: LocalModel.defaultDirectory, vadModel: repoVADModel)
+        return SherpaOfflineTranscriber(loader: loader, vadModel: repoVADModel)
     }
 
     @Test func 转出关键词_有标点_句子落在对应的那段话里() async throws {

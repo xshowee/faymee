@@ -11,6 +11,19 @@ private final class LoadedRecognizer: SegmentRecognizer, @unchecked Sendable {
     }
 }
 
+/// 加载时拿到的东西（加载在转写的后台队列上调用）
+private final class Requests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [SegmentRecognizerAdapter.Request] = []
+    func append(_ r: SegmentRecognizerAdapter.Request) { lock.withLock { requests.append(r) } }
+    var all: [SegmentRecognizerAdapter.Request] { lock.withLock { requests } }
+}
+
+/// 仓库里打进 App 的静音切段模型（scripts/fetch-vad-model.sh 下载，被 git 忽略）
+private let repoVADModel = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("Resources/VAD/silero_vad.onnx")
+
 /// 同一家族加新模型只加目录项：适配器按目录项自己的 `download`（和依赖的辅助模型）找文件，不按内置模型写死。
 /// 用两个假的目录项（与内置的同家族，但目录、文件都不同），文件按大小放好，加载换成记录拿到的位置
 @MainActor @Suite struct SegmentRecognizerLoaderTests {
@@ -114,13 +127,21 @@ private final class LoadedRecognizer: SegmentRecognizer, @unchecked Sendable {
         #expect(request.hotwords == [])
     }
 
-    @Test func 会后转写按目录项自己的文件准备() async throws {
+    @Test(.enabled(if: (try? SileroVAD.check(repoVADModel)) != nil, "需要 Silero VAD"))
+    func 会后转写按目录项自己的文件加载() async throws {
         defer { try? FileManager.default.removeItem(at: root) }
         try place(funASRVariant)
-        let transcriber = try #require(LocalTranscriptionEngine.transcriber(for: funASRVariant, catalog: catalog,
-                                                                             modelDirectory: root, vadModel: nil))
-        // 文件齐了，只差（测试里没给的）静音切段模型；内置 Fun-ASR-Nano 的文件不在，看的不是它
-        await #expect(throws: SherpaModelError.vadMissing) { try await transcriber.prepare(progress: { _ in }) }
+        let requests = Requests()
+        let transcriber = try #require(LocalTranscriptionEngine.transcriber(
+            for: funASRVariant, catalog: catalog, modelDirectory: root, vadModel: repoVADModel,
+            adapter: { $0.segmentRecognizer?.replacingLoad { requests.append($0); return LoadedRecognizer($0) } }))
+        let audio = try #require(Bundle.module.url(forResource: "two-speakers-zh", withExtension: "m4a",
+                                                   subdirectory: "Resources"))
+
+        _ = try await transcriber.transcribe(audio: audio, hotwords: ["ab"]) { _ in }
+
+        #expect(requests.all.map(\.directory) == [root.appendingPathComponent("funasr-nano-variant")])
+        #expect(requests.all.first?.hotwords == ["ab"])
     }
 
     @Test func 实时字幕定稿按目录项自己的文件加载() throws {
