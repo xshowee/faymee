@@ -30,32 +30,58 @@ extension Meeting {
     /// - 系统声音关着：内置麦克风没有录到声音（与以前的文字相同）
     /// - 开着且可用：只录到系统声音
     /// - 开着但不可用：两路都没录到
+    ///
+    /// 拆出来短于容差的一段并进前一段（是第一段时并进后一段）：合盖空白和系统声音时段的起止由 App
+    /// 各取各的当前时间，同一时刻发生的事（比如合着盖停止录音）会差几毫秒，不该因此多出一组说明
     public var lidGapNotices: [LidGapNotice] {
-        let on = systemSoundPeriodList
-        let unavailable = systemSoundUnavailablePeriodList
-        let boundaries = (on + unavailable).flatMap { [$0.start, $0.end].compactMap { $0 } }
         var notices: [LidGapNotice] = []
-        for gap in lidGaps {
-            let cuts = boundaries.filter { $0 > gap.start && $0 < (gap.end ?? .distantFuture) }
-            let points = [gap.start] + Set(cuts).sorted()
-            for (i, start) in points.enumerated() {
-                let end = i + 1 < points.count ? points[i + 1] : gap.end
-                let title = LidGapNotice.title(systemSoundOn: on.contains { $0.contains(start) },
-                                               unavailable: unavailable.contains { $0.contains(start) })
-                let piece = Gap(start: start, end: end, reason: gap.reason)
-                if let n = notices.firstIndex(where: { $0.title == title }) {
-                    // 与同组上一段首尾相接（拆开的两段之间只隔着另一组不认的切换点）时接回一段
-                    if let last = notices[n].gaps.last, last.end == start {
-                        notices[n].gaps[notices[n].gaps.count - 1].end = end
-                    } else {
-                        notices[n].gaps.append(piece)
-                    }
-                } else {
-                    notices.append(LidGapNotice(title: title, gaps: [piece]))
-                }
+        for piece in lidGaps.flatMap(lidGapPieces) {
+            if let n = notices.firstIndex(where: { $0.title == piece.title }) {
+                notices[n].gaps.append(piece.gap)
+            } else {
+                notices.append(LidGapNotice(title: piece.title, gaps: [piece.gap]))
             }
         }
         return notices
+    }
+
+    /// 一段合盖在系统声音的开关切换、不可用的起止处拆开，并掉零碎的段，相邻同一说明的段接回一段
+    private func lidGapPieces(_ gap: Gap) -> [(title: String, gap: Gap)] {
+        let on = systemSoundPeriodList
+        let unavailable = systemSoundUnavailablePeriodList
+        let cuts = (on + unavailable).flatMap { [$0.start, $0.end].compactMap { $0 } }
+            .filter { $0 > gap.start && $0 < (gap.end ?? .distantFuture) }
+        let points = [gap.start] + Set(cuts).sorted()
+        var pieces: [(title: String, gap: Gap)] = points.enumerated().map { i, start in
+            let title = LidGapNotice.title(systemSoundOn: on.contains { $0.contains(start) },
+                                           unavailable: unavailable.contains { $0.contains(start) })
+            let end = i + 1 < points.count ? points[i + 1] : gap.end
+            return (title, Gap(start: start, end: end, reason: gap.reason))
+        }
+        func isSliver(_ g: Gap) -> Bool {
+            g.end.map { $0.timeIntervalSince(g.start) < Self.audioSourceEdgeTolerance } ?? false
+        }
+        // 零碎的段把时间让给邻段：在前面的并进后一段，否则并进前一段
+        var i = 0
+        while pieces.count > 1, i < pieces.count {
+            guard isSliver(pieces[i].gap) else { i += 1; continue }
+            if i == 0 {
+                pieces[1].gap.start = pieces[0].gap.start
+            } else {
+                pieces[i - 1].gap.end = pieces[i].gap.end
+            }
+            pieces.remove(at: i)
+        }
+        // 相邻同一说明的接回一段（切换点对说明没有影响，或中间零碎的段被并掉了）
+        var result: [(title: String, gap: Gap)] = []
+        for p in pieces {
+            if let last = result.last, last.title == p.title {
+                result[result.count - 1].gap.end = p.gap.end
+            } else {
+                result.append(p)
+            }
+        }
+        return result
     }
 
     /// 按起点排序，重叠或首尾相接的合成一段

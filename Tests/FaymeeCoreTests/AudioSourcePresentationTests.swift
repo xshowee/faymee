@@ -119,6 +119,13 @@ private func lid(_ start: TimeInterval, _ end: TimeInterval?) -> Gap {
         ])
     }
 
+    @Test func 时段与合盖的起止差几秒时不拆出零碎的一段() {
+        // 合着盖停止录音：合盖空白在 endedAt 结束，系统声音时段由 App 另取当前时间，可能早一点结束
+        var m = meeting(systemSound: [period(0.5, 3599.9)])
+        m.lidGaps = [lid(0, 1200), lid(3000, 3600)]
+        #expect(m.lidGapNotices == [LidGapNotice(title: systemSoundOnly, gaps: [lid(0, 1200), lid(3000, 3600)])])
+    }
+
     @Test func 切换点不改变说明时不拆开() {
         // 系统声音关着时，不可用的起止对说明没有影响
         var m = meeting(systemSound: [period(1200, 3600)])
