@@ -252,6 +252,15 @@ private final class Fixture {
         #expect(f.sentences == ["大家好所以。", "所以先说预算。"])
     }
 
+    /// 开始（或恢复）后的第一句：往前补的 0.3 秒还没有音频，从有音频的地方切，照常定稿
+    @Test func 第一句往前补边没有音频时从头切() async throws {
+        let f = Fixture()
+        let t = try await f.run(seconds: 5)
+
+        t.sentence(0.1, 1, "第一句。")
+        try await f.until { f.sentences == ["0-12"] }
+    }
+
     /// 只留最近约 1 分钟的音频：句子开头已经不在了就不定稿
     @Test func 句子的音频已经不在缓存里时保留流式结果() async throws {
         let f = Fixture()

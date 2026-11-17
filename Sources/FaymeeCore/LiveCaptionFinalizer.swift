@@ -192,9 +192,14 @@ struct RecentAudio {
         trim()
     }
 
-    /// 录音里 start...end 秒的音频；开头已经不在缓存里（或什么都没有）时为 nil
+    /// 录音里 start...end 秒的音频；开头已经被挤出缓存（或什么都没有）时为 nil。
+    /// 开头早于开始（或恢复）后的第一块音频时（第一句往前补的边），从第一块切起
     func clip(from start: TimeInterval, to end: TimeInterval) -> [Float]? {
-        guard let lower = index(at: start), lower >= dropped else { return nil }
+        guard var lower = index(at: start) else { return nil }
+        if lower < dropped {
+            guard dropped == 0 else { return nil }
+            lower = 0
+        }
         let upper = min(index(at: end) ?? lower, dropped + samples.count)
         guard upper > lower else { return nil }
         return Array(samples[(lower - dropped)..<(upper - dropped)])
