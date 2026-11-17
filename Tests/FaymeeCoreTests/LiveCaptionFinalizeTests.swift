@@ -229,6 +229,17 @@ private final class Fixture {
         #expect(f.sentences == ["大家好，今天开会。", "所以先说预算。", "后来的。"])
     }
 
+    /// 两句的音频重叠可达约 1 秒，重复的字比会后转写的多（实测 5、6 个字）
+    @Test func 重复6个字也去掉() async throws {
+        let f = Fixture()
+        let t = try await f.run(seconds: 10)
+        f.recognizer.text = { clip in Int(clip.first ?? 0) == 7 ? "你知道吗，我们现在都没。" : "我们现在都没有给他。" }
+
+        t.sentence(1, 2.1, "你知道吗。")
+        t.sentence(2.1, 3, "我们现在都没有给他。")
+        try await f.until { f.sentences == ["你知道吗。", "我们现在都没有给他。"] }
+    }
+
     @Test func 前一句没有定稿时不去掉重复的字() async throws {
         let f = Fixture()
         let t = try await f.run(seconds: 10)

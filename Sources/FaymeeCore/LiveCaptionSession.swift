@@ -120,6 +120,10 @@ public final class LiveCaptionSession {
     /// 定稿时句子前后各多带的秒数
     static let finalizePadding: TimeInterval = 0.3
 
+    /// 相邻两句定稿去重时最多去掉几个字。两句的音频最多重叠约 1 秒（各多带 0.3 秒，X-ASR 的句末又比最后一个字
+    /// 晚约 0.3 秒），比会后转写的补边重叠（约 0.5 秒，4 个字）长；三场会议实测有 5、6 个字的重复
+    static let maxFinalizeTwins = 6
+
     /// 定稿因积压丢掉的句子数（测量用）
     var finalizeDropped: Int { finalizer?.dropped ?? 0 }
 
@@ -305,7 +309,7 @@ public final class LiveCaptionSession {
     ///
     /// 前一句紧挨着这句（两句各多带的音频重叠）且已定稿时，它的定稿常常带上这句开头的几个字
     /// （X-ASR 的句子常常首尾相接，句末时间又比最后一个字晚约 0.3 秒）：从前一句去掉和这句开头相同的字，
-    /// 规矩同会后转写（`SentenceAssembly.droppingTextTwins`，最多 4 个字）。缩短补边会丢字（ticket 03），所以不缩
+    /// 规矩同会后转写（`SentenceAssembly.droppingTextTwins`），最多 `maxFinalizeTwins` 个字。缩短补边会丢字（ticket 03），所以不缩
     private func replace(_ id: Int, with text: String) {
         guard !stopped, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let index = lines.firstIndex(where: { if case .sentence(let s) = $0 { s.id == id } else { false } }),
@@ -317,7 +321,8 @@ public final class LiveCaptionSession {
         if index > 0, case .sentence(var previous) = lines[index - 1], finalized.contains(previous.id),
            caption.start - previous.end < 2 * Self.finalizePadding {
             let trimmed = SentenceAssembly.droppingTextTwins(of: SegmentRecognition(text: previous.text, tokens: nil),
-                                                             before: SegmentRecognition(text: text, tokens: nil)).text
+                                                             before: SegmentRecognition(text: text, tokens: nil),
+                                                             limit: Self.maxFinalizeTwins).text
             // 前一句整句都是重复的字时不动，免得留下空行
             if trimmed != previous.text, trimmed.contains(where: { !$0.isPunctuation && !$0.isWhitespace }) {
                 previous.text = trimmed

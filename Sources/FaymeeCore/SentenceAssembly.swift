@@ -89,13 +89,13 @@ enum SentenceAssembly {
     /// 按文字去重时最多去掉几个字（补边重叠最多约 0.5 秒）
     static let maxTextTwins = 4
 
-    /// 前一段末尾与后一段开头相同的字（不分大小写，最多 `maxTextTwins` 个，取最长）从前一段去掉；逐字时间不留。
-    /// 实时字幕定稿的相邻两句也用它
-    static func droppingTextTwins(of first: SegmentRecognition, before second: SegmentRecognition)
-        -> SegmentRecognition {
+    /// 前一段末尾与后一段开头相同的字（不分大小写，最多 limit 个，取最长）从前一段去掉；逐字时间不留。
+    /// 实时字幕定稿的相邻两句也用它（重叠更长，limit 更大）
+    static func droppingTextTwins(of first: SegmentRecognition, before second: SegmentRecognition,
+                                  limit: Int = maxTextTwins) -> SegmentRecognition {
         let tail = units(first.text).filter(\.isContent).map { $0.character.lowercased() }
         let head = units(second.text).filter(\.isContent).map { $0.character.lowercased() }
-        for k in stride(from: min(maxTextTwins, tail.count, head.count), through: 1, by: -1)
+        for k in stride(from: min(limit, tail.count, head.count), through: 1, by: -1)
         where tail.suffix(k).elementsEqual(head.prefix(k)) {
             return keeping(tail.count - k, of: first, starts: nil)
         }
