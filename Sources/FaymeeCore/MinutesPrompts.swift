@@ -81,11 +81,12 @@ struct MeetingInfo {
     static let weekdayNames = ["日", "一", "二", "三", "四", "五", "六"]
 }
 
-/// 转写稿的一行：句子写成 `[s412 31:20] 文本`（用修改后的文字），合盖空白写成 `[合盖，未录到声音 10:00–13:00]`
+/// 转写稿的一行：句子写成 `[s412 31:20] 文本`（用修改后的文字），
+/// 空白写成 `[合盖，未录到声音 10:00–13:00]`（文字按空白的原因，见 `GapReason.title`）
 func inputLine(_ item: TranscriptItem) -> String {
     switch item {
     case let .sentence(s): "[\(s.id) \(formatDuration(s.start))] \(s.text)"
-    case let .gap(g): "[合盖，未录到声音 \(formatDuration(g.start))–\(formatDuration(g.end))]"
+    case let .gap(g): "[\(g.reason.title) \(formatDuration(g.start))–\(formatDuration(g.end))]"
     }
 }
 
@@ -112,7 +113,7 @@ func extractionSystemPrompt(_ template: MinutesTemplate, speakers: SpeakerLabels
 
     \(lineFormat(speakers))\
     转写稿由语音识别生成，可能有错别字和口语重复，请按意思理解。
-    “[合盖，未录到声音 …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。\(star)
+    \(GapReason.lidClosed.promptExplanation)\(star)
 
     要求：
     - 只写转写稿里确实说到的内容，不要编造，不要补充常识或猜测。

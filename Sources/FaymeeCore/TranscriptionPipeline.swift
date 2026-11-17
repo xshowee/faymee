@@ -523,7 +523,8 @@ private func wholeSecondNow() -> Date {
 
 extension Transcript {
     /// 把引擎输出的句子和会议的合盖空白合成转写稿。
-    /// 空白按分片位置换算到录音中的区间；中点落在空白里的句子丢弃（合盖时录音是静音，识别出的只能是噪声），
+    /// 空白按分片位置换算到录音中的区间；中点落在剔除句子的空白（`GapReason.dropsSpeech`）里的句子丢弃
+    /// （合盖时录音是静音，识别出的只能是噪声），
     /// 跨过空白边界的句子中点在外，保留。空白在录音里长度为 0（落在没录到的时段）时照样显示标记
     static func assemble(_ sentences: [TranscribedSentence], meeting: Meeting, engine: String,
                          hotwords: [String], createdAt: Date) -> Transcript {
@@ -537,7 +538,7 @@ extension Transcript {
         let kept = sentences.enumerated()
             .filter { _, s in
                 let mid = (s.start + s.end) / 2
-                return !gaps.contains { $0.start <= mid && mid < $0.end }
+                return !gaps.contains { $0.reason.dropsSpeech && $0.start <= mid && mid < $0.end }
             }
             .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
             .map(\.element)

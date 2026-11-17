@@ -89,6 +89,53 @@ public struct TranscriptGap: Hashable, Sendable {
     }
 }
 
+/// 空白的各个使用方怎么对待空白，都按空白的原因在这里决定，不各自假设“空白 = 没声音的洞”。
+/// 新增原因时只改这里（每条都是穷举的 switch，漏了编译不过）
+extension GapReason {
+    /// 空白行的文字（不含时间）。转写稿界面、复制全文、导出转写稿、纪要提示词都用它
+    public var title: String {
+        switch self {
+        case .lidClosed: "合盖，未录到声音"
+        }
+    }
+
+    /// 转写稿界面里空白行的图标（SF Symbols 名）
+    public var symbolName: String {
+        switch self {
+        case .lidClosed: "mic.slash"
+        }
+    }
+
+    /// 纪要提示词里对这种空白行的说明，接在“转写稿由语音识别生成……”之后
+    var promptExplanation: String {
+        switch self {
+        case .lidClosed: "“[\(title) …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。"
+        }
+    }
+
+    /// 这段录音什么都没录到（是静音）：识别出的句子、区分出的说话片段只能是噪声，剔除；
+    /// 会中标注的区间也不算落在其中的句子
+    public var dropsSpeech: Bool {
+        switch self {
+        case .lidClosed: true
+        }
+    }
+
+    /// 长会议分段时，优先在这种空白之后切开（中间没有声音，前后多半是两段内容）
+    var isPreferredSplitPoint: Bool {
+        switch self {
+        case .lidClosed: true
+        }
+    }
+
+    /// 播放位置落在空白里时，当前条目是空白行本身；为 false 时空白行不当当前条目，高亮其中的句子
+    var isPlaybackTarget: Bool {
+        switch self {
+        case .lidClosed: true
+        }
+    }
+}
+
 /// 文件中用 "kind" 区分条目：`{"kind": "sentence", ...}` / `{"kind": "gap", ...}`。
 /// 编解码手写，因为合成的枚举编码是 `{"sentence": {...}}`，也不会把 original 写成 null。
 /// 句子的 speaker、originalSpeaker 没有时不写
