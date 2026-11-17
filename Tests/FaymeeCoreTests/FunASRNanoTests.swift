@@ -30,8 +30,8 @@ struct FunASRNanoContractTests {
         let model = try #require(ModelCatalog.builtIn.model(id: LocalModel.funASRNano.id))
         let transcriber = SherpaOfflineTranscriber.funASRNano(model: model, vadModel: repoVADModel)
 
-        let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"),
-                                                         hotwords: ["登录模块", "支付模块"]) { _ in }
+        // 不给热词：关键词要靠模型自己认出来（热词路径见下面的预算测试）
+        let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }
 
         let text = sentences.map(\.text).joined()
         for phrase in ["登录模块", "支付模块", "对接接口", "推迟"] {
