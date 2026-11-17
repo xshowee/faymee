@@ -1,12 +1,12 @@
 import Foundation
 
-/// 模型的用途。设置里每个用途一个选择框
+/// 模型的用途（词汇表「用途」；类型名沿用 Role）。设置里每个用途一个选择框
 public enum ModelRole: String, CaseIterable, Sendable, Hashable {
     /// 会后转写
     case transcription
     /// 实时字幕
     case liveCaptions
-    /// 实时字幕定稿（第二遍，可以不用）
+    /// 实时字幕定稿（可以不用）
     case liveFinalize
     /// 纪要
     case minutes
@@ -102,7 +102,7 @@ public struct ModelParameters: Sendable, Hashable {
 public struct CatalogModel: Sendable, Equatable, Identifiable {
     /// 稳定标识，写进转写稿 / 纪要 / 说话人结果。下载类模型与 `LocalModel.id` 相同
     public let id: String
-    /// 能用在哪些用途。同一个模型可以有多个用途（如 Paraformer 既做会后转写也做定稿，共用文件）；
+    /// 能用在哪些用途。同一个模型可以有多个用途（如 Paraformer 既做会后转写也做实时字幕定稿，共用文件）；
     /// 辅助模型为空，不出现在任何选择框里
     public let roles: Set<ModelRole>
     public let family: ModelFamily
@@ -115,7 +115,7 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
     public let speed: String?
     /// 能力（转写类模型才有）
     public let capabilities: ModelCapabilities?
-    /// 一句评估结论；不同用途可能不同（如 Fun-ASR-Nano 做定稿时要提醒内存）
+    /// 一句评估结论；不同用途可能不同（如 Fun-ASR-Nano 做实时字幕定稿时要提醒内存）
     public let verdicts: [ModelRole: String]
     public let parameters: ModelParameters
     /// 依赖的辅助模型的 id（随这个模型一起下载）
@@ -207,7 +207,7 @@ extension ModelCatalog {
 
     /// 本期目录。评估数据见 .scratch/model-catalog/eval/（不在仓库里）；数字来自 2026-11-17/18 的评估
     public static let builtIn = ModelCatalog(models: [
-        // MARK: 会后转写 / 实时字幕 / 定稿
+        // MARK: 会后转写 / 实时字幕 / 实时字幕定稿
         CatalogModel(
             id: LocalModel.funASRNano.id, roles: [.transcription, .liveFinalize], family: .sherpaFunASRNano,
             source: .download(.funASRNano), name: "Fun-ASR-Nano",
@@ -215,7 +215,8 @@ extension ModelCatalog {
             capabilities: ModelCapabilities(punctuation: true, wordTimings: .estimated, hotwords: true),
             verdicts: [
                 .transcription: "最准，专业词和英文最好，热词有效",
-                .liveFinalize: "更准；占约 2 GB 内存，每句定稿约晚 1 秒；8 GB 内存的机器或同时录屏时不建议",
+                // 实测（ticket 08）：会中常驻约 2 GB，约占一个 CPU 核的 30%，每句约 1 秒后替换
+                .liveFinalize: "更准；占约 2 GB 内存、约三成的一个 CPU 核，每句晚约 1 秒替换；8 GB 内存的机器或同时录屏时不建议",
             ],
             parameters: ModelParameters(contextTokens: 512, hotwordTokenBudget: 150),
             dependencies: [sileroVADID], license: "Apache-2.0"),
@@ -251,6 +252,8 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.xASR480.id, roles: [.liveCaptions], family: .sherpaOnlineTransducer,
             source: .download(.xASR480), name: "X-ASR 480ms",
+            // 实测（ticket 07）：内存约 0.22 GB；20 分钟音频 28–41 秒算完（实时送入时只占一小部分 CPU）
+            memory: "约 0.2 GB", speed: "20 分钟音频 28–41 秒",
             // 实时字幕不用热词（beam search 定稿太晚，见 SherpaStreamingTranscriber）
             capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: false),
             verdicts: [.liveCaptions: "比 SpeechAnalyzer 准；480ms 更跟手"],
@@ -258,6 +261,7 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.xASR960.id, roles: [.liveCaptions], family: .sherpaOnlineTransducer,
             source: .download(.xASR960), name: "X-ASR 960ms",
+            memory: "约 0.2 GB", speed: "20 分钟音频 28–41 秒",
             capabilities: ModelCapabilities(punctuation: true, wordTimings: .real, hotwords: false),
             verdicts: [.liveCaptions: "比 SpeechAnalyzer 准；比 480ms 略准、更省 CPU，字幕稍慢"],
             license: "Apache-2.0"),
@@ -277,6 +281,8 @@ extension ModelCatalog {
             id: eres2netBaseID, roles: [.voiceprint], family: .sherpaSpeakerEmbedding,
             source: .bundled(directory: "Diarization", fileName: SherpaOnnxDiarizer.embeddingModel.path),
             name: "ERes2Net base（中文）",
+            // 实测（v0.4 ticket 13，M3 Pro）：20 分钟会议 14 秒、56 分钟 33 秒（含解码录音）；内存没单独测
+            speed: "20 分钟会议约 15 秒",
             verdicts: [.voiceprint: "已打进 App，不用下载"],
             parameters: ModelParameters(matchThreshold: SherpaOnnxDiarizer.recommendedMatchThreshold),
             license: "Apache-2.0"),

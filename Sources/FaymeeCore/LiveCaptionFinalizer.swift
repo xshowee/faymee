@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 /// 实时字幕定稿用的模型：设置里“实时字幕定稿”选中的整段模型（Paraformer、Fun-ASR-Nano）。
-/// 实时字幕会话开始时在后台建一个识别器，会话结束时释放；流式引擎每定稿一句，就把这一句的音频交给它重转
+/// 实时字幕会话开始时在后台建一个识别器，会话结束时释放；流式引擎每确定一句，就把这一句的音频交给它重转
 public struct LiveCaptionFinalizerModel: Sendable {
     /// 目录项 id
     public let id: String
@@ -14,7 +14,7 @@ public struct LiveCaptionFinalizerModel: Sendable {
         self.makeRecognizer = makeRecognizer
     }
 
-    /// 定稿每个模型的推理线程数。和流式引擎（2 线程）、录音同时跑，不多占核
+    /// 实时字幕定稿每个模型的推理线程数。和流式引擎（2 线程）、录音同时跑，不多占核
     static let threads = 2
 
     /// 所选的定稿模型；“不用”、不是能定稿的模型，或模型（含标点模型等依赖）没下载完时为 nil（不定稿）。
@@ -36,7 +36,7 @@ public struct LiveCaptionFinalizerModel: Sendable {
     }
 }
 
-/// 定稿的工作线程：建好识别器后逐句重转，结果从 `results` 按句子 id 交出。
+/// 实时字幕定稿的工作线程：建好识别器后逐句重转，结果从 `results` 按句子 id 交出。
 ///
 /// - 一个专用线程，同一时间只识别一句。识别比说话慢时请求排队，排队超过 `backlog` 句丢最旧的（那句保留流式结果）
 /// - 超过 10 秒的句子按 `SpeechSegmentation` 的规矩在安静处切成 ≤ 10 秒的几段分别识别再接起来

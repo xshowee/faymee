@@ -62,7 +62,7 @@ public enum LiveCaptionStatus: Hashable, Sendable {
 /// 结束旧的转写（让它吐完剩下的定稿句子）、开新的，字幕接着显示，不插分隔行
 ///
 /// 选了定稿模型（`finalizer`）时，会话创建时在后台加载它、录音结束（`stop`）时释放，暂停期间也留着
-/// （大模型反复加载慢）。留着最近约 1 分钟的音频；引擎每定稿一句，把这一句前后各多 0.3 秒的音频交给它重转，
+/// （大模型反复加载慢）。留着最近约 1 分钟的音频；引擎每确定一句，把这一句前后各多 0.3 秒的音频交给它重转，
 /// 面板先显示流式结果，重转完再替换成它的文字。重转是逐句排队的，跟不上时丢最旧的请求、那句保留流式结果；
 /// 暂停、出错时丢掉排队的请求和缓存的音频
 @MainActor @Observable
@@ -110,7 +110,7 @@ public final class LiveCaptionSession {
     @ObservationIgnored private var currentStartedAt: Date?
     @ObservationIgnored private var failedAt: Date?
     @ObservationIgnored private var stopped = false
-    /// 定稿（第二遍）；没选定稿模型时为 nil
+    /// 实时字幕定稿；没选定稿模型时为 nil
     @ObservationIgnored private let finalizer: SentenceFinalizer?
     /// 最近的音频，切出句子交给定稿。只在有定稿时记
     @ObservationIgnored private var audio = RecentAudio()

@@ -165,7 +165,7 @@ final class AppModel {
         transcription.activeID != nil ? "正在转写或区分说话人，结束后才能删除模型" : nil
     }
 
-    /// 会后转写、字幕定稿选择框里的模型现在不能删的原因。Paraformer、Fun-ASR-Nano 两个用途共用同一份模型文件，
+    /// 会后转写、实时字幕定稿选择框里的模型现在不能删的原因。Paraformer、Fun-ASR-Nano 两个用途共用同一份模型文件，
     /// 哪边在用都不能删：正在转写（同上），或本场录音的实时字幕定稿正拿着它（删到一半同样会让 sherpa-onnx 退出进程）
     func asrModelDeleteBlockedReason(_ m: CatalogModel) -> String? {
         if liveFinalizeModelID == m.id { return "本场录音的实时字幕定稿正在用它，录音结束后才能删除" }
