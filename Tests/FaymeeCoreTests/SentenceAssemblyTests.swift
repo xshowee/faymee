@@ -103,6 +103,86 @@ import Testing
         expectSentences(SentenceAssembly.sentences([(seg, result)]), [(0, 1.6, "好的。"), (1.6, 4, "明白了")])
     }
 
+    // MARK: 段边界的重复字
+
+    /// VAD 强行断开的两段只隔约 0.07 秒，补边让两段的音频重叠约 0.5 秒，重叠处的字两段各识别一遍
+    /// （真实会议：「…我这里」「我这里自己搞」，同字的开始时间相差不到 0.2 秒）。按逐字时间认出来，
+    /// 去掉前一段的（它在段尾被截断，后一段对这块有完整的上下文）
+    private let first = SpeechSegment(audio: 0..<85_920, speech: 0..<81_120) // 音频 0–5.37，说话 0–5.07
+    private let second = SpeechSegment(audio: 76_320..<144_000, speech: 82_240..<139_200) // 音频 4.77–9，说话 5.14–8.7
+
+    @Test func 补边重叠处两段都识别出的字只留后一段的() {
+        let results = [
+            (first, SegmentRecognition(text: "我们看一下，我这里。", tokens: timed([
+                ("我", 3.0), ("们", 3.2), ("看", 3.4), ("一", 3.6), ("下", 3.8), ("我", 4.85), ("这", 4.95), ("里", 5.05),
+            ]))),
+            (second, SegmentRecognition(text: "我这里自己搞。", tokens: timed([
+                ("我", 0.15), ("这", 0.25), ("里", 0.37), ("自", 0.6), ("己", 0.8), ("搞", 1.0),
+            ]))),
+        ]
+
+        // 「，」去掉，原文结尾的「。」接上
+        expectSentences(SentenceAssembly.sentences(results), [(3.0, 5.07, "我们看一下。"), (5.14, 8.7, "我这里自己搞。")])
+    }
+
+    @Test func 前一段末尾被截断的字也一起去掉_句末标点保留() {
+        // 前一段「…。到时候会总」，后一段「到时候会准备」：「总」是被截断的「准」
+        let results = [
+            (first, SegmentRecognition(text: "我们看一下。到时候会总", tokens: timed([
+                ("我", 3.0), ("们", 3.2), ("看", 3.4), ("一", 3.6), ("下", 3.8),
+                ("到", 4.6), ("时", 4.75), ("候", 4.85), ("会", 4.95), ("总", 5.05),
+            ]))),
+            (second, SegmentRecognition(text: "到时候会准备", tokens: timed([
+                ("到", 0.0), ("时", 0.08), ("候", 0.18), ("会", 0.28), ("准", 0.38), ("备", 0.5),
+            ]))),
+        ]
+
+        expectSentences(SentenceAssembly.sentences(results), [(3.0, 5.07, "我们看一下。"), (5.14, 8.7, "到时候会准备")])
+    }
+
+    @Test func 英文子词按字对上() {
+        let results = [
+            (first, SegmentRecognition(text: "我们调 agent", tokens: timed([
+                ("我", 3.0), ("们", 3.2), ("调", 4.5), ("ag@@", 4.9), ("ent", 5.05),
+            ]))),
+            (second, SegmentRecognition(text: "agent 调工具", tokens: timed([
+                ("a@@", 0.2), ("gent", 0.3), ("调", 0.6), ("工", 0.8), ("具", 1.0),
+            ]))),
+        ]
+
+        expectSentences(SentenceAssembly.sentences(results), [(3.0, 5.07, "我们调"), (5.14, 8.7, "agent 调工具")])
+    }
+
+    @Test func 没有同字同时间的孪生就不去掉() {
+        let results = [
+            // 「对」在后一段开头没有；「好」在后一段也有，但开始时间差 0.4 秒（真的说了两遍）
+            (first, SegmentRecognition(text: "嗯对，好", tokens: timed([("嗯", 4.0), ("对", 4.6), ("好", 4.9)]))),
+            (second, SegmentRecognition(text: "可以，好。", tokens: timed([("可", 0.1), ("以", 0.25), ("好", 0.53)]))),
+        ]
+
+        expectSentences(SentenceAssembly.sentences(results), [(4.0, 5.07, "嗯对，好"), (5.14, 8.7, "可以，好。")])
+    }
+
+    @Test func 前一段整段都是重复时不出句子() {
+        let results = [
+            (first, SegmentRecognition(text: "还有", tokens: timed([("还", 4.9), ("有", 5.05)]))),
+            (second, SegmentRecognition(text: "还有年底了。", tokens: timed([
+                ("还", 0.2), ("有", 0.33), ("年", 0.5), ("底", 0.7), ("了", 0.9),
+            ]))),
+        ]
+
+        expectSentences(SentenceAssembly.sentences(results), [(5.14, 8.7, "还有年底了。")])
+    }
+
+    @Test func 没有逐字时间的模型不去重() {
+        let results = [
+            (first, SegmentRecognition(text: "我们看一下我这里", tokens: nil)),
+            (second, SegmentRecognition(text: "我这里自己搞。", tokens: nil)),
+        ]
+
+        #expect(SentenceAssembly.sentences(results).map(\.text) == ["我们看一下我这里", "我这里自己搞。"])
+    }
+
     @Test func 空结果和只有标点的结果不出句子() {
         let seg = segment(audio: 0..<4, speech: 0..<4)
 

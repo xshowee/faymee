@@ -36,9 +36,77 @@ public struct SegmentRecognition: Hashable, Sendable {
 ///   只按句末标点断句
 /// - 没有真实逐字时间：每个字（不算标点和空白）在说话部分里等分时间，同样只按句末标点断句
 /// - 标点不占时间：接在前一个字的结尾
+/// - 有真实逐字时间时去掉段边界的重复字（见 `droppingOverlapDuplicates`）
 enum SentenceAssembly {
-    static func sentences(_ results: [(segment: SpeechSegment, recognition: SegmentRecognition)]) -> [TranscribedSentence] {
-        results.flatMap { sentences(in: $0.segment, $0.recognition) }
+    typealias Result = (segment: SpeechSegment, recognition: SegmentRecognition)
+
+    static func sentences(_ results: [Result]) -> [TranscribedSentence] {
+        droppingOverlapDuplicates(results).flatMap { sentences(in: $0.segment, $0.recognition) }
+    }
+
+    /// 两段里“同一个字”的开始时间最多差多少（真实会议里 Paraformer 的重复字相差 0.01–0.17 秒）
+    static let twinTolerance: TimeInterval = 0.2
+
+    /// 段边界的重复字：补边让相邻两段的音频重叠（VAD 强行断开的两段只隔约 0.07 秒，各补 0.3 秒），
+    /// 重叠处的字两段各识别一遍（真实会议：「…我这里」「我这里自己搞」）。补边不能收窄：Paraformer 在被截断的段边上
+    /// 会丢字，补边重叠时后一段还能认出来。
+    ///
+    /// 做法：前一段末尾从后一段音频开头（再早 `twinTolerance`）起的字里，找第一个在后一段开头（前一段音频结束前）
+    /// 有“孪生”的字——同一个字、开始时间相差不超过 `twinTolerance`；从它起去掉前一段剩下的字（前一段在这里被截断，
+    /// 末尾常是半个字，如「到时候会总」对「到时候会准备」；后一段对这块有完整的上下文）。
+    /// 去掉后留在末尾的非句末标点（逗号等）一起去掉。两段都要有能对上文字的逐字时间，否则不动
+    static func droppingOverlapDuplicates(_ results: [Result]) -> [Result] {
+        let rate = Double(SpeechSegmentation.sampleRate)
+        var out = results
+        for i in out.indices.dropLast() {
+            let a = out[i], b = out[i + 1]
+            guard a.segment.audio.upperBound > b.segment.audio.lowerBound,
+                  let tail = timedCharacters(a), let head = timedCharacters(b) else { continue }
+            let bStart = Double(b.segment.audio.lowerBound) / rate
+            let aEnd = Double(a.segment.audio.upperBound) / rate
+            let candidates = head.filter { $0.start < aEnd }
+            guard let cut = tail.firstIndex(where: { c in
+                c.start >= bStart - twinTolerance
+                    && candidates.contains { $0.character == c.character && abs($0.start - c.start) <= twinTolerance }
+            }) else { continue }
+            let offset = Double(a.segment.audio.lowerBound) / rate
+            out[i].recognition = keeping(cut, of: a.recognition, starts: tail.map { $0.start - offset })
+        }
+        return out
+    }
+
+    /// 文字里每个字（不算标点和空白，小写）和它的开始时间（相对录音开头）；没有逐字时间或对不上时为 nil
+    private static func timedCharacters(_ result: Result) -> [(character: String, start: TimeInterval)]? {
+        let content = units(result.recognition.text).filter(\.isContent).map(\.character)
+        guard let tokens = result.recognition.tokens, !content.isEmpty,
+              let starts = align(content, to: tokens) else { return nil }
+        let offset = Double(result.segment.audio.lowerBound) / Double(SpeechSegmentation.sampleRate)
+        return zip(content, starts).map { ($0.lowercased(), offset + $1) }
+    }
+
+    /// 只留前 `count` 个字（和它们之间的标点、空白），末尾的非句末标点去掉；原文以句末标点结尾而留下的部分没有，
+    /// 把它接上（「我这里，我这里。」→「我这里。」）。逐字时间换成每字一个
+    private static func keeping(_ count: Int, of result: SegmentRecognition, starts: [TimeInterval]) -> SegmentRecognition {
+        let all = units(result.text)
+        var kept: [(text: String, character: Character, isContent: Bool)] = []
+        var n = 0
+        for unit in all {
+            if unit.isContent {
+                guard n < count else { break }
+                n += 1
+            }
+            kept.append(unit)
+        }
+        while let last = kept.last, !last.isContent, !SentenceSplitter.terminators.contains(last.character) {
+            kept.removeLast()
+        }
+        if let end = all.last, !end.isContent, SentenceSplitter.terminators.contains(end.character),
+           let last = kept.last, last.isContent {
+            kept.append(end)
+        }
+        let characters = kept.filter(\.isContent)
+        return SegmentRecognition(text: kept.map(\.text).joined(),
+                                  tokens: zip(characters, starts).map { .init(text: String($0.character), start: $1) })
     }
 
     private static func sentences(in segment: SpeechSegment, _ result: SegmentRecognition) -> [TranscribedSentence] {

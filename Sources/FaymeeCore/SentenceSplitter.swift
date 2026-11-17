@@ -19,7 +19,7 @@ enum SentenceSplitter {
     /// 由“长字”推断的停顿，只在已有这么多字后才断，避免切出「第二件事」这类碎片
     static let minCharacters = 6
 
-    private static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
+    static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
 
     /// 开引号、开括号这类属于后面的话的标点（Unicode 的 Ps、Pi 类：“ ‘ （ 《 「 【 ( [ 等）
     private static func isOpening(_ c: Character) -> Bool {
