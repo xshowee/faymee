@@ -63,7 +63,15 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if online.transcriptionMode == .local {
-                    Text("全程在本机转写，录音不离开这台 Mac")
+                    ModelPicker(role: .transcription, title: "转写模型",
+                                deleteBlockedReason: { _ in model.transcriptionModelDeleteBlockedReason })
+                    if model.modelSelections.selected(for: .transcription)?.family == .speechAnalyzer {
+                        // 已有安装升级后默认还用 SpeechAnalyzer：只提示，不弹窗
+                        Label("有更准的本机模型可以下载", systemImage: "sparkles")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("全程在本机转写，录音不离开这台 Mac。换模型后从下一场起生效，正在转写的照常转完；所选模型没下载完时，录完的会议排队等下载")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -356,9 +364,14 @@ private struct OnlineEndpointFields<Provider: OnlineProviderOption>: View {
 }
 
 /// 模型的状态、进度和操作按钮。设置里显示完整状态并可以取消；
-/// 详情页（纪要在等模型时）只显示一句说明和下一步该点的按钮
+/// 详情页（纪要、转写等任务在等模型时）只显示一句说明和下一步该点的按钮
 struct ModelDownloadControls: View {
-    enum Style { case settings, minutes }
+    enum Style: Equatable {
+        case settings
+        case minutes
+        /// 某个任务在等这个模型，参数是什么模型（如“转写”“声纹”），说明写成“等待下载转写模型”
+        case waiting(String)
+    }
 
     @Environment(AppModel.self) private var model
     var style: Style
@@ -379,7 +392,7 @@ struct ModelDownloadControls: View {
             default:
                 EmptyView()
             }
-            Text(style == .settings ? status.text : status.minutesText)
+            Text(text(status))
                 .monospacedDigit()
                 .foregroundStyle(status.phase.isFailed ? Color.orange : Color.secondary)
                 .lineLimit(2)
@@ -400,6 +413,16 @@ struct ModelDownloadControls: View {
                 Button("取消") { Task { await downloader.cancel() } }
                     .help("停止下载并删掉已下载的部分")
             }
+        }
+    }
+}
+
+extension ModelDownloadControls {
+    private func text(_ status: ModelDownloadStatus) -> String {
+        switch style {
+        case .settings: status.text
+        case .minutes: status.minutesText
+        case let .waiting(purpose): status.waitText(for: purpose)
         }
     }
 }

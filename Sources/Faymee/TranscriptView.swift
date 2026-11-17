@@ -414,7 +414,12 @@ struct TranscriptSection: View {
         let status = TranscriptionStatus(state: meeting.transcription,
                                          activity: model.transcription.activity(for: meeting.id),
                                          waitReason: model.transcription.waitReason(for: meeting.id))
-        if let text = status.text {
+        if case let .queued(.modelDownload(id)) = status,
+           let entry = model.modelSelections.catalog.model(id: id),
+           let downloader = model.modelDownloads.downloader(for: entry) {
+            // 不静默下载：说明要下多大的模型，用户点“下载”才开始；下好后自动开始转写
+            ModelDownloadControls(style: .waiting("转写"), downloader: downloader)
+        } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)
             } else if case .failed = status {

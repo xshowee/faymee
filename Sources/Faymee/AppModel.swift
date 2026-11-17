@@ -160,6 +160,11 @@ final class AppModel {
         return nil
     }
 
+    /// 会后转写模型现在不能删的原因：正在转写时引擎还要读模型文件（读到一半的模型会让 sherpa-onnx 直接退出进程）
+    var transcriptionModelDeleteBlockedReason: String? {
+        transcription.activeID != nil ? "正在转写或区分说话人，结束后才能删除模型" : nil
+    }
+
     /// 用所选声纹模型重算声纹库；所选模型还不能用（没下载）时什么都不做
     func recomputeVoiceprints() {
         guard let extractor = voiceprintModel.makeExtractor() else { return }

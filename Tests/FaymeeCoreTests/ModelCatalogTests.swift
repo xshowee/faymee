@@ -154,6 +154,15 @@ import Testing
         defaults.removePersistentDomain(forName: suite)
     }
 
+    @Test func 已存的转写选择不被默认值覆盖_没有会议也一样() {
+        // 已有安装升级时存下了 SpeechAnalyzer；之后会议都删光了（看起来像新安装）也不改成 Fun-ASR-Nano
+        defaults.set("apple/speechanalyzer", forKey: ModelSelections.key(for: .transcription))
+        #expect(make(existing: false).selectedID(for: .transcription) == "apple/speechanalyzer")
+        defaults.set("sherpa-onnx/paraformer-zh-2023-09-14", forKey: ModelSelections.key(for: .transcription))
+        #expect(make(existing: true).selectedID(for: .transcription) == "sherpa-onnx/paraformer-zh-2023-09-14")
+        defaults.removePersistentDomain(forName: suite)
+    }
+
     @Test func 已有安装_转写保持SpeechAnalyzer() {
         #expect(make(existing: true).selectedID(for: .transcription) == "apple/speechanalyzer")
         defaults.removePersistentDomain(forName: suite)
