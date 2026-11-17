@@ -169,6 +169,7 @@ final class AppModel {
     private(set) var liveCaptions: LiveCaptions? {
         didSet {
             recorder.liveTap = liveCaptions?.tap
+            systemSound.liveTap = liveCaptions?.systemSoundTap
             livePanel.captions = liveCaptions
         }
     }

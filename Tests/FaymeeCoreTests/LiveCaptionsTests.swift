@@ -165,6 +165,51 @@ private final class Fixture {
         #expect(!f.captions.needsPumping)
     }
 
+    /// 录音中打开、关掉、再打开系统声音：仍是同一次转写，不插分隔行；开着时送进引擎的是两路混在一起的
+    @Test func 中途开关系统声音_系统声音混进同一次转写_不插分隔行() async throws {
+        let f = Fixture()
+        f.captions.isWanted = true
+        let session = try #require(f.captions.session)
+        try await f.until { session.status == .running }
+        f.captions.pump()
+        #expect(f.captions.tap.isEnabled && f.captions.systemSoundTap.isEnabled)
+
+        let stereo = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+        for i in 0..<30 {
+            let end = t0.addingTimeInterval(Double(i + 1) / 10)
+            f.captions.tap.push(chunk(), at: end)
+            // 1–2 秒关着系统声音
+            if !(10..<20).contains(i) {
+                let sound = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: 4800)!
+                sound.frameLength = 4800
+                for c in 0..<2 { for j in 0..<4800 { sound.floatChannelData![c][j] = 0.5 } }
+                f.captions.systemSoundTap.push(sound, at: end)
+            }
+            f.captions.pump()
+        }
+
+        #expect(f.engine.sessions.count == 1)
+        #expect(f.engine.last.appended == 30)
+        #expect(f.engine.last.appendedPeaks == (0..<30).map { (10..<20).contains($0) ? 0 : 0.5 })
+        #expect(session.lines.isEmpty)
+    }
+
+    /// 暂停时两路都不复制，恢复后不会把暂停前没混的系统声音混进来
+    @Test func 暂停和结束时两路都不复制() async throws {
+        let f = Fixture()
+        f.captions.isWanted = true
+        let session = try #require(f.captions.session)
+        try await f.until { session.status == .running }
+        f.captions.pump()
+        f.captions.isWanted = false
+        #expect(!f.captions.systemSoundTap.isEnabled)
+        f.captions.isWanted = true
+        f.captions.pump()
+        #expect(f.captions.systemSoundTap.isEnabled)
+        f.captions.stop()
+        #expect(!f.captions.systemSoundTap.isEnabled)
+    }
+
     /// 录音时面板一直没开，停止录音后也不该凭空创建会话
     @Test func 没显示过面板就结束录音_不创建会话() {
         let f = Fixture()

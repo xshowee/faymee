@@ -38,6 +38,13 @@ final class SystemSoundCapture {
     private let opened = OpenedSegments()
     private let watch = DeviceWatch()
     private let level = SystemSoundLevel()
+    private let live = LiveTapSlot()
+
+    /// 实时字幕的系统声音分路，每块音频写盘之后交一份。可以在采集中途设，重建采集后照常往同一个分路送
+    var liveTap: LiveAudioTap? {
+        get { live.tap }
+        set { live.tap = newValue }
+    }
 
     var isRunning: Bool { procID != nil }
 
@@ -103,6 +110,7 @@ final class SystemSoundCapture {
 
         // host time 只在同一次采集内有效：每次（重新）建立都按此刻重新锚定
         let opened = opened
+        let live = live
         let writer = SystemSoundWriter(directory: directory, clock: .system(),
                                        onSegment: { segment in
                                            opened.append(segment)
@@ -117,6 +125,11 @@ final class SystemSoundCapture {
             let hostTime = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : mach_absolute_time()
             writer.push(inputData, format: format, hostTime: hostTime)
             level.record(inputData, format: format)
+            // 写盘之后再分给实时字幕（分路自己拷贝、限长）。时刻取收到的时刻，同麦克风
+            if let tap = live.tap,
+               let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inputData, deallocator: nil) {
+                tap.push(buffer, at: Date())
+            }
         })
         try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
         watchDevice(format: asbd)
@@ -248,5 +261,16 @@ private final class DeviceWatch: @unchecked Sendable {
             AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
         }
         registered = []
+    }
+}
+
+/// 实时字幕的分路：主线程设、IOProc 线程读
+private final class LiveTapSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: LiveAudioTap?
+
+    var tap: LiveAudioTap? {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
     }
 }
