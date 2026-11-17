@@ -85,7 +85,8 @@ public enum SystemSoundSwitchOn: Equatable, Sendable {
 public struct SystemSoundAvailability: Equatable, Sendable {
     /// 不可用时定时重试的间隔
     public static let retryInterval: TimeInterval = 10
-    /// 设备变化触发的重试与上次尝试至少隔开这么久：私有聚合设备建了又拆本身就会触发设备列表变化
+    /// 设备变化触发的重试、tap 格式变化触发的重建，与上次尝试至少隔开这么久：私有聚合设备建了又拆本身就会触发
+    /// 设备列表变化，新建的 tap 也可能马上又报格式变化
     public static let minimumRetrySpacing: TimeInterval = 2
 
     /// nil 表示可用（或还没开始）
@@ -99,6 +100,8 @@ public struct SystemSoundAvailability: Equatable, Sendable {
     private var noticeGiven = false
     /// 设备失效后在马上重建，结果出来之前先不提醒
     private var noticeHeld = false
+    /// tap 格式变了、还没重建（离上次尝试太近，等定时检查补一次）
+    private var formatRebuildPending = false
 
     public init() {}
 
@@ -108,6 +111,8 @@ public struct SystemSoundAvailability: Equatable, Sendable {
     /// 否则返回 true，调用方去建，再报 `started()` 或 `startFailed()`
     public mutating func shouldStart(authorization: SystemSoundAuthorization, at date: Date) -> Bool {
         lastAttempt = date
+        // 每次建立都按当时的格式读，格式变化等着补的重建不用再做
+        formatRebuildPending = false
         guard authorization != .denied else {
             unavailableReason = .notAuthorized
             awaitsAuthorization = false
@@ -167,5 +172,20 @@ public struct SystemSoundAvailability: Equatable, Sendable {
         guard let unavailableReason, unavailableReason.retries, let lastAttempt else { return false }
         let since = date.timeIntervalSince(lastAttempt)
         return since >= (deviceChanged ? Self.minimumRetrySpacing : Self.retryInterval)
+    }
+
+    /// 采集在跑时 tap 的格式变了。离上次尝试已隔开最小间隔就返回 true，调用方马上重建；
+    /// 否则记下、返回 false，由定时检查 `isFormatRebuildDue` 到时补一次（连着变几次也只补一次）。
+    /// 不能干脆丢掉：格式监听只在变化时通知，丢了就一直按旧格式解读数据
+    public mutating func formatChanged(at date: Date) -> Bool {
+        let rebuildsNow = lastAttempt.map { date.timeIntervalSince($0) >= Self.minimumRetrySpacing } ?? true
+        formatRebuildPending = !rebuildsNow
+        return rebuildsNow
+    }
+
+    /// 有格式变化等着补重建，且离上次尝试已隔开最小间隔
+    public func isFormatRebuildDue(at date: Date) -> Bool {
+        guard formatRebuildPending, let lastAttempt else { return false }
+        return date.timeIntervalSince(lastAttempt) >= Self.minimumRetrySpacing
     }
 }

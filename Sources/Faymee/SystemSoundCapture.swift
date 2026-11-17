@@ -55,7 +55,8 @@ final class SystemSoundCapture {
     /// 采集已经录不到了，调用方停掉它、按“运行中出错”重建
     var onDeviceLost: (@MainActor () -> Void)?
     /// tap 的格式变了（建立时只读一次格式，之后按它解读回调的数据），在主线程调用。
-    /// 实测切换输出设备时格式不变；万一变了，调用方重建采集，不算不可用
+    /// 实测切换输出设备时格式不变；万一变了，调用方重建采集（限频，见 `SystemSoundAvailability.formatChanged`），
+    /// 不算不可用
     var onFormatChanged: (@MainActor () -> Void)?
 
     /// 开始采集，分片写进 directory。建不起来时抛错，已经建好的部分都拆掉

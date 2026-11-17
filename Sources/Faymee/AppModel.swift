@@ -255,7 +255,7 @@ final class AppModel {
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
         systemSound.onDeviceLost = { [weak self] in self?.systemSoundDeviceLost() }
-        systemSound.onFormatChanged = { [weak self] in self?.restartSystemSoundCapture() }
+        systemSound.onFormatChanged = { [weak self] in self?.systemSoundFormatChanged() }
         // 睡眠期间 host time 不走而墙钟在走，唤醒后接着用原来的换算会把系统声音摆早：重建采集和时钟换算
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                                           queue: .main) { [weak self] _ in
@@ -446,12 +446,24 @@ final class AppModel {
         if stopSystemSoundCapture(into: &m) { update(m) }
     }
 
-    /// 唤醒后、格式变了时重建采集：时钟换算按此刻重新锚定，分片接着编号
+    /// 唤醒后、格式变了时重建采集：时钟换算按此刻重新锚定，分片接着编号。唤醒后总是重建，不限频
     private func restartSystemSoundCapture() {
         guard let m = current, m.isSystemSoundPeriodOpen else { return }
         stopSystemSoundCaptureKeepingSegments()
         let date = Date()
         updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
+    }
+
+    /// tap 格式变了：离上次建立够久就马上重建，否则等 tick 到时补一次（限频，连着变几次只重建一次）
+    private func systemSoundFormatChanged() {
+        guard systemSound.isRunning, systemSoundAvailability.formatChanged(at: Date()) else { return }
+        restartSystemSoundCapture()
+    }
+
+    /// 补上之前因为离上次建立太近而推迟的、格式变化触发的重建
+    private func rebuildSystemSoundIfFormatChanged() {
+        guard systemSound.isRunning, systemSoundAvailability.isFormatRebuildDue(at: Date()) else { return }
+        restartSystemSoundCapture()
     }
 
     /// 运行中聚合设备失效：从失效时刻开一段不可用时段，停掉采集，能重试就马上重建一次。
@@ -545,6 +557,7 @@ final class AppModel {
         checkLid()
         recheckSystemSoundAuthorization()
         retrySystemSoundIfDue(deviceChanged: false)
+        rebuildSystemSoundIfFormatChanged()
 
         // 开着系统声音时两路都没声音才算；合盖导致的无声由 checkLid 处理，不重复提醒；看不到屏幕时先不发
         let now = Date()

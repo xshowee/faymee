@@ -203,4 +203,55 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
         #expect(!rebuildsNow)
         #expect(a.takeNotice() == .deviceLost)
     }
+
+    // MARK: - tap 格式变化
+
+    @Test func 格式变了且离上次建立够久就马上重建() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let rebuildsNow = a.formatChanged(at: at(60))
+        #expect(rebuildsNow)
+    }
+
+    /// 刚建好格式就又变（比如新建的 tap 又报一次变化）：不马上重建，免得一直重建；到了最小间隔补一次
+    @Test func 刚建好格式又变时先记下_隔够了补一次() {
+        let spacing = SystemSoundAvailability.minimumRetrySpacing
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let rebuildsNow = a.formatChanged(at: at(0.5))
+        #expect(!rebuildsNow)
+        #expect(!a.isFormatRebuildDue(at: at(spacing - 0.1)))
+        #expect(a.isFormatRebuildDue(at: at(spacing)))
+    }
+
+    @Test func 格式连着变几次只补一次重建() {
+        let spacing = SystemSoundAvailability.minimumRetrySpacing
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let first = a.formatChanged(at: at(0.2))
+        #expect(!first)
+        let second = a.formatChanged(at: at(0.6))
+        #expect(!second)
+        let third = a.formatChanged(at: at(1.0))
+        #expect(!third)
+        #expect(a.isFormatRebuildDue(at: at(spacing)))
+        _ = a.shouldStart(authorization: .authorized, at: at(spacing))
+        a.started()
+        #expect(!a.isFormatRebuildDue(at: at(spacing * 10)))
+    }
+
+    /// 等着补的重建之前，因为别的原因（唤醒、重试）已经重建过：新建的按当时的格式读，不用再补
+    @Test func 别的原因重建过就不再补格式变化的重建() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let rebuildsNow = a.formatChanged(at: at(0.5))
+        #expect(!rebuildsNow)
+        _ = a.shouldStart(authorization: .authorized, at: at(1))
+        a.started()
+        #expect(!a.isFormatRebuildDue(at: at(60)))
+    }
 }
