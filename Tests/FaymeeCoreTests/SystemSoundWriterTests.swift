@@ -37,8 +37,8 @@ private final class Harness: @unchecked Sendable {
     var segments: [SystemSoundWriter.Segment] { lock.withLock { _segments } }
     var errors: [String] { lock.withLock { _errors } }
 
-    func writer(directory: URL? = nil, segmentSeconds: TimeInterval = 60) -> SystemSoundWriter {
-        SystemSoundWriter(directory: directory ?? self.directory, clock: clock, segmentSeconds: segmentSeconds,
+    func writer(segmentSeconds: TimeInterval = 60) -> SystemSoundWriter {
+        SystemSoundWriter(directory: directory, clock: clock, segmentSeconds: segmentSeconds,
                           onSegment: { [self] s in lock.withLock { _segments.append(s) } },
                           onError: { [self] e in lock.withLock { _errors.append(e) } })
     }
@@ -126,6 +126,23 @@ private final class Harness: @unchecked Sendable {
         ])
         #expect(try h.samples("0001.caf") == Array(repeating: 0.5, count: 800))
         #expect(try h.samples("0002.caf") == Array(repeating: 0.25, count: 800) + Array(repeating: 0.125, count: 800))
+    }
+
+    /// 补零后会越过本片末尾的空洞也不补，直接开新片，分片不会因补零超过约一片的时长
+    @Test func 空洞越过本片末尾时开新分片_不在本片补零() throws {
+        let h = Harness()
+        defer { h.cleanUp() }
+        let writer = h.writer(segmentSeconds: 1)
+        writer.push(chunk(0.5), hostTime: host(0))
+        writer.push(chunk(0.25), hostTime: host(0.5))
+        writer.push(chunk(0.125), hostTime: host(1.3))
+        writer.finish()
+
+        #expect(h.segments.map(\.file) == ["0001.caf", "0002.caf"])
+        #expect(h.segments.map(\.startedAt) == [t0, t0.addingTimeInterval(1.3)])
+        #expect(try h.samples("0001.caf") == Array(repeating: 0.5, count: 800) + Array(repeating: 0, count: 3200)
+            + Array(repeating: 0.25, count: 800))
+        #expect(try h.samples("0002.caf") == Array(repeating: 0.125, count: 800))
     }
 
     /// 切换输出设备后采样率、声道数可能变，一个分片只有一种格式
