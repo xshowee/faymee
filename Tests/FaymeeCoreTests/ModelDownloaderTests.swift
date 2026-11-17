@@ -192,6 +192,23 @@ private final class Fixture {
         #expect(g.contents(g.modelFile) == Data("abc".utf8))
     }
 
+    @Test func 续传时服务器回200但带对得上的ContentRange_按部分内容接着写() async {
+        // ModelScope 对不走 LFS 的小文件（tokens.txt）这样回应 Range 请求
+        let reply: FakeTransport.Reply = { _, offset in
+            response(200, range: "bytes \(offset)-2/3", length: 3 - offset,
+                     chunks: [Data(Data("abc".utf8).suffix(from: Int(offset)))])
+        }
+        let f = Fixture(FakeTransport(reply))
+        f.writePartial(Data("a".utf8))
+
+        await f.download()
+
+        #expect(f.transport.requests.map(\.url) == [primary])
+        #expect(f.transport.requests.map(\.offset) == [1])
+        #expect(f.downloader.phase == .ready)
+        #expect(f.contents(f.modelFile) == Data("abc".utf8))
+    }
+
     @Test func 校验失败时删掉下载的文件_显示原因_重试从头下载() async {
         let corrupt: FakeTransport.Reply = { _, _ in response(200, length: 3, chunks: [Data("abd".utf8)]) }
         let f = Fixture(FakeTransport(corrupt, serve(Data("abc".utf8))))
@@ -424,5 +441,10 @@ private final class Fixture {
         #expect(status(.ready, size).text == "已就绪，占用 2.5 GB")
         #expect(status(.failed("网络连接已中断"), 950_000_000).text == "下载失败：网络连接已中断")
         #expect(status(.failed("网络连接已中断")).minutesText == "模型下载失败：网络连接已中断")
+
+        // 不到 1 GB 的模型用 MB
+        let small = ModelDownloadStatus(phase: .paused, receivedBytes: 40_000_000, totalBytes: 169_347_218)
+        #expect(small.text == "已暂停，已下载 23%（40 MB / 169 MB）")
+        #expect(ModelDownloadStatus(phase: .notDownloaded, receivedBytes: 0, totalBytes: 75_519_198).text == "未下载（约 76 MB）")
     }
 }

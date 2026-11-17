@@ -233,6 +233,20 @@ private final class Fixture {
         #expect(f.mirror.requests.filter { $0.path == "a/model.onnx" }.count == 1)  // 已下好的主模型不重下
     }
 
+    @Test func 取消时已下好的辅助模型也一起删掉() async throws {
+        let f = Fixture()
+        f.mirror.stalls = ["a/vocab.txt"]
+        let d = f.downloader(dependencies: [punctModel])
+        d.start()
+        try await f.until { d.receivedBytes == 7 }  // 标点 3 + 主模型第一个文件 3 + 第二个文件 1
+
+        await d.cancel()
+
+        #expect(!f.exists(punctModel.directory(in: f.root)))
+        #expect(!f.exists(asrModel.directory(in: f.root)))
+        #expect(d.phase == .notDownloaded)
+    }
+
     @Test func 删除主模型时_没有别的模型依赖的辅助模型一起删除() async throws {
         let f = Fixture()
         let d = f.downloader(dependencies: [punctModel])

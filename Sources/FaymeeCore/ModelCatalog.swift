@@ -251,7 +251,7 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.qwen3_4B.id, roles: [.minutes], family: .llamaGGUF,
             source: .download(.qwen3_4B), name: "Qwen3 4B（Q4_K_M）",
-            memory: "约 4 GB",
+            // 内存、速度待 ticket 11 按评估填
             verdicts: [.minutes: "纪要在本机生成，不上传任何数据"],
             parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength),
             license: "Apache-2.0"),

@@ -112,12 +112,14 @@ public final class ModelDownloader {
         phase = receivedBytes > 0 ? .paused : .notDownloaded
     }
 
-    /// 取消下载，删掉还没下全的模型已下的部分（含已下好的文件）。已经全部下好的模型不动
-    /// （取消时恰好下完的，照样算就绪）；别的模型还在用的辅助模型也不动
+    /// 取消下载，删掉这次已下的全部内容（含已下好的文件和辅助模型），回到未下载。
+    /// 取消时恰好全部下完的不动，照样算就绪；别的模型还在用的辅助模型也不动
     public func cancel() async {
         await stop()
-        for m in allModels where !m.isDownloaded(in: directory) && !isKept(m) {
-            try? remove(m)
+        if !allModels.allSatisfy({ $0.isDownloaded(in: directory) }) {
+            for m in allModels where !isKept(m) {
+                try? remove(m)
+            }
         }
         refreshFromDisk()
     }
@@ -242,18 +244,18 @@ public struct ModelDownloadStatus: Hashable, Sendable {
 
     public var text: String {
         switch phase {
-        case .notDownloaded: "未下载（约 \(formatGigabytes(totalBytes))）"
+        case .notDownloaded: "未下载（约 \(formatModelSize(totalBytes))）"
         case .downloading: "下载中 \(percent)（\(amount)）"
         case .paused: "已暂停，已下载 \(percent)（\(amount)）"
         case .verifying: "正在校验模型…"
-        case .ready: "已就绪，占用 \(formatGigabytes(totalBytes))"
+        case .ready: "已就绪，占用 \(formatModelSize(totalBytes))"
         case let .failed(reason): "下载失败：\(reason)"
         }
     }
 
     public var minutesText: String {
         switch phase {
-        case .notDownloaded: "生成纪要需要下载约 \(formatGigabytes(totalBytes)) 的模型"
+        case .notDownloaded: "生成纪要需要下载约 \(formatModelSize(totalBytes)) 的模型"
         case .downloading: "正在下载模型 \(percent)"
         case .paused: "模型下载已暂停（\(percent)）"
         case .verifying: "正在校验模型…"
@@ -263,7 +265,12 @@ public struct ModelDownloadStatus: Hashable, Sendable {
     }
 
     private var percent: String { "\(Int((progress * 100).rounded(.down)))%" }
-    private var amount: String { "\(formatGigabytes(receivedBytes)) / \(formatGigabytes(totalBytes))" }
+    /// 已下 / 总共，两边用同一个单位（按总大小选：不到 1 GB 用 MB）
+    private var amount: String {
+        let gb = formatModelSize(totalBytes).hasSuffix("GB")
+        func f(_ b: Int64) -> String { gb ? formatGigabytes(b) : String(format: "%.0f MB", Double(b) / 1e6) }
+        return "\(f(receivedBytes)) / \(f(totalBytes))"
+    }
 }
 
 extension ModelDownloader {
@@ -376,12 +383,15 @@ private struct FileFetch: Sendable {
         let response = try await transport.get(url, from: offset)
         defer { response.cancel() }
         let writeOffset: Int64
+        let range = response.contentRange.flatMap(ContentRange.init)
         switch response.status {
         case 206:
-            guard let range = response.contentRange.flatMap(ContentRange.init), range.start == offset else {
-                throw ModelDownloadError.badResponse
-            }
+            guard let range, range.start == offset else { throw ModelDownloadError.badResponse }
             if let total = range.total, total != file.size { throw ModelDownloadError.sizeMismatch }
+            writeOffset = offset
+        case 200 where offset > 0 && range?.start == offset:
+            // ModelScope 对不走 LFS 的小文件回 200，但内容按 Range 给了、带着 Content-Range：按部分内容续传
+            if let total = range?.total, total != file.size { throw ModelDownloadError.sizeMismatch }
             writeOffset = offset
         case 200:
             // 服务器不认 Range，从头给了整个文件

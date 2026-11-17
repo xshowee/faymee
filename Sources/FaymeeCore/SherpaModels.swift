@@ -155,19 +155,18 @@ extension LocalModel {
                              encoderLorneluo: Bool) -> LocalModel {
         let name = "x-asr-\(chunk)-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05"
         let name480 = "x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05"
-        let lorneluo = ("lorneluo/sherpa-onnx-\(name480)", "4b86b17a5b96dcf6026a73e2239271faa9d6f5df")
-        /// 同一个 chunk 的镜像优先，再用 480ms 的镜像（共有的文件字节相同）
+        func lorneluo(_ path: String) -> URL {
+            huggingFace("lorneluo/sherpa-onnx-\(name480)", "4b86b17a5b96dcf6026a73e2239271faa9d6f5df", path)
+        }
+        /// encoder 以外的文件各个 chunk 字节相同：本 chunk 的镜像优先，再用 480ms 的镜像
         func shared(_ path: String, lorneluoHasIt: Bool, extra: [URL] = []) -> [URL] {
-            var urls = ["bujidc", "yangchen1258"].map { modelScope("\($0)/sherpa-onnx-\(name)", path) }
-            if chunk != "480ms" {
-                urls = [modelScope("bujidc/sherpa-onnx-\(name)", path)]
-                    + ["bujidc", "yangchen1258"].map { modelScope("\($0)/sherpa-onnx-\(name480)", path) }
-            }
-            if lorneluoHasIt { urls.append(huggingFace(lorneluo.0, lorneluo.1, path)) }
+            var urls = chunk == "480ms" ? [] : [modelScope("bujidc/sherpa-onnx-\(name)", path)]
+            urls += ["bujidc", "yangchen1258"].map { modelScope("\($0)/sherpa-onnx-\(name480)", path) }
+            if lorneluoHasIt { urls.append(lorneluo(path)) }
             return urls + extra
         }
         var encoderURLs = encoderMirrors.map { modelScope("\($0)/sherpa-onnx-\(name)", "encoder.int8.onnx") }
-        if encoderLorneluo { encoderURLs.append(huggingFace(lorneluo.0, lorneluo.1, "encoder.int8.onnx")) }
+        if encoderLorneluo { encoderURLs.append(lorneluo("encoder.int8.onnx")) }
         let officialTokens = huggingFace("GilgameshWind/X-ASR-zh-en", "689ff18c584d29910da37b6fe904db0c1489c9d1",
                                          "deployment/models/chunk-\(chunk)-model/tokens.txt")
         return LocalModel(
