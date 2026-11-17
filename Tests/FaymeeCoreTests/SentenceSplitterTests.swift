@@ -148,4 +148,37 @@ import Testing
             TranscribedSentence(start: 14, end: 14.4, text: "好的"),
         ])
     }
+
+    /// Paraformer 只给逐字开始时间，结束取下一个字的开始：停顿并进**前一个**字，而「长字即停顿」假设停顿在后一个字里。
+    /// 真实输出（two-speakers-zh 第一段）：「划」从 4.64 占到「首」的 5.20。推断打开时在「划」前面断开，把它切进下一句
+    @Test func 停顿并进前一个字时_长字推断会切错() {
+        let input = paraformerStyle([("我", 1.58), ("们", 1.74), ("来", 1.92), ("讨", 2.20), ("论", 2.38), ("一", 2.66),
+                                     ("下", 2.80), ("下", 3.06), ("个", 3.28), ("季", 3.46), ("度", 3.64),
+                                     ("的", 3.82), ("产", 3.90), ("品", 4.10), ("规", 4.44), ("划", 4.64),
+                                     ("首", 5.20), ("先", 5.42)], end: 5.72)
+
+        #expect(SentenceSplitter.split(input).map(\.text) == ["我们来讨论一下下个季度的产品规", "划首先"])
+        #expect(SentenceSplitter.split(input, inferPauses: false) == [
+            TranscribedSentence(start: 1.58, end: 5.72, text: "我们来讨论一下下个季度的产品规划首先"),
+        ])
+    }
+
+    /// 不推断停顿时只按句末标点断句，逗号后的长停顿也不断
+    @Test func 不推断停顿时只按句末标点断句() {
+        let input = tokens([("好", 0, 0.2), ("的", 0.2, 0.9), ("，", 0.9, 0.9), ("我", 0.9, 1.1), ("们", 1.1, 1.3),
+                            ("开", 1.3, 1.5), ("始", 1.5, 1.7), ("吧", 1.7, 1.9), ("。", 1.9, 1.9),
+                            ("下", 1.9, 2.1), ("一", 2.1, 2.3)])
+
+        #expect(SentenceSplitter.split(input, inferPauses: false) == [
+            TranscribedSentence(start: 0, end: 1.9, text: "好的，我们开始吧。"),
+            TranscribedSentence(start: 1.9, end: 2.3, text: "下一"),
+        ])
+    }
+
+    /// 只有开始时间的逐字结果：每个字的结束 = 下一个字的开始，最后一个字到 `end`
+    private func paraformerStyle(_ list: [(String, Double)], end: Double) -> [TimedToken] {
+        list.enumerated().map { i, t in
+            TimedToken(text: t.0, start: t.1, end: i + 1 < list.count ? list[i + 1].1 : end)
+        }
+    }
 }
