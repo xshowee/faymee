@@ -58,7 +58,10 @@ import Testing
         }
 
         try placeFiles(of: .funASRNano)
-        #expect(make(selecting: LocalModel.funASRNano.id).waitReason == nil)
+        let ready = make(selecting: LocalModel.funASRNano.id)
+        #expect(ready.waitReason == nil)
+        // 转写器和下载器看的是同一个目录：文件齐了，只差（测试里没给的）静音切段模型
+        await #expect(throws: SherpaModelError.vadMissing) { try await ready.transcriber.prepare(progress: { _ in }) }
     }
 
     @Test func 选了Paraformer_标点模型也下好了才就绪() async throws {
@@ -72,6 +75,8 @@ import Testing
         }
 
         try placeFiles(of: .punctuation)
-        #expect(make(selecting: LocalModel.paraformer.id).waitReason == nil)
+        let ready = make(selecting: LocalModel.paraformer.id)
+        #expect(ready.waitReason == nil)
+        await #expect(throws: SherpaModelError.vadMissing) { try await ready.transcriber.prepare(progress: { _ in }) }
     }
 }
