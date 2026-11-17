@@ -8,7 +8,8 @@ struct MenuBarLabel: View {
     var body: some View {
         let indicator = MenuBarIndicator(isRecording: model.isRecording,
                                          hasWarning: model.isSilent || model.hasRecordingError || model.isLidGapOpen,
-                                         showsMarkFlag: model.showsMarkFlag)
+                                         showsMarkFlag: model.showsMarkFlag,
+                                         capturesSystemSound: model.isCapturingSystemSound)
         Group {
             if model.isRecording {
                 HStack(spacing: 4) {
@@ -41,6 +42,7 @@ struct MenuContent: View {
                 recordingSection
             } else {
                 MicrophonePicker()
+                SystemSoundToggle()
                 Button {
                     Task { await model.start() }
                 } label: {
@@ -105,6 +107,7 @@ struct MenuContent: View {
         LevelMeter(db: model.levelDB)
 
         MicrophonePicker()
+        SystemSoundToggle()
 
         if model.isLidGapOpen {
             Label("已合盖，内置麦克风被断开，现在没有在录。请打开盖子，或改用外接麦克风。",
@@ -204,13 +207,14 @@ private extension MenuBarIndicator {
         switch self {
         case .idle: "waveform"
         case .recording: "record.circle.fill"
+        // 喇叭表示系统声音也在录
+        case .recordingSystemSound: "speaker.wave.2.circle.fill"
         case .warning: "exclamationmark.triangle.fill"
         case .markFlag: "flag.fill"
         }
     }
 }
 
-/// 麦克风选择，以及实际在用（或将要用）哪个设备
 /// 定时检查发现的新版本只在这里提示，不弹窗；已同意安装、在等录音整理完时说明一下
 private struct UpdateNotice: View {
     var updater: AppUpdater
@@ -231,6 +235,22 @@ private struct UpdateNotice: View {
     }
 }
 
+/// “系统声音”开关：录下本机播放的声音（线上会议里对方的发言）。录音前、录音中都能切换
+struct SystemSoundToggle: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Toggle(isOn: $model.systemSoundEnabled) {
+            Label("系统声音", systemImage: "speaker.wave.2")
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .help("同时录下这台 Mac 播放的声音，例如线上会议里对方的发言。不含 Faymee 自己的回放")
+    }
+}
+
+/// 麦克风选择，以及实际在用（或将要用）哪个设备
 struct MicrophonePicker: View {
     @Environment(AppModel.self) private var model
 

@@ -40,7 +40,9 @@ enum AudioDevices {
     static func inputs() -> [AudioInputDevice] {
         deviceIDs().compactMap { id in
             guard hasInput(id), let uid = string(id, kAudioDevicePropertyDeviceUID),
-                  let name = string(id, kAudioObjectPropertyName)
+                  let name = string(id, kAudioObjectPropertyName),
+                  // 采集系统声音用的私有聚合设备对本进程可见，它不是麦克风
+                  !uid.hasPrefix(SystemSoundCapture.aggregateUIDPrefix)
             else { return nil }
             let transport = uint32(id, kAudioDevicePropertyTransportType) ?? kAudioDeviceTransportTypeUnknown
             return AudioInputDevice(id: id, uid: uid, name: name, transport: transport,

@@ -1,0 +1,176 @@
+import AVFoundation
+import CoreAudio
+import FaymeeCore
+import os
+
+private let log = Logger(subsystem: "com.faymee.app", category: "system-sound")
+
+enum SystemSoundCaptureError: LocalizedError {
+    case coreAudio(step: String, status: OSStatus)
+    case unsupportedFormat
+
+    var errorDescription: String? {
+        switch self {
+        case let .coreAudio(step, status): "\(step)失败（\(status)）"
+        case .unsupportedFormat: "系统声音的音频格式无法识别"
+        }
+    }
+}
+
+/// 系统声音采集（ADR-0001）：一个全局 process tap（排除 Faymee 自己，回放录音的声音不会录进去），
+/// 放进一个只含这个 tap 的私有 aggregate device，由 IOProc 收数据交给写盘模块。
+///
+/// - 麦克风不在这个 aggregate device 里，仍由 `Recorder` 采集：两者合在一起时，没有声音播放
+///   整个设备就不运行，连麦克风也录不到。
+/// - 没有声音播放时可能完全没有回调，这是正常的，不当成停滞。
+/// - 第一次建 tap 时系统弹出“系统录音”授权（说明文字是 Info.plist 的 NSAudioCaptureUsageDescription）。
+/// - 只在主线程调用。写盘模块的回调在它自己的队列上，调用方自己切回主线程。
+final class SystemSoundCapture {
+    /// 私有 aggregate device 的 UID 前缀。它对本进程可见，麦克风列表要把它排除
+    static let aggregateUIDPrefix = "com.faymee.system-sound."
+
+    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var aggregateID = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private var writer: SystemSoundWriter?
+    /// IOProc 在这个队列上执行；停止后在它上面同步一次，确保没有回调还在往写盘模块交数据
+    private let ioQueue = DispatchQueue(label: "faymee.system-sound-capture", qos: .userInitiated)
+    private let opened = OpenedSegments()
+
+    var isRunning: Bool { procID != nil }
+
+    /// 开始采集，分片写进 directory。建不起来时抛错，已经建好的部分都拆掉
+    func start(directory: URL,
+               onSegment: @escaping @Sendable (SystemSoundWriter.Segment) -> Void,
+               onError: @escaping @Sendable (String) -> Void) throws {
+        guard !isRunning else { return }
+        do {
+            try build(directory: directory, onSegment: onSegment, onError: onError)
+        } catch {
+            teardown()
+            throw error
+        }
+    }
+
+    /// 停止采集，写完已收到的音频。返回从上次 stop 以来打开过的全部分片：
+    /// 分片打开的回调是异步切回主线程的，可能晚于停止，调用方用这个补记
+    @discardableResult
+    func stop() -> [SystemSoundWriter.Segment] {
+        teardown()
+        return opened.drain()
+    }
+
+    // MARK: - 建立
+
+    private func build(directory: URL,
+                       onSegment: @escaping @Sendable (SystemSoundWriter.Segment) -> Void,
+                       onError: @escaping @Sendable (String) -> Void) throws {
+        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [try Self.ownProcessObject()])
+        description.uuid = UUID()
+        description.name = "Faymee 系统声音"
+        description.isPrivate = true
+        description.muteBehavior = .unmuted
+        try check("创建系统声音 tap", AudioHardwareCreateProcessTap(description, &tapID))
+
+        var asbd = AudioStreamBasicDescription()
+        try check("读取系统声音格式", Self.getProperty(tapID, kAudioTapPropertyFormat, &asbd))
+        guard let format = AVAudioFormat(streamDescription: &asbd), format.sampleRate > 0, format.channelCount > 0
+        else { throw SystemSoundCaptureError.unsupportedFormat }
+
+        let aggregate: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Faymee 系统声音",
+            kAudioAggregateDeviceUIDKey: Self.aggregateUIDPrefix + UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            // 不加任何 sub device：麦克风不在这里
+            kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true,
+                                               kAudioSubTapUIDKey: description.uuid.uuidString]],
+        ]
+        try check("创建系统声音聚合设备", AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID))
+
+        // host time 只在同一次采集内有效：每次（重新）建立都按此刻重新锚定
+        let opened = opened
+        let writer = SystemSoundWriter(directory: directory, clock: .system(),
+                                       onSegment: { segment in
+                                           opened.append(segment)
+                                           onSegment(segment)
+                                       },
+                                       onError: onError)
+        self.writer = writer
+        try check("创建系统声音回调", AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue) {
+            _, inputData, inputTime, _, _ in
+            let time = inputTime.pointee
+            let hostTime = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : mach_absolute_time()
+            writer.push(inputData, format: format, hostTime: hostTime)
+        })
+        try check("启动系统声音采集", AudioDeviceStart(aggregateID, procID))
+        log.info("系统声音采集已开始：\(format.sampleRate) Hz，\(format.channelCount) 声道")
+    }
+
+    /// 按建立的反序拆掉，哪一步没建都跳过
+    private func teardown() {
+        if let procID {
+            AudioDeviceStop(aggregateID, procID)
+            AudioDeviceDestroyIOProcID(aggregateID, procID)
+            self.procID = nil
+        }
+        // 已经派发到队列上的回调执行完，写盘模块才不会在 finish 之后又收到数据、开出没人记的分片
+        ioQueue.sync {}
+        writer?.finish()
+        writer = nil
+        if aggregateID != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(aggregateID)
+            aggregateID = AudioObjectID(kAudioObjectUnknown)
+        }
+        if tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(tapID)
+            tapID = AudioObjectID(kAudioObjectUnknown)
+        }
+    }
+
+    // MARK: - Core Audio
+
+    private func check(_ step: String, _ status: OSStatus) throws {
+        guard status == noErr else { throw SystemSoundCaptureError.coreAudio(step: step, status: status) }
+    }
+
+    /// 本进程的音频进程对象，tap 要排除它
+    private static func ownProcessObject() throws -> AudioObjectID {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var pid = getpid()
+        var object = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
+                                                UInt32(MemoryLayout<pid_t>.size), &pid, &size, &object)
+        guard status == noErr, object != kAudioObjectUnknown else {
+            throw SystemSoundCaptureError.coreAudio(step: "查找 Faymee 的音频进程", status: status)
+        }
+        return object
+    }
+
+    private static func getProperty<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                       _ value: inout T) -> OSStatus {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<T>.size)
+        return AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value)
+    }
+}
+
+/// 写盘模块报过的分片，在写盘队列上追加、在主线程取走
+private final class OpenedSegments: @unchecked Sendable {
+    private let lock = NSLock()
+    private var segments: [SystemSoundWriter.Segment] = []
+
+    func append(_ segment: SystemSoundWriter.Segment) { lock.withLock { segments.append(segment) } }
+
+    func drain() -> [SystemSoundWriter.Segment] {
+        lock.withLock {
+            defer { segments = [] }
+            return segments
+        }
+    }
+}

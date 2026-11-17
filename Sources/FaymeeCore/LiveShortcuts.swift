@@ -61,21 +61,26 @@ public enum LiveShortcut: CaseIterable, Hashable, Sendable {
 public enum MenuBarIndicator: Hashable, Sendable {
     /// 不在录音
     case idle
-    /// 正常录音中
+    /// 正常录音中，只录麦克风
     case recording
+    /// 正常录音中，同时在录系统声音
+    case recordingSystemSound
     /// 录音中有告警：长时间没声音、录音出错、合盖断开了内置麦克风
     case warning
     /// 刚标记了重点（约 2 秒），确认标上了。不发声音、不发通知，只靠这个图标
     case markFlag
 
-    /// 旗子盖过告警：它只显示约 2 秒，又是用户刚按下的，要让他看到标上了；之后告警图标照常回来
-    public init(isRecording: Bool, hasWarning: Bool, showsMarkFlag: Bool) {
+    /// 旗子盖过告警：它只显示约 2 秒，又是用户刚按下的，要让他看到标上了；之后告警图标照常回来。
+    /// capturesSystemSound 看系统声音采集是否真的在跑，不看开关
+    public init(isRecording: Bool, hasWarning: Bool, showsMarkFlag: Bool, capturesSystemSound: Bool = false) {
         if !isRecording {
             self = .idle
         } else if showsMarkFlag {
             self = .markFlag
+        } else if hasWarning {
+            self = .warning
         } else {
-            self = hasWarning ? .warning : .recording
+            self = capturesSystemSound ? .recordingSystemSound : .recording
         }
     }
 }

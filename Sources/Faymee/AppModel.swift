@@ -1,7 +1,11 @@
+import AppKit
 import AVFoundation
 import FaymeeCore
 import Foundation
 import Observation
+import os
+
+private let systemSoundLog = Logger(subsystem: "com.faymee.app", category: "system-sound")
 
 @MainActor @Observable
 final class AppModel {
@@ -66,6 +70,18 @@ final class AppModel {
     /// 指定设备的名字，设备拔掉后仍能在界面上显示“XX（未连接）”
     private(set) var selectedDeviceName: String?
 
+    /// “系统声音”开关，记在 UserDefaults，默认关闭。录音前、录音中都能切换：
+    /// 录音中切换时立即开始或停止采集，并在会议的系统声音时段里开一段或结束一段
+    var systemSoundEnabled: Bool {
+        didSet {
+            guard systemSoundEnabled != oldValue else { return }
+            UserDefaults.standard.set(systemSoundEnabled, forKey: "systemSound")
+            syncSystemSound()
+        }
+    }
+    /// 系统声音采集此刻真的在跑（开关打开但建不起来时为 false），菜单栏图标据此区别显示
+    private(set) var isCapturingSystemSound = false
+
     /// 按当前选择和设备状态，开始录音时会用哪个麦克风
     var plannedDevice: AudioInputDevice? {
         inputSelection.resolve(in: inputDevices, lidClosed: SystemState.isLidClosed == true)
@@ -86,6 +102,7 @@ final class AppModel {
     @ObservationIgnored private var savedHotwords = ""
     @ObservationIgnored private var pendingHotwordsSave: Task<Void, Never>?
     @ObservationIgnored private let recorder = Recorder()
+    @ObservationIgnored private let systemSound = SystemSoundCapture()
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var silentSince: Date?
     @ObservationIgnored private var silenceNotified = false
@@ -214,6 +231,7 @@ final class AppModel {
         diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
         globalShortcutsEnabled = UserDefaults.standard.object(forKey: "globalShortcuts") as? Bool ?? true
         liveCaptionsEnabled = UserDefaults.standard.object(forKey: "liveCaptions") as? Bool ?? true
+        systemSoundEnabled = UserDefaults.standard.bool(forKey: "systemSound")
         hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
         noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
         meetings = store.loadAll()
@@ -232,6 +250,11 @@ final class AppModel {
         recorder.onSegment = { [weak self] in self?.segmentOpened($0) }
         recorder.onLevel = { [weak self] in self?.levelChanged($0) }
         recorder.onError = { [weak self] in self?.recordingFailed($0) }
+        // 睡眠期间 host time 不走而墙钟在走，唤醒后接着用原来的换算会把系统声音摆早：重建采集和时钟换算
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
+                                                          queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartSystemSoundCapture() }
+        }
         SystemState.observePowerChanges { [weak self] in
             // 电量变化也会通知，只在接电状态变了时更新
             let onPower = SystemState.isOnPower
@@ -290,6 +313,8 @@ final class AppModel {
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+        // 开着开关开始录音：系统声音时段从录音开始算起
+        syncSystemSound(at: current?.startedAt ?? Date())
         startLiveCaptions()
     }
 
@@ -299,12 +324,16 @@ final class AppModel {
         noteInput.saveIfOpen()
         livePanel.saveDraft()
         guard var m = current else { return }
+        // 结束时间在拆采集之前取：系统声音时段和录音同时结束（会议详情的音源标记按两者起止比较）
+        let endedAt = Date()
         stopLiveCaptions()
         recorder.stop()
+        // 打开时的回调可能还没切回主线程：停下后把报过的分片补记进这份会议，整理才不会丢掉它们
+        for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(SystemSoundSegment(segment)) }
         timer?.invalidate()
         timer = nil
-        m.endedAt = Date()
-        if let i = m.openGap { m.lidGaps[i].end = m.endedAt }
+        m.endedAt = endedAt
+        m.endOpenPeriods(at: endedAt)
         current = nil
         isSilent = false
         hasRecordingError = false
@@ -322,6 +351,66 @@ final class AppModel {
             hasRecordingError = false
             lastError = nil
         }
+        update(m)
+    }
+
+    // MARK: - 系统声音
+
+    /// 让录音中的系统声音跟上开关：打开时开一段时段、开始采集，关闭时停止采集、结束这段。
+    /// 不在录音时什么也不做（开始录音时再调一次）。采集建不起来时只记日志，麦克风照常录，
+    /// 时段照样记（它记的是开关），完整的故障处理另做
+    private func syncSystemSound(at date: Date = Date()) {
+        guard var m = current else { return }
+        if systemSoundEnabled, !m.isSystemSoundPeriodOpen {
+            // 时段先记下、写盘，再建采集：时段记的是开关，不等 tap 建好（建的时候可能在等授权）
+            m.beginSystemSoundPeriod(at: date)
+            update(m)
+            startSystemSoundCapture(for: m.id)
+        } else if !systemSoundEnabled, m.isSystemSoundPeriodOpen {
+            for segment in stopSystemSoundCapture() { m.addSystemSoundSegment(SystemSoundSegment(segment)) }
+            m.endSystemSoundPeriod(at: date)
+            update(m)
+        }
+    }
+
+    private func startSystemSoundCapture(for id: String) {
+        do {
+            try systemSound.start(directory: store.systemSoundSegmentsDirectory(id),
+                                  onSegment: { [weak self] segment in
+                                      DispatchQueue.main.async {
+                                          MainActor.assumeIsolated { self?.systemSoundSegmentOpened(segment, in: id) }
+                                      }
+                                  },
+                                  onError: { message in systemSoundLog.error("\(message, privacy: .public)") })
+            isCapturingSystemSound = true
+        } catch {
+            isCapturingSystemSound = false
+            systemSoundLog.error("系统声音采集没能开始：\(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// 停止采集，返回本次采集报过的分片（调用方补记进会议）
+    private func stopSystemSoundCapture() -> [SystemSoundWriter.Segment] {
+        isCapturingSystemSound = false
+        return systemSound.stop()
+    }
+
+    /// 唤醒后重建采集：时钟换算按此刻重新锚定，分片接着编号
+    private func restartSystemSoundCapture() {
+        guard var m = current, m.isSystemSoundPeriodOpen else { return }
+        var changed = false
+        for segment in stopSystemSoundCapture() {
+            changed = m.addSystemSoundSegment(SystemSoundSegment(segment)) || changed
+        }
+        if changed { update(m) }
+        startSystemSoundCapture(for: m.id)
+    }
+
+    /// 系统声音分片打开时记进 meeting.json。按会议 id 找而不是看 current：回调切回主线程时
+    /// 录音可能刚停（停止时已补记过，这里不重复记）；会议已经开始整理就不再改它
+    private func systemSoundSegmentOpened(_ segment: SystemSoundWriter.Segment, in id: String) {
+        guard var m = meeting(id), m.status == .recording,
+              m.addSystemSoundSegment(SystemSoundSegment(segment)) else { return }
         update(m)
     }
 
@@ -552,7 +641,8 @@ final class AppModel {
                     .flatMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
                 m.endedAt = lastWrite ?? m.startedAt
             }
-            if let i = m.openGap { m.lidGaps[i].end = m.endedAt }
+            // 仍开着的合盖空白、系统声音时段、不可用时段都结束在估出的录音结束时间
+            m.endOpenPeriods(at: m.endedAt ?? m.startedAt)
             update(m)
             await finalize(m.id)
             if meeting(m.id)?.status == .done {
