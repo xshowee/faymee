@@ -163,10 +163,9 @@ extension SettingsView {
     /// 字幕模型的说明：所选模型没下载完时说明正在用 SpeechAnalyzer；录音中改了选择时说明从下一场起生效
     private var liveCaptionModelNote: String? {
         guard let selected = model.modelSelections.selected(for: .liveCaptions) else { return nil }
-        // 读下载器的状态（可观察），下载完成、删除后说明跟着变
-        let ready = model.modelDownloads.downloader(for: selected)?.isReady ?? true
+        let ready = isDownloaded(selected)
         if let inUse = model.liveCaptionModelID, inUse != (ready ? selected.id : ModelCatalog.speechAnalyzerID) {
-            let name = ModelCatalog.builtIn.model(id: inUse)?.name ?? inUse
+            let name = modelName(inUse)
             return "本场录音的字幕仍用 \(name)，下一场录音起生效"
         }
         guard !ready else { return nil }
@@ -177,14 +176,24 @@ extension SettingsView {
     private var liveFinalizeNote: String {
         let about = "每句说完后用整段模型再转一遍、替换面板里的这一句，更准但更占内存；只影响会中面板"
         let selected = model.modelSelections.selected(for: .liveFinalize)
-        let ready = selected.map { model.modelDownloads.downloader(for: $0)?.isReady ?? true } ?? true
+        let ready = selected.map(isDownloaded) ?? true
         let wanted = ready ? selected?.id : nil
         if model.isRecording, model.liveFinalizeModelID != wanted {
-            let inUse = model.liveFinalizeModelID.map { ModelCatalog.builtIn.model(id: $0)?.name ?? $0 }
+            let inUse = model.liveFinalizeModelID.map(modelName)
             return about + "。" + (inUse.map { "本场录音仍用 \($0)" } ?? "本场录音不做实时字幕定稿") + "，下一场录音起生效"
         }
         guard let selected, !ready else { return about }
         return about + "。\(selected.name) 还没下载，实时字幕定稿暂时不用；下载完成后，下一场录音起改用它"
+    }
+
+    /// 模型能不能用：读下载器的状态（可观察），下载完成、删除后说明跟着变；不用下载的总能用
+    private func isDownloaded(_ entry: CatalogModel) -> Bool {
+        model.modelDownloads.downloader(for: entry)?.isReady ?? true
+    }
+
+    /// 目录项 id 的显示名
+    private func modelName(_ id: String) -> String {
+        model.modelSelections.catalog.model(id: id)?.name ?? id
     }
 }
 
