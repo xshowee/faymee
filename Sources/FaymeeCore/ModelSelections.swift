@@ -115,3 +115,47 @@ public final class ModelDownloads {
         }
     }
 }
+
+extension ModelSelections {
+    /// 现在选着这个模型的用途（按 `ModelRole.allCases` 的顺序）。同一份模型文件可能同时是几个用途的模型
+    public func roles(selecting model: CatalogModel) -> [ModelRole] {
+        ModelRole.allCases.filter { selectedID(for: $0) == model.id }
+    }
+}
+
+/// 删除模型前确认框里的说明
+public enum ModelDeletion {
+    /// 释放多少空间，和删除后对现在选着它的各用途的影响（`ModelSelections.roles(selecting:)`）。
+    /// 按用途说，不按是从哪个选择框删的：Paraformer、Fun-ASR-Nano 是会后转写和实时字幕定稿共用的文件
+    /// - Parameter size: 要释放的大小的文字（如“2.1 GB”）
+    public static func message(size: String, selectedFor roles: [ModelRole]) -> String {
+        let head = "释放约 \(size) 空间。"
+        guard !roles.isEmpty else { return head + "现在没有用途选着它。" }
+        let effects = roles.map(\.deletionEffect).joined(separator: "；")
+        let notes = roles.compactMap(\.deletionNote).joined()
+        return head + "删除后，" + effects + "。" + notes
+    }
+}
+
+private extension ModelRole {
+    /// 删了所选模型、重新下载前，这个用途会怎样
+    var deletionEffect: String {
+        switch self {
+        case .transcription: "新的会议会等待重新下载再转写"
+        case .liveCaptions: "实时字幕改用 SpeechAnalyzer（系统自带），直到重新下载"
+        // 实时字幕定稿可以不用：没有模型就不做，不排队
+        case .liveFinalize: "重新下载前不做实时字幕定稿，字幕照常显示"
+        case .minutes: "新的纪要会等待重新下载"
+        case .voiceprint: "新的会议要等重新下载后才区分说话人"
+        }
+    }
+
+    /// 已有的结果不受影响的说明
+    var deletionNote: String? {
+        switch self {
+        case .minutes: "已生成的纪要不受影响。"
+        case .voiceprint: "已有会议的说话人不受影响。"
+        case .transcription, .liveCaptions, .liveFinalize: nil
+        }
+    }
+}

@@ -3,8 +3,9 @@ import FaymeeCore
 import SwiftUI
 
 /// 设置里一个用途的“模型选择 + 下载”：选择框列出目录里适用于这个用途的模型（可以不用的用途多一项“不用”），
-/// 下面是所选模型的下载大小、内存、速度、能力、评估结论，以及下载 / 暂停 / 继续 / 删除。
-/// 选择立即写进设置；所选模型没下载也能选（用到它的任务会排队等下载）。删除所选模型前确认
+/// 下面是所选模型的下载大小、内存、速度、能力、评估结论，以及下载 / 暂停 / 继续 / 删除；
+/// 再下面列出这个用途里其他已下载的模型，不用先选上就能删。
+/// 选择立即写进设置；所选模型没下载也能选（用到它的任务会排队等下载）。删除前确认，说明按现在选着它的各用途说后果
 struct ModelPicker: View {
     @Environment(AppModel.self) private var model
     let role: ModelRole
@@ -69,13 +70,25 @@ struct ModelPicker: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let deleteError {
-                    Label(deleteError, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
             }
         }
+        ForEach(otherDownloaded(options, selected: selected)) { other in
+            LabeledContent("已下载：\(other.name)") {
+                Button("删除…", role: .destructive) { confirmingDelete = other }
+                    .disabled(deleteBlockedReason(other) != nil)
+                    .help(deleteBlockedReason(other) ?? "删除这个没选用的模型，释放空间")
+            }
+        }
+        if let deleteError {
+            Label(deleteError, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    /// 这个用途里没选、但已下载的模型（换过模型后留下的）：可以直接删
+    private func otherDownloaded(_ options: [CatalogModel], selected: CatalogModel?) -> [CatalogModel] {
+        options.filter { $0.id != selected?.id && model.modelDownloads.downloader(for: $0)?.isReady == true }
     }
 
     /// 选择框里每一项：名字和下载大小
@@ -90,17 +103,8 @@ struct ModelPicker: View {
     }
 
     private func deleteMessage(_ target: CatalogModel) -> String {
-        let size = downloadBytes(target).map(formatModelSize) ?? ""
-        if role == .liveCaptions {
-            return "释放约 \(size) 空间。删除后，实时字幕改用 SpeechAnalyzer（系统自带），直到重新下载。"
-        }
-        // 声纹模型没下好时不排队：新会议只是不区分说话人
-        if role == .voiceprint {
-            return "释放约 \(size) 空间。删除后，重新下载前新的会议不区分说话人。已有会议的说话人不受影响。"
-        }
-        var text = "释放约 \(size) 空间。删除后，新的会议会等待重新下载。"
-        if role == .minutes { text += "已生成的纪要不受影响。" }
-        return text
+        ModelDeletion.message(size: downloadBytes(target).map(formatModelSize) ?? "",
+                              selectedFor: model.modelSelections.roles(selecting: target))
     }
 
     private func delete(_ target: CatalogModel) {
