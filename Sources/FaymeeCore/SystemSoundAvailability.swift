@@ -95,6 +95,10 @@ public struct SystemSoundAvailability: Equatable, Sendable {
     /// 上次开始（或重试）采集的时刻
     public private(set) var lastAttempt: Date?
     private var pendingAuthorization: SystemSoundAuthorization?
+    /// 这次不可用已经提醒过（恢复可用时复位）
+    private var noticeGiven = false
+    /// 设备失效后在马上重建，结果出来之前先不提醒
+    private var noticeHeld = false
 
     public init() {}
 
@@ -107,6 +111,7 @@ public struct SystemSoundAvailability: Equatable, Sendable {
         guard authorization != .denied else {
             unavailableReason = .notAuthorized
             awaitsAuthorization = false
+            noticeHeld = false
             return false
         }
         pendingAuthorization = authorization
@@ -117,18 +122,34 @@ public struct SystemSoundAvailability: Equatable, Sendable {
     public mutating func started() {
         unavailableReason = nil
         awaitsAuthorization = pendingAuthorization == .undetermined
+        noticeGiven = false
+        noticeHeld = false
     }
 
     /// 某一步建立失败
     public mutating func startFailed() {
         unavailableReason = .startFailed
         awaitsAuthorization = false
+        noticeHeld = false
     }
 
-    /// 运行中聚合设备失效。调用方停掉采集，按 `isRetryDue` 重建
-    public mutating func deviceLost() {
+    /// 运行中聚合设备失效：不可用（调用方停掉采集，开一段不可用时段）。离上次尝试已隔开最小间隔时返回 true，
+    /// 调用方马上重建一次，结果出来之前先不提醒：马上建好的话只是一闪，不打扰。
+    /// 返回 false 时不马上重建（刚建好就坏，马上重建可能停不下来），直接提醒，之后按定时重试
+    @discardableResult
+    public mutating func deviceLost(at date: Date) -> Bool {
         unavailableReason = .deviceLost
         awaitsAuthorization = false
+        noticeHeld = isRetryDue(at: date, deviceChanged: true)
+        return noticeHeld
+    }
+
+    /// 该不该提醒“系统声音不可用”，该提醒时返回原因。每段不可用只提醒一次（重试又失败、原因变了都不再提醒），
+    /// 设备失效后马上重建的结果出来之前不提醒。调用方每次更新状态后取一次
+    public mutating func takeNotice() -> SystemSoundUnavailableReason? {
+        guard let unavailableReason, !noticeHeld, !noticeGiven else { return nil }
+        noticeGiven = true
+        return unavailableReason
     }
 
     /// 在等授权框时再查到的结果。查到拒绝时判为没有授权、返回 true：调用方要停掉采集

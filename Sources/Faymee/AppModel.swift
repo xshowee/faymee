@@ -454,17 +454,18 @@ final class AppModel {
         updatingSystemSoundAvailability(at: date) { startSystemSoundCapture(for: m.id, at: date) }
     }
 
-    /// 运行中聚合设备失效：停掉采集，能重试就马上重建一次。重建成功的话不算不可用，不开时段、不发通知
+    /// 运行中聚合设备失效：从失效时刻开一段不可用时段，停掉采集，能重试就马上重建一次。
+    /// 重建成功就在建好的时刻结束这段，不发通知；马上重建失败（或不马上重建）才发通知
     private func systemSoundDeviceLost() {
         guard let m = current, m.isSystemSoundPeriodOpen, systemSound.isRunning else { return }
-        let date = Date()
-        updatingSystemSoundAvailability(at: date) {
+        let lostAt = Date()
+        var rebuildsNow = false
+        updatingSystemSoundAvailability(at: lostAt) {
             stopSystemSoundCaptureKeepingSegments()
-            systemSoundAvailability.deviceLost()
-            if systemSoundAvailability.isRetryDue(at: date, deviceChanged: true) {
-                startSystemSoundCapture(for: m.id, at: date)
-            }
+            rebuildsNow = systemSoundAvailability.deviceLost(at: lostAt)
         }
+        guard rebuildsNow else { return }
+        updatingSystemSoundAvailability { startSystemSoundCapture(for: m.id, at: Date()) }
     }
 
     /// 不可用时自动重试：定时（tick）或设备变化时
@@ -487,23 +488,27 @@ final class AppModel {
         }
     }
 
-    /// 执行 body，可用与否变了时记进会议：变为不可用时开一段不可用时段，屏幕可见时发一条无声通知；
-    /// 恢复时结束这段。仍不可用、只是原因变了（重试又失败）时什么也不做
-    private func updatingSystemSoundAvailability(at date: Date, _ body: () -> Void) {
+    /// 执行 body，可用与否变了时记进会议：变为不可用时在 date 开一段不可用时段，恢复时在 date 结束这段；
+    /// 仍不可用、只是原因变了（重试又失败）时不动。date 为 nil 时取 body 执行完的时刻。
+    /// 要不要提醒由 `SystemSoundAvailability.takeNotice` 定（每段不可用一次，设备失效马上重建成功的不提醒），
+    /// 屏幕可见时发一条无声通知
+    private func updatingSystemSoundAvailability(at date: Date? = nil, _ body: () -> Void) {
         let wasAvailable = systemSoundAvailability.isAvailable
         body()
-        guard wasAvailable != systemSoundAvailability.isAvailable, var m = current else { return }
-        if let reason = systemSoundAvailability.unavailableReason {
-            m.beginSystemSoundUnavailablePeriod(at: date)
-            update(m)
-            systemSoundLog.error("系统声音不可用：\(String(describing: reason), privacy: .public)")
-            if SystemState.hasVisibleScreen {
-                Notifier.post(reason.notice.title, reason.notice.body, silent: true)
+        let date = date ?? Date()
+        if wasAvailable != systemSoundAvailability.isAvailable, var m = current {
+            if let reason = systemSoundAvailability.unavailableReason {
+                m.beginSystemSoundUnavailablePeriod(at: date)
+                update(m)
+                systemSoundLog.error("系统声音不可用：\(String(describing: reason), privacy: .public)")
+            } else {
+                m.endSystemSoundUnavailablePeriod(at: date)
+                update(m)
+                systemSoundLog.info("系统声音已恢复")
             }
-        } else {
-            m.endSystemSoundUnavailablePeriod(at: date)
-            update(m)
-            systemSoundLog.info("系统声音已恢复")
+        }
+        if let reason = systemSoundAvailability.takeNotice(), SystemState.hasVisibleScreen {
+            Notifier.post(reason.notice.title, reason.notice.body, silent: true)
         }
     }
 

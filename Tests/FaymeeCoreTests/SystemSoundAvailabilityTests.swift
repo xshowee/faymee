@@ -70,7 +70,7 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
         var a = SystemSoundAvailability()
         _ = a.shouldStart(authorization: .authorized, at: at(0))
         a.started()
-        a.deviceLost()
+        a.deviceLost(at: at(60))
         #expect(a.unavailableReason == .deviceLost)
         #expect(a.isRetryDue(at: at(60), deviceChanged: true))
         #expect(a.isRetryDue(at: at(60), deviceChanged: false))
@@ -147,5 +147,60 @@ private func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds
         let text = SystemSoundUnavailableReason.notAuthorized.idleMenuText
         #expect(text.contains("录屏与系统录音"))
         #expect(!text.contains("麦克风照常在录"))
+    }
+
+    // MARK: - 提醒
+
+    /// 建不起来、没有授权：变为不可用时提醒一次，之后重试又失败不再提醒；恢复后再不可用再提醒
+    @Test func 变为不可用时提醒一次_恢复后再不可用再提醒() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.startFailed()
+        #expect(a.takeNotice() == .startFailed)
+        #expect(a.takeNotice() == nil)
+        _ = a.shouldStart(authorization: .authorized, at: at(10))
+        a.startFailed()
+        #expect(a.takeNotice() == nil)
+        _ = a.shouldStart(authorization: .authorized, at: at(20))
+        a.started()
+        #expect(a.takeNotice() == nil)
+        _ = a.shouldStart(authorization: .denied, at: at(30))
+        #expect(a.takeNotice() == .notAuthorized)
+    }
+
+    /// 运行中设备失效、离上次建立已隔开最小间隔：马上重建一次，重建前先不提醒；建好了就不提醒（只是一闪）
+    @Test func 设备失效后马上重建成功不提醒() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let rebuildsNow = a.deviceLost(at: at(60))
+        #expect(rebuildsNow)
+        #expect(!a.isAvailable)
+        #expect(a.takeNotice() == nil)
+        _ = a.shouldStart(authorization: .authorized, at: at(60))
+        a.started()
+        #expect(a.isAvailable)
+        #expect(a.takeNotice() == nil)
+    }
+
+    @Test func 设备失效后马上重建失败才提醒() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        _ = a.deviceLost(at: at(60))
+        _ = a.shouldStart(authorization: .authorized, at: at(60))
+        a.startFailed()
+        #expect(a.takeNotice() == .startFailed)
+        #expect(a.takeNotice() == nil)
+    }
+
+    /// 刚建好不到最小间隔又失效：不马上重建（免得建了又坏停不下来），直接提醒，之后按定时重试
+    @Test func 刚建好就失效时不马上重建并直接提醒() {
+        var a = SystemSoundAvailability()
+        _ = a.shouldStart(authorization: .authorized, at: at(0))
+        a.started()
+        let rebuildsNow = a.deviceLost(at: at(SystemSoundAvailability.minimumRetrySpacing - 0.5))
+        #expect(!rebuildsNow)
+        #expect(a.takeNotice() == .deviceLost)
     }
 }
