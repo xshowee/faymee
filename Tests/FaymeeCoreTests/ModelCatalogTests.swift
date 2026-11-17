@@ -115,6 +115,36 @@ import Testing
         #expect(qwen?.parameters.thinking == false)
     }
 
+    /// ticket 11 评估过的纪要模型：按评估时的参数跑（8192 上下文、标准分段、不开思考），
+    /// 每个都带内存、速度和一句结论，Qwen3 4B 仍是默认
+    @Test func 纪要模型有Qwen3_4B和Qwen3_5_4B_9B_都按评估参数_带内存速度结论() {
+        let ids = catalog.models(for: .minutes).map(\.id)
+        #expect(ids == ["llama/qwen3-4b-q4km", "llama/qwen3.5-4b-q4km", "llama/qwen3.5-9b-q4km"])
+        for m in catalog.models(for: .minutes) {
+            #expect(m.parameters.contextTokens == 8192, "\(m.id)")
+            #expect(m.parameters.minutesChunking == .standard, "\(m.id)")
+            #expect(m.parameters.thinking == false, "\(m.id)")
+            #expect(m.memory != nil && m.speed != nil && m.verdict(for: .minutes) != nil, "\(m.id)")
+            #expect(m.license == "Apache-2.0", "\(m.id)")
+        }
+        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == "llama/qwen3-4b-q4km")
+    }
+
+    @Test func Qwen3_5的文件放在各自目录_两个下载源大小哈希一致() {
+        let small = catalog.model(id: "llama/qwen3.5-4b-q4km")?.download
+        let large = catalog.model(id: "llama/qwen3.5-9b-q4km")?.download
+        #expect(small?.files.map(\.path) == ["Qwen3.5-4B-Q4_K_M.gguf"])
+        #expect(small?.size == 2_740_937_888)
+        #expect(small?.files.first?.sha256 == "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4")
+        #expect(large?.files.map(\.path) == ["Qwen3.5-9B-Q4_K_M.gguf"])
+        #expect(large?.size == 5_680_522_464)
+        #expect(large?.files.first?.sha256 == "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8")
+        #expect(small?.directoryName.isEmpty == false && large?.directoryName.isEmpty == false)
+        for m in [small, large] {
+            #expect(m?.files.first?.downloadURLs.map(\.host) == ["modelscope.cn", "huggingface.co"])
+        }
+    }
+
     @Test func 会后转写模型的id带本机前缀_转写稿里不当成在线引擎() {
         // 目录以后删掉的模型，旧转写稿也要按前缀认出是本机的（见 Transcript.onlineEngineLabel）
         for model in ModelCatalog.builtIn.models where model.roles.contains(.transcription) {

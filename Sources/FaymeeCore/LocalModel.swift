@@ -61,6 +61,33 @@ public struct LocalModel: Sendable, Equatable {
             URL(string: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q4_K_M.gguf")!,
         ])
 
+    /// Qwen3.5 4B（Q4_K_M）。Qwen 没发 Qwen3.5 的 GGUF，用的是 Unsloth 转换的（第三方，imatrix 量化），
+    /// ModelScope 与 Hugging Face 上是同一个文件（大小、sha256 一致，2026-11-18 核对）。协议：Apache-2.0
+    public static let qwen3_5_4B = unslothQwen3_5(
+        id: "llama/qwen3.5-4b-q4km", size: "4B", bytes: 2_740_937_888,
+        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        hfCommit: "e87f176479d0855a907a41277aca2f8ee7a09523")
+
+    /// Qwen3.5 9B（Q4_K_M），来源同 `qwen3_5_4B`。协议：Apache-2.0
+    public static let qwen3_5_9B = unslothQwen3_5(
+        id: "llama/qwen3.5-9b-q4km", size: "9B", bytes: 5_680_522_464,
+        sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        hfCommit: "3885219b6810b007914f3a7950a8d1b469d598a5")
+
+    /// Unsloth 的 Qwen3.5 GGUF：放在 `Models/<id 去掉 llama/>/` 下（不和 Qwen3 4B 一样放根目录）
+    private static func unslothQwen3_5(id: String, size: String, bytes: Int64, sha256: String,
+                                       hfCommit: String) -> LocalModel {
+        let file = "Qwen3.5-\(size)-Q4_K_M.gguf"
+        let repo = "unsloth/Qwen3.5-\(size)-GGUF"
+        return LocalModel(id: id, directoryName: String(id.dropFirst("llama/".count)), files: [
+            ModelFile(path: file, size: bytes, sha256: sha256, downloadURLs: [
+                URL(string: "https://modelscope.cn/api/v1/models/\(repo)/repo?Revision=master&FilePath=\(file)")!,
+                // 钉在 2026-03-02 的 commit
+                URL(string: "https://huggingface.co/\(repo)/resolve/\(hfCommit)/\(file)")!,
+            ]),
+        ])
+    }
+
     /// 约定的模型根目录：~/Library/Application Support/Faymee/Models
     public static var defaultDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

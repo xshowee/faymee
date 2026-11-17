@@ -334,6 +334,34 @@ extension LlamaTextGeneratorModelTests {
     }
 }
 
+/// 目录里其他纪要模型（ticket 11 加的 Qwen3.5）的契约测试：用目录项建引擎，模型不在时跳过。
+/// 模型根目录默认是 App 的，可以用 `FAYMEE_CONTRACT_MODELS_DIR` 指到别处（如评估时下载的目录）
+private let contractModelsDirectory = ProcessInfo.processInfo.environment["FAYMEE_CONTRACT_MODELS_DIR"]
+    .map { URL(fileURLWithPath: $0) } ?? LocalModel.defaultDirectory
+private let otherMinutesModels = ModelCatalog.builtIn.models(for: .minutes)
+    .filter { $0.id != LocalModel.qwen3_4B.id && $0.download?.isDownloaded(in: contractModelsDirectory) == true }
+
+@Suite(.serialized, .enabled(if: !otherMinutesModels.isEmpty, "需要本机已下载 Qwen3.5 纪要模型"))
+struct CatalogMinutesModelContractTests {
+    @Test(arguments: otherMinutesModels.map(\.id))
+    func 契约_目录项建的引擎生成的纪要能解析_出处都存在_各节不全为空(id: String) async throws {
+        let entry = try #require(ModelCatalog.builtIn.model(id: id))
+        let generator = LlamaTextGenerator(catalogModel: entry, directory: contractModelsDirectory)
+        defer { generator.unload() }
+        let transcript = try weeklyMeetingTranscript()
+        let ids = Set(transcript.sentences.map(\.id))
+        try await generator.load { _ in }
+        let minutes = try await generateMinutes(
+            transcript: transcript, title: "十一月迭代周会", startedAt: Date(timeIntervalSince1970: 1_794_276_000),
+            template: .general, generator: generator, model: id, timeZone: TimeZone(identifier: "Asia/Shanghai")!)
+        let items = minutes.sections.flatMap(\.items)
+        print("\(id)：各节条数 \(minutes.sections.map(\.items.count))，未找到出处 \(items.filter(\.isUnsourced).count) 条")
+        #expect(minutes.sections.contains { !$0.items.isEmpty })
+        #expect(items.flatMap(\.refs).allSatisfy { ids.contains($0.id) })
+        #expect(items.contains { !$0.refs.isEmpty })
+    }
+}
+
 private final class Values: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Double] = []

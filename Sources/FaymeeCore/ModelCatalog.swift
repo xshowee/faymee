@@ -274,8 +274,30 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.qwen3_4B.id, roles: [.minutes], family: .llamaGGUF,
             source: .download(.qwen3_4B), name: "Qwen3 4B（Q4_K_M）",
-            // 内存、速度待 ticket 11 按评估填
-            verdicts: [.minutes: "纪要在本机生成，不上传任何数据"],
+            // ticket 11 实测（M3 Pro / 18GB，4 场真实会议，不开思考）：内存是进程峰值 resident（含 mmap 的
+            // 权重 2.5 GB；phys_footprint 约 1.45 GB）；20 分钟会议 180–254 秒，56 分钟会议 594 秒
+            memory: "约 3.9 GB", speed: "20 分钟会议约 3–4 分钟",
+            verdicts: [.minutes: "截止时间常被编造，条目偏空泛；偶尔生成失败要重试"],
+            parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
+                                        minutesChunking: .standard, thinking: false),
+            license: "Apache-2.0"),
+        CatalogModel(
+            id: LocalModel.qwen3_5_4B.id, roles: [.minutes], family: .llamaGGUF,
+            source: .download(.qwen3_5_4B), name: "Qwen3.5 4B（Q4_K_M）",
+            // Unsloth 转换的 GGUF（Qwen 没发官方 GGUF）。ticket 11 实测：resident 峰值 3.4 GB（权重 2.7 GB，
+            // footprint 约 0.65 GB：混合注意力，KV 小）；20 分钟会议 105–110 秒，56 分钟会议 323 秒
+            memory: "约 3.4 GB", speed: "20 分钟会议约 2 分钟",
+            verdicts: [.minutes: "比 Qwen3 4B 准、快、省内存，基本不编造截止时间"],
+            parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
+                                        minutesChunking: .standard, thinking: false),
+            license: "Apache-2.0"),
+        CatalogModel(
+            id: LocalModel.qwen3_5_9B.id, roles: [.minutes], family: .llamaGGUF,
+            source: .download(.qwen3_5_9B), name: "Qwen3.5 9B（Q4_K_M）",
+            // 来源同上。ticket 11 实测：resident 峰值 6.2 GB（权重 5.7 GB）；20 分钟会议 246 秒（合并陷入重复、
+            // 重试时 694 秒），56 分钟会议 451 秒
+            memory: "约 6.2 GB", speed: "20 分钟会议约 4 分钟",
+            verdicts: [.minutes: "待办最全、最准；占内存多，建议 16 GB 以上内存的机器用"],
             parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
                                         minutesChunking: .standard, thinking: false),
             license: "Apache-2.0"),
