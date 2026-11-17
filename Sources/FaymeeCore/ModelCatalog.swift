@@ -227,12 +227,12 @@ extension ModelCatalog {
         CatalogModel(
             id: LocalModel.qwen3ASR.id, roles: [.transcription], family: .sherpaQwen3ASR,
             source: .download(.qwen3ASR), name: "Qwen3-ASR",
+            // 实测（ticket 05）：峰值内存 1.8 GB（不含会议音频），20 分钟会议 111–124 秒（带热词时慢一点）
             memory: "约 1.9 GB", speed: "20 分钟会议约 2 分钟",
             capabilities: ModelCapabilities(punctuation: true, wordTimings: .estimated, hotwords: true),
             verdicts: [.transcription: "干净录音最准；多人会议、远场收音时可能编造内容"],
             parameters: ModelParameters(hotwordTokenBudget: 150),
-            // 适配器（ticket 05）接上 LocalTranscriptionEngine 之前先不出现在选择框里
-            dependencies: [sileroVADID], isHidden: true, license: "Apache-2.0"),
+            dependencies: [sileroVADID], license: "Apache-2.0"),
         CatalogModel(
             id: speechAnalyzerID, roles: [.transcription, .liveCaptions], family: .speechAnalyzer,
             source: .system, name: "SpeechAnalyzer（系统自带）",

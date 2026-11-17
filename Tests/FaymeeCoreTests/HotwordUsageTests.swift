@@ -49,3 +49,23 @@ struct HotwordUsageContractTests {
                 == .partial(model: "Fun-ASR-Nano", used: 8, total: 9))
     }
 }
+
+/// 用 Qwen3-ASR 自带的 tokenizer 实际计数（热词用空格连接）。模型没下载时跳过
+@Suite(.enabled(if: LocalModel.qwen3ASR.isDownloaded(), "需要已下载的 Qwen3-ASR"))
+struct HotwordUsageQwen3ASRContractTests {
+    /// 这 8 个词用空格连接是 26 个 token（与 sherpa 的 debug 日志一致，见 ticket 05）
+    private let words = ["DeerFlow", "LangChain", "Harness", "Agent", "智能体", "工具广场", "模型广场", "端到端研发"]
+
+    private func qwen3ASR(budget: Int) -> CatalogModel {
+        let m = ModelCatalog.builtIn.model(id: LocalModel.qwen3ASR.id)!
+        return CatalogModel(id: m.id, roles: m.roles, family: m.family, source: m.source, name: m.name,
+                            capabilities: m.capabilities, parameters: ModelParameters(hotwordTokenBudget: budget))
+    }
+
+    @Test func 预算内全部生效_超出时只用得上前面的() {
+        let dir = LocalModel.defaultDirectory
+        #expect(HotwordUsage(model: qwen3ASR(budget: 26), hotwords: words, modelDirectory: dir) == .all)
+        #expect(HotwordUsage(model: qwen3ASR(budget: 26), hotwords: words + ["多余"], modelDirectory: dir)
+                == .partial(model: "Qwen3-ASR", used: 8, total: 9))
+    }
+}

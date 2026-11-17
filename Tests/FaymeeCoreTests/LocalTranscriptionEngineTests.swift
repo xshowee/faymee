@@ -64,6 +64,22 @@ import Testing
         await #expect(throws: SherpaModelError.vadMissing) { try await ready.transcriber.prepare(progress: { _ in }) }
     }
 
+    @Test func 选了Qwen3ASR_出现在选择框里_没下载时排队_下好后用它的转写器() async throws {
+        defer { cleanUp() }
+        #expect(ModelCatalog.builtIn.models(for: .transcription).contains { $0.id == LocalModel.qwen3ASR.id })
+        let engine = make(selecting: LocalModel.qwen3ASR.id)
+        #expect(engine.name == "sherpa-onnx/qwen3-asr-0.6B-int8-2026-03-25")
+        #expect(engine.waitReason == .modelDownload(id: "sherpa-onnx/qwen3-asr-0.6B-int8-2026-03-25"))
+        await #expect(throws: SherpaModelError.missing(model: "Qwen3-ASR", file: "conv_frontend.onnx")) {
+            try await engine.transcriber.prepare(progress: { _ in })
+        }
+
+        try placeFiles(of: .qwen3ASR)
+        let ready = make(selecting: LocalModel.qwen3ASR.id)
+        #expect(ready.waitReason == nil)
+        await #expect(throws: SherpaModelError.vadMissing) { try await ready.transcriber.prepare(progress: { _ in }) }
+    }
+
     @Test func 选了Paraformer_标点模型也下好了才就绪() async throws {
         defer { cleanUp() }
         try placeFiles(of: .paraformer)

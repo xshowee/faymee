@@ -32,6 +32,12 @@ public enum HotwordUsage: Hashable, Sendable {
                                                modelDirectory: local.directory(in: modelDirectory)))
                     .map { ($0.count, FunASRNano.sanitize(hotwords).count) }
                 : nil
+        case .sherpaQwen3ASR:
+            let local = LocalModel.qwen3ASR
+            fitted = local.isDownloaded(in: modelDirectory)
+                ? (try? Qwen3ASR.fitHotwords(hotwords, budget: budget, modelDirectory: local.directory(in: modelDirectory)))
+                    .map { ($0.count, Qwen3ASR.sanitizedHotwords(hotwords).count) }
+                : nil
         default:
             fitted = nil
         }

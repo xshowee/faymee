@@ -18,8 +18,10 @@ public enum LocalTranscriptionEngine {
         case .sherpaFunASRNano:
             SherpaOfflineTranscriber.funASRNano(model: model, catalog: catalog, modelDirectory: modelDirectory,
                                                 vadModel: vadModel)
-        case .sherpaQwen3ASR, .sherpaOnlineTransducer, .llamaGGUF, .sherpaSpeakerEmbedding,
-             .sherpaPunctuation, .sileroVAD:
+        case .sherpaQwen3ASR:
+            SherpaOfflineTranscriber.qwen3ASR(model: model, catalog: catalog, modelDirectory: modelDirectory,
+                                              vadModel: vadModel)
+        case .sherpaOnlineTransducer, .llamaGGUF, .sherpaSpeakerEmbedding, .sherpaPunctuation, .sileroVAD:
             nil
         }
     }
