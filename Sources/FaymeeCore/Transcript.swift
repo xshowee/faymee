@@ -76,7 +76,7 @@ public struct TranscriptSentence: Hashable, Sendable {
     }
 }
 
-/// 录音中没录到声音的一段（目前只有合盖），在转写稿里显示为不可编辑的标记行
+/// 录音中有一路或两路声音没录到的一段（见 `GapReason`），在转写稿里显示为不可编辑的标记行
 public struct TranscriptGap: Hashable, Sendable {
     public var start: TimeInterval
     public var end: TimeInterval
@@ -86,6 +86,69 @@ public struct TranscriptGap: Hashable, Sendable {
         self.start = start
         self.end = end
         self.reason = reason
+    }
+}
+
+/// 空白的各个使用方怎么对待空白，都按空白的原因在这里决定，不各自假设“空白 = 没声音的洞”。
+/// 新增原因时只改这里（每条都是穷举的 switch，漏了编译不过）
+extension GapReason {
+    /// 空白行的文字（不含时间）。转写稿界面、复制全文、导出转写稿、纪要提示词都用它
+    public var title: String {
+        switch self {
+        case .lidClosed: "合盖，未录到声音"
+        case .lidClosedSystemSoundOnly: "合盖，只录到系统声音"
+        case .systemSoundMissing: "未录到系统声音"
+        }
+    }
+
+    /// 转写稿界面里空白行的图标（SF Symbols 名）
+    public var symbolName: String {
+        switch self {
+        case .lidClosed: "mic.slash"
+        case .lidClosedSystemSoundOnly: "speaker.wave.2"
+        case .systemSoundMissing: "speaker.slash"
+        }
+    }
+
+    /// 纪要提示词里对这种空白行的说明，接在“转写稿由语音识别生成……”之后
+    var promptExplanation: String {
+        switch self {
+        case .lidClosed: "“[\(title) …]”表示这段时间没有录到声音，没有任何内容，不要据此推断发生了什么。"
+        case .lidClosedSystemSoundOnly:
+            "“[\(title) …]”表示这段时间只录到电脑播放的声音（如远程参会者的发言），"
+                + "没录到本机麦克风前的人说的话；其后的句子照常是会议内容。"
+        case .systemSoundMissing:
+            "“[\(title) …]”表示这段时间没录到电脑播放的声音（如远程参会者的发言），"
+                + "只录到本机麦克风前的人说的话；其后的句子照常是会议内容，但可能缺了远程参会者的话。"
+        }
+    }
+
+    /// 这段录音什么都没录到（是静音）：识别出的句子、区分出的说话片段只能是噪声，剔除；
+    /// 会中标注的区间也不算落在其中的句子
+    public var dropsSpeech: Bool {
+        switch self {
+        case .lidClosed: true
+        // 这段录到了另一路声音，句子是真的
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
+        }
+    }
+
+    /// 长会议分段时，优先在这种空白之后切开（中间没有声音，前后多半是两段内容）
+    var isPreferredSplitPoint: Bool {
+        switch self {
+        case .lidClosed: true
+        // 中间照常有人说话，不算内容的分界
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
+        }
+    }
+
+    /// 播放位置落在空白里时，当前条目是空白行本身；为 false 时空白行不当当前条目，高亮其中的句子
+    var isPlaybackTarget: Bool {
+        switch self {
+        case .lidClosed: true
+        // 播放的是其中的句子
+        case .lidClosedSystemSoundOnly, .systemSoundMissing: false
+        }
     }
 }
 

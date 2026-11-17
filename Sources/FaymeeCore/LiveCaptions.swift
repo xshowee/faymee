@@ -6,6 +6,7 @@ import Observation
 /// - 会中面板可见、设置里打开了实时字幕（`isWanted`）才跑；第一次需要时才创建会话（开始准备模型），
 ///   面板一直没开过就什么都不做
 /// - 不需要时暂停会话（停掉引擎、释放模型），再需要时恢复（会话插分隔行）
+/// - 麦克风和系统声音两路经实时混音混成一路，交给同一个会话
 /// - 只在会话真正在跑时打开分路，其余时候（没开过、暂停、准备中、出错、录音结束）不复制音频
 /// - 录音结束时 `stop()`，之后什么都不做
 ///
@@ -24,7 +25,11 @@ public final class LiveCaptions {
     }
 
     /// 录音的采集回调写盘之后往这里送一份
-    @ObservationIgnored public let tap: LiveAudioTap
+    public var tap: LiveAudioTap { mixer.microphone }
+    /// 系统声音的采集回调写盘之后往这里送一份
+    public var systemSoundTap: LiveAudioTap { mixer.systemSound }
+
+    @ObservationIgnored private let mixer = LiveAudioMixer()
 
     @ObservationIgnored private let engine: any StreamingTranscriber
     @ObservationIgnored private let recordingStartedAt: Date
@@ -34,11 +39,10 @@ public final class LiveCaptions {
 
     /// recordingStartedAt 是录音开始的墙钟时间（字幕时间的零点）。now 只给测试替换
     public init(engine: any StreamingTranscriber, recordingStartedAt: Date, hotwords: [String],
-                tap: LiveAudioTap = LiveAudioTap(), now: @escaping () -> Date = Date.init) {
+                now: @escaping () -> Date = Date.init) {
         self.engine = engine
         self.recordingStartedAt = recordingStartedAt
         self.hotwords = hotwords
-        self.tap = tap
         self.now = now
     }
 
@@ -46,12 +50,12 @@ public final class LiveCaptions {
     /// 不需要时分路已关、会话已暂停，`pump` 什么都不做，定时器可以停掉
     public var needsPumping: Bool { isWanted && !stopped }
 
-    /// 取走分路里的音频交给会话，并按会话的状态开关分路
+    /// 取走两路分路里的音频混成一路交给会话，并按会话的状态开关分路
     public func pump() {
         let running = isRunning
-        tap.isEnabled = running
+        mixer.isEnabled = running
         guard running, let session else { return }
-        for chunk in tap.drain() {
+        for chunk in mixer.drain() {
             session.append(chunk.buffer, at: chunk.time)
         }
     }
@@ -59,7 +63,7 @@ public final class LiveCaptions {
     /// 录音结束：停掉会话、关掉分路，之后什么都不做
     public func stop() {
         stopped = true
-        tap.isEnabled = false
+        mixer.isEnabled = false
         session?.stop()
     }
 
@@ -75,7 +79,7 @@ public final class LiveCaptions {
                                              hotwords: hotwords, now: now)
             }
         } else {
-            tap.isEnabled = false
+            mixer.isEnabled = false
             session?.pause()
         }
     }

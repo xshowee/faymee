@@ -15,10 +15,14 @@ private func segment(_ file: String, startedAt seconds: TimeInterval,
 
 /// 一个从 t0 起、长 total 秒的连续分片
 private func meeting(total: TimeInterval = 3600, segments: [Segment]? = nil, gaps: [Gap] = [],
+                     systemSound: [WallClockPeriod] = [], unavailable: [WallClockPeriod] = [],
                      annotations: [Annotation]) -> Meeting {
-    Meeting(id: "m", title: "会议", startedAt: t0, endedAt: at(total), status: .done,
-            segments: segments ?? [segment("0001.caf", startedAt: 0, offset: 0, duration: total)],
-            recording: "recording.m4a", duration: total, gaps: gaps, annotations: annotations)
+    var m = Meeting(id: "m", title: "会议", startedAt: t0, endedAt: at(total), status: .done,
+                    segments: segments ?? [segment("0001.caf", startedAt: 0, offset: 0, duration: total)],
+                    recording: "recording.m4a", duration: total, gaps: gaps, annotations: annotations)
+    m.systemSoundPeriodList = systemSound
+    m.systemSoundUnavailablePeriodList = unavailable
+    return m
 }
 
 private func mark(_ id: String, _ seconds: TimeInterval) -> Annotation {
@@ -143,6 +147,21 @@ private func transcript(_ spans: [(TimeInterval, TimeInterval)]) -> Transcript {
         let spans = m.annotationSpans(in: t)
         #expect(spans.map(\.annotationIDs) == [["a1"], ["a2"]])
         #expect(spans.map(\.sentenceIDs) == [[], ["s2"]])
+    }
+
+    /// 系统声音全程开着：合盖 300–1500 秒只录到系统声音，2000–2400 秒系统声音不可用，
+    /// 两段里的句子都是真的，照常算区间里的句子；2400–2700 秒合盖又不可用，两路都没录到，仍不算
+    @Test func 两种新空白里的句子照常算_合盖未录到声音仍不算() {
+        let m = meeting(gaps: [Gap(start: at(300), end: at(1500), reason: .lidClosed),
+                               Gap(start: at(2400), end: at(2700), reason: .lidClosed)],
+                        systemSound: [WallClockPeriod(start: t0)],
+                        unavailable: [WallClockPeriod(start: at(2000), end: at(2700))],
+                        annotations: [mark("a1", 360), mark("a2", 2100), mark("a3", 2600)])
+        let t = transcript([(330, 340), (2050, 2060), (2550, 2560)])
+
+        let spans = m.annotationSpans(in: t)
+        #expect(spans.map(\.annotationIDs) == [["a1"], ["a2"], ["a3"]])
+        #expect(spans.map(\.sentenceIDs) == [["s1"], ["s2"], []])
     }
 
     /// 没有句子的区间照样返回：标记不进纪要、笔记未扩写，由纪要生成判断

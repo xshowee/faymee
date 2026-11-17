@@ -160,15 +160,18 @@ private final class Fixture {
 
     deinit { try? FileManager.default.removeItem(at: store.root) }
 
-    /// 一场 10 分钟、已整理好的会议，可带合盖空白
+    /// 一场 10 分钟、已整理好的会议，可带合盖空白、系统声音时段、系统声音不可用时段
     @discardableResult
-    func addMeeting(_ id: String = "m1", gaps: [Gap] = [], transcription: TranscriptionState? = nil) -> Meeting {
+    func addMeeting(_ id: String = "m1", gaps: [Gap] = [], systemSound: [WallClockPeriod] = [],
+                    unavailable: [WallClockPeriod] = [], transcription: TranscriptionState? = nil) -> Meeting {
         var m = Meeting(id: id, title: "会议", startedAt: t0, endedAt: at(600), status: .done,
                         segments: [Segment(file: "0001.caf", startedAt: t0, sampleRate: 48000, channels: 1,
                                            device: "MacBook Pro 麦克风", deviceUID: "BuiltIn",
                                            offset: 0, duration: 600)],
                         recording: "recording.m4a", duration: 600)
         m.lidGaps = gaps
+        m.systemSoundPeriodList = systemSound
+        m.systemSoundUnavailablePeriodList = unavailable
         m.transcription = transcription
         try! FileManager.default.createDirectory(at: store.directory(id), withIntermediateDirectories: true)
         try! store.save(m)
@@ -466,6 +469,238 @@ private final class Fixture {
         #expect(!f.pipeline.enqueue("不存在"))
         #expect(f.pipeline.isIdle)
         #expect(f.host.history.isEmpty)
+    }
+}
+
+/// 转写稿里的空白由合盖、系统声音时段、系统声音不可用时段在转写时推出（spec 的五种组合）
+@MainActor @Suite struct SystemSoundGapTests {
+    /// 合盖 300–360 秒、全程开着系统声音：这段只录到系统声音，里面的句子是对方的发言，保留
+    @Test func 合盖时系统声音正常标为只录到系统声音_句子保留() async throws {
+        let f = Fixture(FakeTranscriber([
+            .init(start: 295, end: 299, text: "合盖前"),
+            .init(start: 320, end: 323, text: "对方在说"),
+        ]))
+        let m = f.addMeeting(gaps: [Gap(start: at(300), end: at(360), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0, end: at(600))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .sentence(.init(id: "s1", start: 295, end: 299, text: "合盖前")),
+            .gap(.init(start: 300, end: 360, reason: .lidClosedSystemSoundOnly)),
+            .sentence(.init(id: "s2", start: 320, end: 323, text: "对方在说")),
+        ]
+        #expect(t.items == expected)
+        #expect(t.items.compactMap { if case let .gap(g) = $0 { g.label } else { nil } }
+            == ["合盖，只录到系统声音（05:00–06:00，01:00）"])
+    }
+
+    /// 一场会里五种组合都出现：系统声音 0–100 开、100–200 关、200 秒后开，400–500 不可用；
+    /// 合盖 150–180（关）、250–280（正常）、450–470（不可用）
+    @Test func 五种组合推出的空白和句子() async throws {
+        let f = Fixture(FakeTranscriber([
+            .init(start: 50, end: 52, text: "开着系统声音"),
+            .init(start: 120, end: 122, text: "关着系统声音"),
+            .init(start: 160, end: 162, text: "合盖关着系统声音的幻觉"),
+            .init(start: 260, end: 262, text: "合盖时对方在说"),
+            .init(start: 420, end: 422, text: "系统声音不可用时我在说"),
+            .init(start: 460, end: 462, text: "合盖又不可用的幻觉"),
+            .init(start: 480, end: 482, text: "开盖后系统声音还不可用"),
+        ]))
+        let m = f.addMeeting(
+            gaps: [Gap(start: at(150), end: at(180), reason: .lidClosed),
+                   Gap(start: at(250), end: at(280), reason: .lidClosed),
+                   Gap(start: at(450), end: at(470), reason: .lidClosed)],
+            systemSound: [WallClockPeriod(start: t0, end: at(100)), WallClockPeriod(start: at(200), end: at(600))],
+            unavailable: [WallClockPeriod(start: at(400), end: at(500))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .sentence(.init(id: "s1", start: 50, end: 52, text: "开着系统声音")),
+            .sentence(.init(id: "s2", start: 120, end: 122, text: "关着系统声音")),
+            .gap(.init(start: 150, end: 180, reason: .lidClosed)),
+            .gap(.init(start: 250, end: 280, reason: .lidClosedSystemSoundOnly)),
+            .sentence(.init(id: "s3", start: 260, end: 262, text: "合盖时对方在说")),
+            .gap(.init(start: 400, end: 450, reason: .systemSoundMissing)),
+            .sentence(.init(id: "s4", start: 420, end: 422, text: "系统声音不可用时我在说")),
+            .gap(.init(start: 450, end: 470, reason: .lidClosed)),
+            .gap(.init(start: 470, end: 500, reason: .systemSoundMissing)),
+            .sentence(.init(id: "s5", start: 480, end: 482, text: "开盖后系统声音还不可用")),
+        ]
+        #expect(t.items == expected)
+        let labels: [String] = [
+            "合盖，未录到声音（02:30–03:00，00:30）",
+            "合盖，只录到系统声音（04:10–04:40，00:30）",
+            "未录到系统声音（06:40–07:30，00:50）",
+            "合盖，未录到声音（07:30–07:50，00:20）",
+            "未录到系统声音（07:50–08:20，00:30）",
+        ]
+        #expect(t.items.compactMap { if case let .gap(g) = $0 { g.label } else { nil } } == labels)
+    }
+
+    /// 合盖 300–400：系统声音 330–350 关，370–420 不可用。合盖在每个变化时刻拆开，
+    /// 不可用的那段被合盖从中间截走，合盖之后剩下的部分标“未录到系统声音”
+    @Test func 合盖跨过开关切换和不可用的起止时拆开各标() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(
+            gaps: [Gap(start: at(300), end: at(400), reason: .lidClosed)],
+            systemSound: [WallClockPeriod(start: t0, end: at(330)), WallClockPeriod(start: at(350), end: at(600))],
+            unavailable: [WallClockPeriod(start: at(370), end: at(420))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 300, end: 330, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 330, end: 350, reason: .lidClosed)),
+            .gap(.init(start: 350, end: 370, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 370, end: 400, reason: .lidClosed)),
+            .gap(.init(start: 400, end: 420, reason: .systemSoundMissing)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合盖 100–200：系统声音 120 秒起不可用，150 秒关掉。120–150 不可用和 150–200 关都是“合盖，未录到声音”，
+    /// 合成一段，不出现两行一样的空白
+    @Test func 拆开后相邻且原因相同的合成一段() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(100), end: at(200), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0, end: at(150))],
+                             unavailable: [WallClockPeriod(start: at(120), end: at(150))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 100, end: 120, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 120, end: 200, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合盖空白和系统声音时段的起止由 App 各取各的当前时间：合着盖开始、停止录音时，系统声音时段比合盖晚一点开始、
+    /// 早一点结束。拆出来的零碎段并进邻段，不多出几行几毫秒的“合盖，未录到声音”（同会议详情的合盖说明）
+    @Test func 合盖拆出的零碎段并进邻段() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: t0, end: at(300), reason: .lidClosed),
+                                    Gap(start: at(500), end: at(600), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: at(0.5), end: at(599.9))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 0, end: 300, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 500, end: 600, reason: .lidClosedSystemSoundOnly)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合盖 100–200：系统声音正常到 150，150–152 不可用，152 秒关掉。先把零碎的 150–152 并进前一段，
+    /// 再合并相邻同原因的段，分界落在 152（与会议详情的合盖说明一致）
+    @Test func 先并零碎段再合并同原因的段() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(100), end: at(200), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0, end: at(152))],
+                             unavailable: [WallClockPeriod(start: at(150), end: at(152))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 100, end: 152, reason: .lidClosedSystemSoundOnly)),
+            .gap(.init(start: 152, end: 200, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合着盖停止录音时，不可用时段比合盖晚几毫秒结束：去掉合盖后剩下的零碎一截不标；
+    /// 本来就很短的不可用时段（100–102）照常标
+    @Test func 不可用被合盖截剩的零碎一截不标_本来就短的照常标() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(500), end: at(600), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0)],
+                             unavailable: [WallClockPeriod(start: at(100), end: at(102)),
+                                           WallClockPeriod(start: at(400), end: at(600.003))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 100, end: 102, reason: .systemSoundMissing)),
+            .gap(.init(start: 400, end: 500, reason: .systemSoundMissing)),
+            .gap(.init(start: 500, end: 600, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 开关关着时，不可用时段不算（只有开着的系统声音才谈得上没录到）
+    @Test func 开关关着时不可用不标空白() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(systemSound: [WallClockPeriod(start: t0, end: at(100))],
+                             unavailable: [WallClockPeriod(start: at(50), end: at(300))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.items == [.gap(.init(start: 50, end: 100, reason: .systemSoundMissing))])
+    }
+
+    /// 录音中断时仍在合盖、系统声音仍开着、仍不可用（时段没有结束时间）：延续到录音结束
+    @Test func 没有结束时间的时段延续到录音结束() async throws {
+        let f = Fixture()
+        let m = f.addMeeting(gaps: [Gap(start: at(500), reason: .lidClosed)],
+                             systemSound: [WallClockPeriod(start: t0)],
+                             unavailable: [WallClockPeriod(start: at(400))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        let expected: [TranscriptItem] = [
+            .gap(.init(start: 400, end: 500, reason: .systemSoundMissing)),
+            .gap(.init(start: 500, end: 600, reason: .lidClosed)),
+        ]
+        #expect(t.items == expected)
+    }
+
+    /// 合盖 100–200 只录到系统声音、300–400 系统声音不可用、500–550 两路都没录到：
+    /// 前两段里的说话片段照常算，句子有说话人；最后一段里的片段剔除，句子本身也不进转写稿
+    @Test func 新空白里的句子保留说话人_合盖未录到声音仍剔除() async throws {
+        let f = Fixture(FakeTranscriber([
+            .init(start: 150, end: 155, text: "对方在说"),
+            .init(start: 350, end: 355, text: "我在说"),
+            .init(start: 520, end: 525, text: "噪声"),
+        ]), diarizer: FakeDiarizer([
+            SpeakerSegment(start: 150, end: 155, speaker: 1),
+            SpeakerSegment(start: 350, end: 355, speaker: 2),
+            SpeakerSegment(start: 520, end: 525, speaker: 3),
+        ]))
+        let m = f.addMeeting(
+            gaps: [Gap(start: at(100), end: at(200), reason: .lidClosed),
+                   Gap(start: at(500), end: at(550), reason: .lidClosed)],
+            systemSound: [WallClockPeriod(start: t0, end: at(450))],
+            unavailable: [WallClockPeriod(start: at(300), end: at(400))])
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.text) == ["对方在说", "我在说"])
+        #expect(t.sentences.map(\.speaker) == ["spk1", "spk2"])
+        #expect(t.diarization?.speakers.map(\.speechDuration) == [5, 5])
+        #expect(f.diarizer?.calls.map(\.sentences) == [[150...155, 350...355]])
     }
 }
 

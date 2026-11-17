@@ -37,7 +37,7 @@ public final class LiveAudioTap: @unchecked Sendable {
 
     /// 采集线程调用：拷贝一份（采集的缓冲在回调返回后会被复用）。关着时直接返回
     public func push(_ buffer: AVAudioPCMBuffer, at time: Date) {
-        guard isEnabled, let copy = Self.copy(buffer) else { return }
+        guard isEnabled, let copy = buffer.copied() else { return }
         let seconds = Self.seconds(copy)
         lock.withLock {
             guard enabled else { return }
@@ -66,13 +66,15 @@ public final class LiveAudioTap: @unchecked Sendable {
     private static func seconds(_ buffer: AVAudioPCMBuffer) -> TimeInterval {
         Double(buffer.frameLength) / buffer.format.sampleRate
     }
+}
 
-    private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard buffer.frameLength > 0,
-              let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
+extension AVAudioPCMBuffer {
+    /// 拷贝一份。采集的缓冲在回调返回后会被复用，要留着用就得先拷贝。空缓冲返回 nil
+    func copied() -> AVAudioPCMBuffer? {
+        guard frameLength > 0, let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameLength)
         else { return nil }
-        copy.frameLength = buffer.frameLength
-        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
+        copy.frameLength = frameLength
+        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: audioBufferList))
         let target = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
         for (s, t) in zip(source, target) {
             guard let from = s.mData, let to = t.mData else { continue }

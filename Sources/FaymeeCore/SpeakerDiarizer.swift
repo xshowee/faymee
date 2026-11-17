@@ -49,7 +49,7 @@ extension Transcript {
 
     /// 把区分结果合成到这份转写稿上，只改说话人：句子 id、文字、修改记录、合盖空白都不动；
     /// 原有的说话人、单句修改、名字全部作废（沿用名字是调用方的事）。
-    /// - 片段落在合盖空白里的部分不算（合盖时录音是静音）
+    /// - 片段落在什么都没录到的空白（`GapReason.dropsSpeech`，如合盖）里的部分不算（这段录音是静音）
     /// - 每句归给与它重合最长的说话人，重合按说话人累计；一样长时归给先开口的；不重合的为未知（nil）
     /// - 说话人按在转写稿里第一次开口（第一句归给他的句子）的先后编号为 spk1、spk2……；
     ///   一句都没分到的说话人不进列表
@@ -57,7 +57,7 @@ extension Transcript {
     public func withSpeakers(_ result: DiarizationResult, engine: String, voiceprintModel: String,
                              createdAt: Date) -> Transcript {
         let gaps = items.compactMap { item -> ClosedRange<TimeInterval>? in
-            guard case let .gap(g) = item, g.end > g.start else { return nil }
+            guard case let .gap(g) = item, g.reason.dropsSpeech, g.end > g.start else { return nil }
             return g.start...g.end
         }
         // 引擎编号 → 去掉空白后的片段

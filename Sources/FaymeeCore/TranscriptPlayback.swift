@@ -3,7 +3,8 @@ import Foundation
 /// 转写稿与回放联动、复制用到的纯逻辑，界面只负责展示
 extension Transcript {
     /// 播放到 time 秒时应高亮的条目（items 的下标）：
-    /// - time 所在的那条；同时落在几条里（句子伸进空白）取开始最晚的
+    /// - time 所在的那条；同时落在几条里（句子伸进空白）取开始最晚的。
+    ///   不当当前条目的空白（`GapReason.isPlaybackTarget` 为 false）跳过，高亮其中的句子
     /// - 落在两条之间（停顿）或最后一条之后：保持刚结束的那条，免得高亮在停顿处一闪一闪。
     ///   按结束时间而不是下标取，因为句子中间可能插着长度为 0 的空白
     /// - 第一条之前为 nil
@@ -20,6 +21,7 @@ extension Transcript {
         // 都不包含时取结束最晚的，结束时间相同取下标大的
         var latestEnd: Int?
         for i in stride(from: lo - 1, through: 0, by: -1) {
+            if case let .gap(g) = items[i], !g.reason.isPlaybackTarget { continue }
             if time < items[i].end { return i }
             if latestEnd.map({ items[i].end > items[$0].end }) ?? true { latestEnd = i }
         }
@@ -252,8 +254,6 @@ extension TranscriptGap {
     /// 转写稿里空白那一行的文字，如“合盖，未录到声音（10:00–13:00，03:00）”
     public var label: String {
         let range = "\(formatDuration(start))–\(formatDuration(end))，\(formatDuration(end - start))"
-        return switch reason {
-        case .lidClosed: "合盖，未录到声音（\(range)）"
-        }
+        return "\(reason.title)（\(range)）"
     }
 }

@@ -71,6 +71,18 @@ import Testing
         #expect(MenuBarIndicator(isRecording: true, hasWarning: true, showsMarkFlag: false) == .warning)
     }
 
+    /// 录系统声音时图标与只录麦克风不同；告警、旗子照常盖过它
+    @Test func 录系统声音时有区别显示() {
+        #expect(MenuBarIndicator(isRecording: true, hasWarning: false, showsMarkFlag: false,
+                                 capturesSystemSound: true) == .recordingSystemSound)
+        #expect(MenuBarIndicator(isRecording: true, hasWarning: true, showsMarkFlag: false,
+                                 capturesSystemSound: true) == .warning)
+        #expect(MenuBarIndicator(isRecording: true, hasWarning: false, showsMarkFlag: true,
+                                 capturesSystemSound: true) == .markFlag)
+        #expect(MenuBarIndicator(isRecording: false, hasWarning: false, showsMarkFlag: false,
+                                 capturesSystemSound: true) == .idle)
+    }
+
     @Test func 刚标记时旗子盖过告警() {
         #expect(MenuBarIndicator(isRecording: true, hasWarning: false, showsMarkFlag: true) == .markFlag)
         #expect(MenuBarIndicator(isRecording: true, hasWarning: true, showsMarkFlag: true) == .markFlag)

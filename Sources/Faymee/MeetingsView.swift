@@ -110,11 +110,11 @@ private struct MeetingDetail: View {
             Text(subtitle)
                 .foregroundStyle(.secondary)
 
-            if !meeting.lidGaps.isEmpty {
+            ForEach(meeting.lidGapNotices, id: \.self) { notice in
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("以下时段因合盖，内置麦克风没有录到声音", systemImage: "mic.slash")
+                    Label(notice.title, systemImage: "mic.slash")
                         .foregroundStyle(.orange)
-                    ForEach(meeting.lidGaps, id: \.self) { gap in
+                    ForEach(notice.gaps, id: \.self) { gap in
                         Text(formatTimeRange(gap))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -242,6 +242,7 @@ private struct MeetingDetail: View {
         if let d = meeting.duration { parts.append("时长 \(formatDuration(d))") }
         let devices = Array(NSOrderedSet(array: meeting.segments.map(\.device))) as? [String] ?? []
         if !devices.isEmpty { parts.append(devices.joined(separator: "、")) }
+        if let source = meeting.audioSourceText { parts.append(source) }
         if let annotations = meeting.annotationCountText { parts.append(annotations) }
         return parts.joined(separator: " · ")
     }

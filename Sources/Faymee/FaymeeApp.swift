@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// 混合形态：平时只在菜单栏（LSUIElement），打开“会议记录”窗口时临时变成普通程序，
-/// 有 Dock 图标、能 ⌘Tab 切换、有顶部菜单；窗口关掉后退回菜单栏
-@main
+/// 有 Dock 图标、能 ⌘Tab 切换、有顶部菜单；窗口关掉后退回菜单栏。
+/// 入口在 `FaymeeMain`（先判断是不是查授权的子进程）
 struct FaymeeApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
 

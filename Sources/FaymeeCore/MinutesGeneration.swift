@@ -31,7 +31,8 @@ public func generateMinutes(
         guard case let .sentence(s) = item else { return labels.line(item) }
         return labels.line(item, starred: starred.contains(s.id))
     }
-    let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty)
+    let gapReasons = Set(transcript.items.compactMap { if case let .gap(g) = $0 { g.reason } else { nil } })
+    let system = extractionSystemPrompt(template, speakers: labels, starred: !starred.isEmpty, gapReasons: gapReasons)
     let grammar = outputGrammar(template.sections.map(\.kind), speakers: labels.unnamedLabels)
     let budget = Budget(generator, system: system,
                         outputTokens: min(generator.maxOutputTokens, generator.contextTokens * 2 / 5))
@@ -148,8 +149,8 @@ func largestFittingGrowing(_ lower: Int, _ upper: Int, _ fits: (Int) -> Bool) ->
 
 /// 把转写稿在条目（句子或合盖空白）边界切成若干段，每段都满足 `fits`。`line` 是条目写进提示词的那一行。
 /// 先按逐行 token 数估算尽量装满，再用 `fits` 按完整提示词核对，超了就把末尾的条目挪到下一段
-/// （二分找能放下的最多条目）；装不下时在后半段里找切点：优先在合盖空白之后，
-/// 其次在最长的停顿处（至少 `longPause` 秒），都没有就切在装满的位置
+/// （二分找能放下的最多条目）；装不下时在后半段里找切点：
+/// 优先在空白之后（只算 `GapReason.isPreferredSplitPoint` 的空白），其次在最长的停顿处（至少 `longPause` 秒），都没有就切在装满的位置
 func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: (String) -> Int,
              line: (TranscriptItem) -> String = inputLine,
              fits: (ArraySlice<TranscriptItem>) -> Bool) throws -> [[TranscriptItem]] {
@@ -171,7 +172,9 @@ func segment(_ items: [TranscriptItem], lineBudget available: Int, countTokens: 
         guard end > start else { throw MinutesGenerationError.contextTooSmall }
         if end < items.count {
             let candidates = (start + (end - start + 1) / 2)...end
-            if let afterGap = candidates.last(where: { if case .gap = items[$0 - 1] { true } else { false } }) {
+            if let afterGap = candidates.last(where: {
+                if case let .gap(g) = items[$0 - 1] { g.reason.isPreferredSplitPoint } else { false }
+            }) {
                 end = afterGap
             } else if let pause = candidates.filter({ $0 < items.count })
                 .max(by: { items[$0].start - items[$0 - 1].end < items[$1].start - items[$1 - 1].end }),

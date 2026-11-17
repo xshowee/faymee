@@ -60,7 +60,9 @@ extension Meeting {
             if a.kind == .mark { lastMark = spans.count - 1 }
         }
 
-        let gaps = lidGaps.map(timeline.range(of:)).sorted { $0.lowerBound < $1.lowerBound }
+        // 用转写时推出的空白（见 `transcriptGaps(on:)`），不直接用合盖空白：合盖时系统声音照常录着的那段有真句子
+        let gaps = transcriptGaps(on: timeline).filter(\.reason.dropsSpeech).map { $0.start...$0.end }
+            .sorted { $0.lowerBound < $1.lowerBound }
         let sentences = transcript.sentences
         for i in spans.indices {
             let (start, end) = (spans[i].start, spans[i].end)
@@ -72,8 +74,8 @@ extension Meeting {
         return spans
     }
 
-    /// 区间 (a, b) 是否整个落在合盖空白（按起点排好序）里。跨过空白边界的句子转写稿会保留，
-    /// 它与区间的重叠若全在空白里，说明区间里其实没录到声音，不算区间里的句子
+    /// 区间 (a, b) 是否整个落在剔除句子的空白（`GapReason.dropsSpeech`，按起点排好序）里。
+    /// 跨过空白边界的句子转写稿会保留，它与区间的重叠若全在空白里，说明区间里其实没录到声音，不算区间里的句子
     private static func covered(_ range: (TimeInterval, TimeInterval), by gaps: [ClosedRange<TimeInterval>]) -> Bool {
         var cursor = range.0
         for g in gaps where g.upperBound > cursor {

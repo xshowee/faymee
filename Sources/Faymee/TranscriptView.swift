@@ -960,7 +960,7 @@ private struct EditedMarker: View {
     }
 }
 
-/// 合盖空白：不可编辑的标记行，样式与句子区分开
+/// 空白：不可编辑的标记行，样式与句子区分开。文字、图标按空白的原因
 struct TranscriptGapRow: View {
     var gap: TranscriptGap
     var isCurrent: Bool
@@ -972,7 +972,7 @@ struct TranscriptGapRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
                 .frame(width: timeWidth, alignment: .leading)
-            Label(gap.label, systemImage: "mic.slash")
+            Label(gap.label, systemImage: gap.reason.symbolName)
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

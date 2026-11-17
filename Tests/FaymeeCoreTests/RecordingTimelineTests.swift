@@ -115,6 +115,35 @@ private func meeting(_ segments: [Segment], duration: TimeInterval?, endedAt: Ti
         #expect(timeline.range(of: Gap(start: at(500), reason: .lidClosed)) == 500...600)
     }
 
+    @Test func 墙钟上的一段音频按分片切开_分片之间和录音首尾之外的部分丢弃() throws {
+        // 第一个分片录到 595 秒，第二个分片 600 秒才开始，900 秒结束
+        let timeline = try #require(RecordingTimeline(meeting(
+            [segment("0001.caf", startedAt: 0, offset: 0, duration: 595),
+             segment("0002.caf", startedAt: 600, offset: 595, duration: 300)],
+            duration: 895)))
+
+        // 墙钟 590–910 秒：590–595 在第一个分片，595–600 没录到，600–900 在第二个分片，900 之后没有录音
+        #expect(timeline.pieces(from: at(590), duration: 320) == [
+            TimelinePiece(source: 0, offset: 590, duration: 5),
+            TimelinePiece(source: 10, offset: 595, duration: 300),
+        ])
+        // 完全落在断点里
+        #expect(timeline.pieces(from: at(596), duration: 3).isEmpty)
+    }
+
+    @Test func 分片实际时长长于墙钟间隔时截到下一个分片的起点() throws {
+        // 第一个分片有 601 秒音频，第二个分片的墙钟起点却是 600 秒：墙钟 600–601 秒只算在第二个分片里，不摆两次
+        let timeline = try #require(RecordingTimeline(meeting(
+            [segment("0001.caf", startedAt: 0, offset: 0, duration: 601),
+             segment("0002.caf", startedAt: 600, offset: 601, duration: 300)],
+            duration: 901)))
+
+        #expect(timeline.pieces(from: at(590), duration: 20) == [
+            TimelinePiece(source: 0, offset: 590, duration: 10),
+            TimelinePiece(source: 10, offset: 601, duration: 10),
+        ])
+    }
+
     @Test func 没有分片时无法映射() {
         #expect(RecordingTimeline(meeting([], duration: nil)) == nil)
     }

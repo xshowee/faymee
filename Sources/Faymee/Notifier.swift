@@ -14,7 +14,7 @@ enum Notifier {
     }
 
     /// silent 为 true 时不带声音：转写这类不紧急的消息可能在开会时弹出，不能出声。
-    /// 录音告警保持默认声音
+    /// 录音出错、恢复中断的录音仍用默认声音；没有声音、合盖的提醒走 MeetingNotice，无声
     static func post(_ title: String, _ body: String, silent: Bool = false, userInfo: [String: String] = [:]) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -25,7 +25,7 @@ enum Notifier {
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
-    /// 转写、纪要的通知一律静音
+    /// 转写、纪要的通知和录音中没有声音、合盖的提醒一律静音
     static func post(_ notice: MeetingNotice) {
         post(notice.title, notice.body, silent: true, userInfo: notice.userInfo)
     }

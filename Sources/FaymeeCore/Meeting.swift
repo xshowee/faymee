@@ -36,9 +36,46 @@ public struct Segment: Codable, Hashable, Sendable {
     }
 }
 
-public enum GapReason: String, Codable, Sendable {
-    /// 合盖导致内置麦克风被硬件断开
+/// 一个系统声音分片。和麦克风分片一样约 60 秒一个 CAF 文件，放在分片目录下的 `system/` 子目录里。
+/// 系统声音没有声音播放时可能完全没有回调，分片不首尾相接，所以每片记下自己的墙钟起点，
+/// 整理时按麦克风分片的边界切开、经 `RecordingTimeline` 摆进录音
+public struct SystemSoundSegment: Codable, Hashable, Sendable {
+    public var file: String
+    /// 第一帧的墙钟时间
+    public var startedAt: Date
+    public var sampleRate: Double
+    public var channels: Int
+
+    public init(file: String, startedAt: Date, sampleRate: Double, channels: Int) {
+        self.file = file
+        self.startedAt = startedAt
+        self.sampleRate = sampleRate
+        self.channels = channels
+    }
+}
+
+/// 墙钟上的一段时间
+public struct WallClockPeriod: Codable, Hashable, Sendable {
+    public var start: Date
+    /// nil 表示仍在进行
+    public var end: Date?
+
+    public init(start: Date, end: Date? = nil) {
+        self.start = start
+        self.end = end
+    }
+}
+
+/// 空白的原因。会议数据（`meeting.json` 的合盖空白）里只会出现 `lidClosed`，只记合盖本身；
+/// 另外两种只出现在转写稿里，由合盖和系统声音的状态在转写时推出（见 `Meeting.transcriptGaps(on:)`）。
+/// raw value 写进 `transcript.json`，不能改
+public enum GapReason: String, Codable, Sendable, CaseIterable {
+    /// 合盖导致内置麦克风被硬件断开，且没有录到系统声音（没开或不可用）：两路都没录到
     case lidClosed
+    /// 合盖导致内置麦克风被硬件断开，系统声音照常录着
+    case lidClosedSystemSoundOnly
+    /// 麦克风照常，开着的系统声音不可用
+    case systemSoundMissing
 }
 
 /// 录音时间线上没有收到有效声音的一段。录音文件里这段是静音，
@@ -83,6 +120,31 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     public var annotations: [Annotation]?
     /// 用过的最大标注编号（`a3` → 3），删掉的编号不复用。从没标注过时为 nil，不写
     public var lastAnnotationNumber: Int?
+    /// 以下四个字段只有开过系统声音的会议才有，没开过时都是 nil、不写，meeting.json 与以前逐字相同。
+    /// 读写请用对应的 `…List`。
+    /// 系统声音分片，分片打开时写入
+    public var systemSoundSegments: [SystemSoundSegment]?
+    /// 系统声音开关打开的时段，中途切换就是多段
+    public var systemSoundPeriods: [WallClockPeriod]?
+    /// 系统声音不可用的时段（与合盖空白分开存：两段可能同时没有结束）
+    public var systemSoundUnavailablePeriods: [WallClockPeriod]?
+    /// 整理后单独保存的系统声音文件名（相对会议目录），与 recording 等长对齐
+    public var systemSoundRecording: String?
+
+    public var systemSoundSegmentList: [SystemSoundSegment] {
+        get { systemSoundSegments ?? [] }
+        set { systemSoundSegments = newValue.isEmpty ? nil : newValue }
+    }
+
+    public var systemSoundPeriodList: [WallClockPeriod] {
+        get { systemSoundPeriods ?? [] }
+        set { systemSoundPeriods = newValue.isEmpty ? nil : newValue }
+    }
+
+    public var systemSoundUnavailablePeriodList: [WallClockPeriod] {
+        get { systemSoundUnavailablePeriods ?? [] }
+        set { systemSoundUnavailablePeriods = newValue.isEmpty ? nil : newValue }
+    }
 
     public var lidGaps: [Gap] {
         get { gaps ?? [] }

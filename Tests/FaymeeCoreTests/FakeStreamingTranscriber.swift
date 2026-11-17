@@ -11,6 +11,8 @@ final class FakeTranscription: StreamingTranscription, @unchecked Sendable {
     /// 每块音频带的录音里的时间
     private(set) var appendedTimes: [TimeInterval] = []
     var appended: Int { appendedTimes.count }
+    /// 每块音频第一个声道的最大绝对值
+    private(set) var appendedPeaks: [Float] = []
     private(set) var finished = false
     private(set) var cancelled = false
 
@@ -20,7 +22,11 @@ final class FakeTranscription: StreamingTranscription, @unchecked Sendable {
         (events, continuation) = AsyncStream.makeStream()
     }
 
-    func append(_ buffer: AVAudioPCMBuffer, at time: TimeInterval) { appendedTimes.append(time) }
+    func append(_ buffer: AVAudioPCMBuffer, at time: TimeInterval) {
+        appendedTimes.append(time)
+        let samples = buffer.floatChannelData.map { UnsafeBufferPointer(start: $0[0], count: Int(buffer.frameLength)) }
+        appendedPeaks.append(samples?.map(abs).max() ?? 0)
+    }
     /// 结束、取消时都不马上关事件流：测试还可以发迟到的事件，再 `end()`
     func finish() { finished = true }
     func cancel() { cancelled = true }

@@ -40,7 +40,9 @@ enum AudioDevices {
     static func inputs() -> [AudioInputDevice] {
         deviceIDs().compactMap { id in
             guard hasInput(id), let uid = string(id, kAudioDevicePropertyDeviceUID),
-                  let name = string(id, kAudioObjectPropertyName)
+                  let name = string(id, kAudioObjectPropertyName),
+                  // 采集系统声音用的私有聚合设备对本进程可见，它不是麦克风
+                  !uid.hasPrefix(SystemSoundCapture.aggregateUIDPrefix)
             else { return nil }
             let transport = uint32(id, kAudioDevicePropertyTransportType) ?? kAudioDeviceTransportTypeUnknown
             return AudioInputDevice(id: id, uid: uid, name: name, transport: transport,
@@ -56,7 +58,9 @@ enum AudioDevices {
 
     /// 设备插拔、系统默认输入变化时在主线程回调。在 App 生命周期内一直有效
     static func observeChanges(_ handler: @escaping @MainActor () -> Void) {
-        for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice] {
+        // 默认输出设备变化也通知：系统声音不可用时按设备变化重试
+        for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice,
+                         kAudioHardwarePropertyDefaultOutputDevice] {
             var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
                                                      mElement: kAudioObjectPropertyElementMain)
             AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main) { _, _ in
