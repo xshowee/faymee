@@ -126,7 +126,7 @@ final class SystemSoundCapture {
             writer.push(inputData, format: format, hostTime: hostTime)
             level.record(inputData, format: format)
             // 写盘之后再分给实时字幕（分路自己拷贝、限长）。时刻取收到的时刻，同麦克风
-            if let tap = live.tap,
+            if let tap = live.tap, tap.isEnabled,
                let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inputData, deallocator: nil) {
                 tap.push(buffer, at: Date())
             }

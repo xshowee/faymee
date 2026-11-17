@@ -74,6 +74,21 @@ private func samples(_ chunks: [LiveAudioTap.Chunk]) -> [Float] {
         #expect(s[33600...].allSatisfy { $0 == 0 })
     }
 
+    /// 两路相加：说话的同时对方也在说，两边都在；加起来超过满幅时限幅，不绕回
+    @Test func 两路相加_超过满幅时限幅() {
+        let mixer = LiveAudioMixer()
+        mixer.isEnabled = true
+        pushMic(mixer, from: 0, count: 1, value: 0.25)
+        pushMic(mixer, from: 0.1, count: 1, value: 0.8)
+        for k in 0..<20 {
+            mixer.systemSound.push(buffer(system, seconds: 0.01) { _ in 0.5 }, at: t0.addingTimeInterval(Double(k + 1) / 100))
+        }
+
+        let s = samples(mixer.drain())
+        #expect(s[0..<4800].allSatisfy { $0 == 0.75 })
+        #expect(s[4800...].allSatisfy { $0 == 1 })
+    }
+
     /// 收到时刻有抖动，系统声音的最后一点常常晚于麦克风那块才到：照样一个样本不丢、不重复，
     /// 不会因为差了几十毫秒就重新对齐、把对方的话切碎
     @Test func 收到时刻有抖动_系统声音晚到一点_样本连续不丢不重() {

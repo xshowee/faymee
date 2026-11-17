@@ -73,8 +73,9 @@ public final class LiveAudioMixer {
         if let pendingStart {
             let end = pendingStart.addingTimeInterval(Double(pending.count) / rate)
             let gap = start.timeIntervalSince(end)
-            if gap > Self.tolerance, !pending.isEmpty {
-                // 中间停过一阵（没在放声音时可能没有回调）：补上静音，后面的才落在对的时刻
+            if gap > Self.tolerance, gap <= capacity, !pending.isEmpty {
+                // 中间停过一阵（没在放声音时可能没有回调）：补上静音，后面的才落在对的时刻。
+                // 停得比缓冲上限还久时之前没混的反正留不住，下面直接从这一块重新排
                 pending += [Float](repeating: 0, count: Int((gap * rate).rounded()))
             } else if abs(gap) > Self.tolerance {
                 anchor(at: start)
