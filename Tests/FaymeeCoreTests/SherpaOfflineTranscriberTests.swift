@@ -1,4 +1,5 @@
 import Foundation
+import SherpaOnnxC
 import Testing
 @testable import FaymeeCore
 
@@ -214,6 +215,88 @@ struct SileroVADContractTests {
         for (s, t) in zip(sentences, truth) {
             #expect(abs(s.start - t.lowerBound) < 0.3 && abs(s.end - t.upperBound) < 0.5, "\(s) vs \(t)")
         }
+    }
+}
+
+/// 只为契约测试的最小 Paraformer 识别器（正式的适配器见 ticket 03）：原样交出 sherpa 的文字和逐字开始时间。
+/// `punctuate` 模拟标点模型改文字
+private final class RawParaformer: SegmentRecognizer, @unchecked Sendable {
+    private let recognizer: OpaquePointer
+    private let punctuate: (String) -> String
+
+    init(punctuate: @escaping (String) -> String) throws {
+        let dir = LocalModel.paraformer.directory()
+        let model = strdup(dir.appendingPathComponent("model.int8.onnx").path)
+        let tokens = strdup(dir.appendingPathComponent("tokens.txt").path)
+        let cpu = strdup("cpu"), greedy = strdup("greedy_search")
+        defer { free(model); free(tokens); free(cpu); free(greedy) }
+        var config = SherpaOnnxOfflineRecognizerConfig()
+        config.feat_config.sample_rate = 16000
+        config.feat_config.feature_dim = 80
+        config.model_config.paraformer.model = UnsafePointer(model)
+        config.model_config.tokens = UnsafePointer(tokens)
+        config.model_config.num_threads = 2
+        config.model_config.provider = UnsafePointer(cpu)
+        config.decoding_method = UnsafePointer(greedy)
+        guard let r = SherpaOnnxCreateOfflineRecognizer(&config) else {
+            throw SherpaModelError.engineUnavailable(model: "Paraformer")
+        }
+        recognizer = r
+        self.punctuate = punctuate
+    }
+
+    deinit { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
+
+    func recognize(_ samples: ArraySlice<Float>) throws -> SegmentRecognition {
+        let stream = SherpaOnnxCreateOfflineStream(recognizer)
+        defer { SherpaOnnxDestroyOfflineStream(stream) }
+        samples.withUnsafeBufferPointer {
+            SherpaOnnxAcceptWaveformOffline(stream, 16000, $0.baseAddress, Int32($0.count))
+        }
+        SherpaOnnxDecodeOfflineStream(recognizer, stream)
+        guard let r = SherpaOnnxGetOfflineStreamResult(stream) else { return SegmentRecognition(text: "", tokens: nil) }
+        defer { SherpaOnnxDestroyOfflineRecognizerResult(r) }
+        let tokens = r.pointee.timestamps.map { times in
+            (0..<Int(r.pointee.count)).map {
+                SegmentRecognition.Token(text: String(cString: r.pointee.tokens_arr[$0]!), start: Double(times[$0]))
+            }
+        }
+        return SegmentRecognition(text: punctuate(r.pointee.text.map { String(cString: $0) } ?? ""), tokens: tokens)
+    }
+}
+
+/// 契约测试：真实 Silero VAD + 真实 Paraformer（ticket 01 下载到 ~/Library/Application Support/Faymee/Models）走通公共层
+/// （目录项依赖标点模型，文件检查要求它也在，虽然这里不用它）
+@Suite(.serialized, .enabled(if: vadPresent && LocalModel.paraformer.isDownloaded() && LocalModel.punctuation.isDownloaded(),
+                             "需要 Silero VAD 和已下载的 Paraformer、标点模型"))
+struct SherpaOfflineParaformerContractTests {
+    /// two-speakers-zh.m4a 的六段话（见 SherpaOnnxDiarizerTests）
+    private let truth: [Range<Double>] = [0.00..<8.47, 9.07..<17.43, 18.03..<25.48, 26.08..<33.58, 34.18..<41.22,
+                                          41.82..<48.21]
+
+    @Test func 关键词落在对应的那段话里_句首时间来自真实逐字时间() async throws {
+        // 在第一段「大家好」后面加句号：真实逐字时间里「今」在 1.08 秒（「好」后停顿了半秒多），
+        // 按字数比例估算会是 0.9 秒左右
+        let transcriber = SherpaOfflineTranscriber(
+            model: try #require(ModelCatalog.builtIn.model(id: LocalModel.paraformer.id)), vadModel: repoVADModel) { _ in
+            try RawParaformer { $0.hasPrefix("大家好") ? "大家好。" + $0.dropFirst(3) : $0 }
+        }
+
+        let sentences = try await transcriber.transcribe(audio: try resource("two-speakers-zh"), hotwords: []) { _ in }
+
+        func turn(of phrase: String) -> Int? {
+            guard let s = sentences.first(where: { $0.text.contains(phrase) }) else { return nil }
+            return truth.firstIndex { $0.lowerBound - 0.3 <= s.start && s.end <= $0.upperBound + 0.3 }
+        }
+        #expect(turn(of: "登录模块") == 1)
+        #expect(turn(of: "支付模块") == 2)
+        #expect(turn(of: "对接接口") == 3)
+        #expect(turn(of: "推迟") == 3)
+        #expect(sentences.first?.text == "大家好。")
+        let second = try #require(sentences.dropFirst().first)
+        #expect(second.text.hasPrefix("今天"))
+        #expect(abs(second.start - 1.08) < 0.05, "\(second.start)")
+        #expect(zip(sentences, sentences.dropFirst()).allSatisfy { $0.end <= $1.start })
     }
 }
 
