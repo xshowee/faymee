@@ -1752,6 +1752,138 @@ private final class Library {
     }
 }
 
+/// 所选声纹模型还没下载完（spec「切换的语义」）：区分说话人排队「等待下载声纹模型」，下好后自动开始；
+/// 转写本身不等声纹模型
+@MainActor @Suite struct DiarizerDownloadWaitTests {
+    private let waiting = TranscriptionWaitReason.modelDownload(id: "new/voiceprint")
+
+    @Test func 完整转写照常保存_说话人排队等下载_不挡纪要_下好后自动区分() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        #expect(f.pipeline.canDiarize)
+        #expect(!f.pipeline.transcriptionDiarizes)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        // 挂起的区分说话人不算忙：纪要照常开始
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.text) == ["我们开始吧", "好的我先说", "你接着讲", "没人说话时的噪声"])
+        #expect(t.diarization == nil)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .queued))
+        #expect(f.store.loadAll().first?.diarization == DiarizationState(status: .queued))
+        #expect(f.finished.map(\.id) == [m.id])
+        #expect(f.pipeline.queue == [m.id])
+        #expect(f.pipeline.diarizationWaitReason(for: m.id) == waiting)
+        #expect(f.pipeline.waitReason(for: m.id) == nil)
+
+        let new = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2], voiceprintModel: "new/voiceprint")
+        f.pipeline.setDiarizer(new, voiceprintThreshold: 0.7)
+        try await f.until { f.host.meetings[m.id]?.diarization == DiarizationState(status: .done) }
+        try await f.drain()
+
+        let diarized = try #require(try f.store.loadTranscript(m.id))
+        #expect(diarized.diarization?.voiceprintModel == "new/voiceprint")
+        #expect(diarized.sentences.map(\.speaker) == ["spk1", "spk2", "spk1", nil])
+        #expect(f.pipeline.queue.isEmpty)
+        #expect(f.pipeline.diarizationWaitReason(for: m.id) == nil)
+        #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    @Test func 开关关着时不排队区分说话人() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.pipeline.diarizes = false
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(f.host.meetings[m.id]?.diarization == nil)
+        #expect(f.pipeline.queue.isEmpty)
+    }
+
+    @Test func 运行期切到没下载的模型_进行中的照常跑完_排队的和新入队的只区分说话人等下载_不失败() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(diarizer: old)
+        for id in ["m1", "m2", "m3"] { f.addTranscribedMeeting(id) }
+        f.pipeline.enqueueDiarization("m1")
+        f.pipeline.enqueueDiarization("m2", speakerCount: 2)
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        #expect(f.pipeline.canDiarize)
+        #expect(f.pipeline.voiceprintModel == nil)
+        #expect(f.pipeline.enqueueDiarization("m3"))
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.diarization == DiarizationState(status: .done))
+        #expect(try f.store.loadTranscript("m1")?.diarization?.voiceprintModel == "fake/voiceprint")
+        for id in ["m2", "m3"] {
+            #expect(f.host.meetings[id]?.diarization == DiarizationState(status: .queued))
+            #expect(f.pipeline.diarizationWaitReason(for: id) == waiting)
+        }
+        #expect(f.pipeline.queue == ["m2", "m3"])
+
+        let new = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2], voiceprintModel: "new/voiceprint")
+        f.pipeline.setDiarizer(new, voiceprintThreshold: 0.7)
+        try await f.until { f.pipeline.queue.isEmpty && f.pipeline.activeID == nil }
+
+        for id in ["m2", "m3"] {
+            #expect(f.host.meetings[id]?.diarization == DiarizationState(status: .done))
+            #expect(try f.store.loadTranscript(id)?.diarization?.voiceprintModel == "new/voiceprint")
+        }
+        // 排队时指定的人数还在
+        #expect(new.calls.map(\.speakerCount) == [2, nil])
+        #expect(old.calls.count == 1)
+    }
+
+    @Test func 等下载时转写不受影响_排在前面的等待区分不挡后面的转写() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.addTranscribedMeeting("waiting")
+        #expect(f.pipeline.enqueueDiarization("waiting"))
+        f.addMeeting("new")
+
+        f.pipeline.enqueue("new")
+        try await f.drain()
+
+        #expect(f.host.meetings["new"]?.transcription == TranscriptionState(status: .done))
+        #expect(f.pipeline.queue == ["waiting", "new"])
+    }
+
+    @Test func 启动时恢复等下载的只区分说话人_保持排队() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.pipeline.isSuspended = true
+        let queued = f.addTranscribedMeeting("queued")
+        f.host.setDiarization(DiarizationState(status: .queued), for: queued.id)
+
+        f.pipeline.restore([f.host.meetings[queued.id]!])
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.host.meetings[queued.id]?.diarization == DiarizationState(status: .queued))
+        #expect(f.pipeline.diarizationWaitReason(for: queued.id) == waiting)
+    }
+
+    @Test func 建管线时就在等下载() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaymeeCoreTests-\(UUID().uuidString)", isDirectory: true))
+        let host = FakeHost(store: store)
+        let pipeline = TranscriptionPipeline(store: store, transcriber: FakeTranscriber(), engine: "fake/1",
+                                             diarizer: nil, diarizerWaitReason: waiting, host: host)
+        #expect(pipeline.canDiarize)
+        #expect(pipeline.diarizerWaitReason == waiting)
+        try? FileManager.default.removeItem(at: store.root)
+    }
+}
+
 private final class LockBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: Value

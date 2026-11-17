@@ -284,6 +284,7 @@ final class AppModel {
                                              engine: engine.name, isEngineReady: engine.waitReason == nil,
                                              engineWaitReason: engine.waitReason ?? .onlineConfig,
                                              diarizer: diarization.diarizer,
+                                             diarizerWaitReason: diarization.waitReason,
                                              voiceprints: VoiceprintStore(), host: self)
         pipeline.voiceprintThreshold = diarization.voiceprintThreshold
         pipeline.isSuspended = true

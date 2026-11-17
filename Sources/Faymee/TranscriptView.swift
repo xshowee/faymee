@@ -183,7 +183,8 @@ struct TranscriptSection: View {
     private var speakerStatus: SpeakerStatus {
         SpeakerStatus(transcription: meeting.transcription, diarization: meeting.diarization,
                       activity: model.transcription.activity(for: meeting.id), transcript: transcript,
-                      canDiarize: model.transcription.canDiarize)
+                      canDiarize: model.transcription.canDiarize,
+                      waitReason: model.transcription.diarizationWaitReason(for: meeting.id))
     }
 
     /// 改说话人（改名、合并、单句改）：转写中不能改（同改文字），区分说话人排队或进行中也不能改，
@@ -374,7 +375,12 @@ struct TranscriptSection: View {
     /// 转写排队或进行中时不显示，由转写状态说明
     @ViewBuilder private var speakerStatusView: some View {
         let status = speakerStatus
-        if let text = status.text {
+        if case let .queued(.modelDownload(id)) = status,
+           let entry = model.modelSelections.catalog.model(id: id),
+           let downloader = model.modelDownloads.downloader(for: entry) {
+            // 同转写等模型：说明要下多大的声纹模型，用户点“下载”才开始；下好后自动区分说话人
+            ModelDownloadControls(style: .waiting("声纹"), downloader: downloader)
+        } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)
             } else if case .failed = status {

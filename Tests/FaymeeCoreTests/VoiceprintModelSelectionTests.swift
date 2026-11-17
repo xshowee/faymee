@@ -160,10 +160,11 @@ private final class NoTranscriber: Transcriber {
         #expect(pipeline.canDiarize)
     }
 
-    @Test func 切到没下载的模型_没有区分引擎_下载完成后用新模型和新阈值_切回来恢复() async throws {
+    @Test func 切到没下载的模型_区分说话人等下载_下载完成后用新模型和新阈值_切回来恢复() async throws {
         selections.select(second.id, for: .voiceprint)
         try await until { pipeline.voiceprintModel == nil }
-        #expect(!pipeline.canDiarize)
+        #expect(pipeline.diarizerWaitReason == .modelDownload(id: second.id))
+        #expect(pipeline.canDiarize)
 
         let downloader = try #require(downloads.downloader(for: second))
         downloader.start()
@@ -172,6 +173,7 @@ private final class NoTranscriber: Transcriber {
 
         try await until { pipeline.voiceprintModel == "test/voiceprint-2" }
         #expect(pipeline.voiceprintThreshold == 0.55)
+        #expect(pipeline.diarizerWaitReason == nil)
         #expect(pipeline.canDiarize)
 
         selections.select(base.id, for: .voiceprint)
@@ -179,7 +181,7 @@ private final class NoTranscriber: Transcriber {
         #expect(pipeline.voiceprintThreshold == 0.7)
     }
 
-    @Test func 删除所选的下载模型后没有区分引擎() async throws {
+    @Test func 删除所选的下载模型后区分说话人又等下载() async throws {
         selections.select(second.id, for: .voiceprint)
         let downloader = try #require(downloads.downloader(for: second))
         downloader.start()
@@ -189,5 +191,19 @@ private final class NoTranscriber: Transcriber {
         try await downloader.delete()
 
         try await until { pipeline.voiceprintModel == nil }
+        #expect(pipeline.diarizerWaitReason == .modelDownload(id: second.id))
+    }
+
+    @Test func 建管线时所选模型没下载_初值就是等下载() {
+        selections.select(second.id, for: .voiceprint)
+        let engine = binding.makeEngine()
+        #expect(engine.diarizer == nil)
+        #expect(engine.waitReason == .modelDownload(id: second.id))
+        #expect(engine.voiceprintThreshold == 0.55)
+        // 打进 App 的模型文件不在：没有引擎，也不等（没有可下载的东西）
+        selections.select(base.id, for: .voiceprint)
+        let missing = VoiceprintModelBinding(selections: selections, downloads: downloads, bundleResources: nil)
+        #expect(missing.makeEngine().diarizer == nil)
+        #expect(missing.makeEngine().waitReason == nil)
     }
 }
