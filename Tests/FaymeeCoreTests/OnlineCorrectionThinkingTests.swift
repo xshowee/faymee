@@ -103,6 +103,42 @@ import Testing
         #expect(custom.recordedRequests.count == 2)
     }
 
+    @Test func 表里没有的模型上限更低被拒时按正文预算再发一次_同以前() async throws {
+        let rejected: [String: Any] = ["error": ["message": "Range of max_tokens should be [1, 8192]"]]
+        // OpenAI 兼容：先去掉 JSON 模式，仍被拒再降到正文预算
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: rejected, status: 400)
+        try transport.enqueue(json: rejected, status: 400)
+        try transport.enqueue(json: reply(.dashScope, edits))
+        let qwen = OnlineMinutesEngine.makeGenerator(provider: .dashScope, config: config(.dashScope, model: "qwen-old"),
+                                                     transport: transport)
+        #expect(try await correct(qwen).texts == ["s1": "我们要避免被动的局面"])
+        let bodies = transport.recordedRequests.compactMap { $0.bodyJSONObject() }
+        #expect(bodies.map { $0["max_tokens"] as? Int } == [32_768, 32_768, 8_192])
+        #expect(bodies.map { $0["response_format"] != nil } == [true, false, false])
+
+        for (provider, model) in [(OnlineMinutesProvider.anthropic, "claude-3-5-haiku"), (.gemini, "gemini-exp")] {
+            let transport = FakeHTTPTransport()
+            try transport.enqueue(json: rejected, status: 400)
+            try transport.enqueue(json: reply(provider, edits))
+            let generator = OnlineMinutesEngine.makeGenerator(provider: provider, config: config(provider, model: model),
+                                                              transport: transport)
+            #expect(try await correct(generator).texts == ["s1": "我们要避免被动的局面"], "\(provider)")
+            let limits = transport.recordedRequests.compactMap { $0.bodyJSONObject() }.map(sentLimit)
+            #expect(limits == [provider == .anthropic ? 32_000 : 65_536, 8_192], "\(provider)")
+        }
+    }
+
+    @Test func 模型不存在不降上限重发() async throws {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: ["error": ["code": "model_not_found", "message": "The model claude-nope does not exist"]],
+                              status: 400)
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .anthropic, config: config(.anthropic, model: "claude-nope"),
+                                                          transport: transport)
+        await #expect(throws: (any Error).self) { _ = try await correct(generator) }
+        #expect(transport.recordedRequests.count == 1)
+    }
+
     @Test func 分段按正文预算留输出_思考的余量只加在请求的上限上() async throws {
         let items = (1...3_000).map { i in
             TranscriptItem.sentence(TranscriptSentence(id: "s\(i)", start: Double(i * 6), end: Double(i * 6 + 5),

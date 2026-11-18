@@ -131,16 +131,18 @@ private func makeOpenAIConfig(
         #expect(secondBody["max_tokens"] as? Int == 32_768)
     }
 
-    @Test func 去掉response_format重试仍返回400时抛出badRequest() async throws {
+    @Test func 去掉response_format和降到正文预算重试仍返回400时抛出badRequest() async throws {
         let transport = FakeHTTPTransport()
-        try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
-        try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
+        for _ in 0..<3 {
+            try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
+        }
 
         let generator = OpenAICompatibleTextGenerator(config: makeOpenAIConfig(), transport: transport)
         await #expect(throws: OnlineAPIError.badRequest(400, "bad model")) {
             _ = try await generator.generate(system: "s", prompt: "p", maxTokens: 128)
         }
-        #expect(transport.recordedRequests.count == 2)
+        let limits = transport.recordedRequests.compactMap { $0.bodyJSONObject()?["max_tokens"] as? Int }
+        #expect(limits == [32_768, 32_768, 128])
     }
 
     @Test func 服务端400明确为模型不存在时不剥离response_format重试_提及参数不支持仍重试() async throws {

@@ -16,7 +16,8 @@ public enum OnlineMinutesDefaults {
 /// - Gemini：2.0 及更早 8192；2.5 起 65536
 /// - 自定义网关：后面是什么模型、接受多大都不知道，用以前一直被接受的 8192
 ///
-/// 调用方要的正文预算比这个还大时按调用方的发
+/// 调用方要的正文预算比这个还大时按调用方的发。表里没有的模型按服务商取，它的上限若更低会被拒（400），
+/// 这时按调用方的正文预算再发一次（同放大以前）
 enum OnlineOutputLimit {
     /// 思考吃光上限、正文为空时再试一次的上限。只有自定义网关有：别的已按模型接受的值发，放大会被拒。
     /// 32768 是常见 OpenAI 兼容模型普遍接受的值（gpt-4.1、qwen-plus 等）；网关不接受时报它的 400
@@ -261,20 +262,26 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
             )
         }
 
-        // 400 时去掉 response_format 重试
+        // 400 时先去掉 response_format 重试；仍被拒、且上限比正文预算大（表里没有、上限更低的模型），按正文预算再发
         var format = true
-        var response = try await send(format: format, tokens: tokens)
+        var sent = tokens
+        var response = try await send(format: format, tokens: sent)
         if OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
             format = false
-            response = try await send(format: format, tokens: tokens)
+            response = try await send(format: format, tokens: sent)
+        }
+        if sent > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            sent = maxTokens
+            response = try await send(format: format, tokens: sent)
         }
         try response.checkSuccess()
         var choice = try firstChoice(from: response.data)
 
         // 思考吃光了上限、正文为空：上限还没到模型接受的值（自定义网关）时放大再试一次，仍为空照常报错
         if choice.finishReason == "length", (try? OnlineTextSupport.extractNormalizedText(choice.text ?? "")) == nil,
-           let retry = OnlineOutputLimit.retryTokens(providerID: config.providerID), retry > tokens
+           let retry = OnlineOutputLimit.retryTokens(providerID: config.providerID), retry > sent
         {
             try Task.checkCancellation()
             response = try await send(format: format, tokens: retry)
@@ -425,8 +432,13 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
             try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
                                                  timeout: self.requestTimeout, transport: self.transport)
         }
-        let response = try await send(buildPayload(system: system, prompt: prompt,
-                                                   maxTokens: config.requestTokens(maxTokens)))
+        // 被拒（400）、且上限比正文预算大（表里没有、上限更低的模型）时按正文预算再发一次
+        let tokens = config.requestTokens(maxTokens)
+        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: tokens))
+        if tokens > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens))
+        }
         try response.checkSuccess()
 
         let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
@@ -542,14 +554,23 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
 
         let url = try generateContentURL()
         let headers = authHeaders()
-        let response = try await OnlineTextSupport.postJSON(
-            url: url,
-            headers: headers,
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: config.requestTokens(maxTokens),
-                                  responseMimeType: "application/json"),
-            timeout: requestTimeout,
-            transport: transport
-        )
+        func send(_ tokens: Int) async throws -> HTTPResponse {
+            try await OnlineTextSupport.postJSON(
+                url: url,
+                headers: headers,
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens,
+                                      responseMimeType: "application/json"),
+                timeout: requestTimeout,
+                transport: transport
+            )
+        }
+        // 被拒（400）、且上限比正文预算大（表里没有、上限更低的模型）时按正文预算再发一次
+        let tokens = config.requestTokens(maxTokens)
+        var response = try await send(tokens)
+        if tokens > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(maxTokens)
+        }
         try response.checkSuccess()
 
         let (parts, finishReason) = try firstCandidateParts(from: response.data)
