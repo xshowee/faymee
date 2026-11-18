@@ -95,9 +95,8 @@ public final class MinutesPipeline {
     /// 当前的热词表，纠错的参考词之一。由 App 在热词变化时设置
     @ObservationIgnored public var hotwords: [String] = []
 
-    /// 当前纪要引擎对应的纠错方式；本机换字词、在线整句改写。nil 表示这个引擎不支持纠错（现在没有），
-    /// 这时纠错不排队、排着的在开始时丢掉，都不报错，直接走纪要
-    public var correctionMethod: CorrectionMethod? { CorrectionMethod.forMinutesEngine(isOnline: isOnlineEngine) }
+    /// 当前纪要引擎对应的纠错方式：本机换字词、在线整句改写
+    public var correctionMethod: CorrectionMethod { CorrectionMethod.forMinutesEngine(isOnline: isOnlineEngine) }
 
     /// 转写稿有效文字（见 `Transcript.effectiveTextCount`）少于这么多字时不自动生成
     public static let minimumTextCount = 50
@@ -276,7 +275,7 @@ public final class MinutesPipeline {
     }
 
     /// 排队纠错（转写完成自动纠错、“纠错”、“重试”都走这里）。只接受转写过、有转写稿的会议；
-    /// 纪要引擎还不支持纠错（`correctionMethod` 为 nil）、或这场正在纠错时不排。已在排队时不重复排，
+    /// 这场正在纠错时不排。已在排队时不重复排，
     /// `now`、`autoMinutes` 只升不降。同一场会议的纪要不越过它（见 `nextJob`）
     /// - Parameters:
     ///   - now: 手动纠错，不等接通电源
@@ -284,7 +283,7 @@ public final class MinutesPipeline {
     /// - Returns: 是否在队列中
     @discardableResult
     public func enqueueCorrection(_ id: String, now: Bool = false, autoMinutes: Bool = false) -> Bool {
-        guard correctionMethod != nil, let m = host?.meeting(id), m.transcription != nil,
+        guard let m = host?.meeting(id), m.transcription != nil,
               (try? store.loadTranscript(id)) != nil,
               !(activeJob?.id == id && activeJob?.isCorrection == true) else { return false }
         if let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) {
@@ -409,13 +408,7 @@ public final class MinutesPipeline {
         switch job.kind {
         case let .minutes(template): startMinutes(job, template: template, meeting: m)
         case let .correction(autoMinutes):
-            guard let method = correctionMethod else {
-                // 排队后引擎换成了还不支持纠错的：不跑、不报错，直接走纪要
-                host?.setCorrection(nil, for: job.id)
-                if autoMinutes { autoGenerateMinutes(job.id) }
-                return startNext()
-            }
-            startCorrection(job, method: method, autoMinutes: autoMinutes, meeting: m)
+            startCorrection(job, method: correctionMethod, autoMinutes: autoMinutes, meeting: m)
         }
     }
 

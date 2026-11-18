@@ -115,7 +115,7 @@ public struct Meeting: Codable, Identifiable, Hashable, Sendable {
     /// 区分说话人的状态，nil 表示从未区分（含 v0.3 及更早的旧会议）。说话人在 transcript.json 里。
     /// 区分说话人失败不影响转写状态：转写稿照常保存，只是没有说话人
     public var diarization: DiarizationState?
-    /// 转写纠错的状态，nil 表示从未纠错（含开关关着、在线引擎还不支持时）。纠错结果在 transcript.json 里。
+    /// 转写纠错的状态，nil 表示这份转写稿从未纠错（含开关关着时，重新转写后也清掉）。纠错结果在 transcript.json 里。
     /// 纠错失败不影响转写和纪要：纪要照常往下走
     public var correction: CorrectionState?
     /// 会中标注（标记、笔记），按创建先后排列。可选是为了兼容 v0.4 及更早的旧 meeting.json，

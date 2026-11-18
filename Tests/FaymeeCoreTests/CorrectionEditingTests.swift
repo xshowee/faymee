@@ -165,9 +165,9 @@ import Testing
 
     // MARK: - 转写稿菜单
 
-    private func menu(_ transcript: Transcript?, state: CorrectionState? = nil, available: Bool = true,
+    private func menu(_ transcript: Transcript?, state: CorrectionState? = nil,
                       editable: Bool = true) -> CorrectionMenuItem {
-        CorrectionMenuItem(transcript: transcript, state: state, isAvailable: available, isEditable: editable)
+        CorrectionMenuItem(transcript: transcript, state: state, isEditable: editable)
     }
 
     @Test func 没纠错过是纠错_纠错过是重新纠错() {
@@ -189,8 +189,7 @@ import Testing
         #expect(!menu(corrected(), state: CorrectionState(status: .running)).isEnabled)
     }
 
-    @Test func 引擎不支持_转写中_没有句子时不能点() {
-        #expect(!menu(corrected(), available: false).isEnabled)
+    @Test func 转写中_没有句子时不能点() {
         #expect(!menu(corrected(), editable: false).isEnabled)
         #expect(!menu(nil).isEnabled)
         let empty = Transcript(engine: "e", createdAt: created, hotwords: [], items: [])

@@ -26,10 +26,6 @@ public enum CorrectionStatus: Hashable, Sendable {
         }
     }
 
-    public var isFailed: Bool {
-        if case .failed = self { true } else { false }
-    }
-
     /// 状态行上的按钮：撤销全部、重试
     public var actionTitle: String? {
         switch self {

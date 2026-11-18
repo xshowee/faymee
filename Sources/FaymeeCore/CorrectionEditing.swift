@@ -71,13 +71,11 @@ public struct CorrectionMenuItem: Hashable, Sendable {
     public let resets: Bool
     public let isEnabled: Bool
 
-    /// - isAvailable: 纪要引擎能纠错（`MinutesPipeline.correctionMethod != nil`）。不能时入队会被拒，
-    ///   先复位就白白撤销了纠错
     /// - isEditable: 转写稿能改（不在重新转写中）
-    public init(transcript: Transcript?, state: CorrectionState?, isAvailable: Bool, isEditable: Bool) {
+    public init(transcript: Transcript?, state: CorrectionState?, isEditable: Bool) {
         resets = transcript?.correction != nil
         title = resets ? "重新纠错" : "纠错"
         let busy = state?.status == .queued || state?.status == .running
-        isEnabled = isAvailable && isEditable && !busy && transcript?.sentences.isEmpty == false
+        isEnabled = isEditable && !busy && transcript?.sentences.isEmpty == false
     }
 }

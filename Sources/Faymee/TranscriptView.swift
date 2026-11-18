@@ -268,7 +268,6 @@ struct TranscriptSection: View {
                         undoAllCorrections()
                     }
                 }
-                .disabled(status.isFailed && model.minutes.correctionMethod == nil)
             }
         }
     }
@@ -297,8 +296,7 @@ struct TranscriptSection: View {
     }
 
     private var correctionMenuItem: CorrectionMenuItem {
-        CorrectionMenuItem(transcript: transcript, state: meeting.correction,
-                           isAvailable: model.minutes.correctionMethod != nil, isEditable: isEditable)
+        CorrectionMenuItem(transcript: transcript, state: meeting.correction, isEditable: isEditable)
     }
 
     /// 手动「纠错 / 重新纠错」：重新纠错先撤销全部、清掉未忽略的建议并写盘，再入队（纠错开始时读的就是复位后的稿）

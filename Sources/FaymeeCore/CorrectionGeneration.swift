@@ -16,8 +16,8 @@ public enum CorrectionMethod: Hashable, Sendable {
         }
     }
 
-    /// 纪要引擎对应的纠错方式。为 nil 时纠错不跑、不报错，直接走纪要（现在每种引擎都支持）
-    public static func forMinutesEngine(isOnline: Bool) -> CorrectionMethod? {
+    /// 纪要引擎对应的纠错方式
+    public static func forMinutesEngine(isOnline: Bool) -> CorrectionMethod {
         isOnline ? .sentenceRewrite : .wordFixes
     }
 }
