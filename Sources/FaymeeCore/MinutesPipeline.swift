@@ -167,12 +167,22 @@ public final class MinutesPipeline {
 
     /// 某场会议生成纪要正在进行的步骤；不在生成中时为 nil
     public func activity(for id: String) -> MinutesActivity? {
-        activeJob?.id == id && activeJob?.isMinutes == true ? activity : nil
+        isGeneratingMinutes(id) ? activity : nil
     }
 
     /// 某场会议纠错正在进行的步骤；不在纠错中时为 nil。会议列表把它显示成纪要前面的一步
     public func correctionActivity(for id: String) -> MinutesActivity? {
-        activeJob?.id == id && activeJob?.isCorrection == true ? activity : nil
+        isCorrecting(id) ? activity : nil
+    }
+
+    /// 这场会议正在生成纪要
+    private func isGeneratingMinutes(_ id: String) -> Bool {
+        activeJob.map { $0.id == id && $0.isMinutes } ?? false
+    }
+
+    /// 这场会议正在纠错
+    private func isCorrecting(_ id: String) -> Bool {
+        activeJob.map { $0.id == id && $0.isCorrection } ?? false
     }
 
     /// 某场排队中的会议在等什么；不在排队、或只是排在别的会议后面（含录音中暂停、排在同一场的纠错后面）时为 nil。
@@ -199,18 +209,18 @@ public final class MinutesPipeline {
     /// 看的是是否在队列里，不只是这次有没有自动排队：用户之前手动排过的也会生成并通知
     /// 自动排的纠错还没结束、结束后会自动排纪要（`wouldAutoGenerate`）时，也算已排队，等的是纠错在等的
     public func followUp(for id: String) -> MinutesFollowUp {
-        if activeJob?.id == id && activeJob?.isMinutes == true { return .queued(waitingFor: nil) }
+        if isGeneratingMinutes(id) { return .queued(waitingFor: nil) }
         if jobs.contains(where: { $0.id == id && $0.isMinutes }) { return .queued(waitingFor: waitReason(for: id)) }
         if let correction = pendingCorrection(id), case .correction(autoMinutes: true) = correction.kind,
            wouldAutoGenerate(id) {
-            return .queued(waitingFor: activeJob?.id == id ? nil : correctionWaitReason(for: id))
+            return .queued(waitingFor: isCorrecting(id) ? nil : correctionWaitReason(for: id))
         }
         return .notQueued
     }
 
     /// 这场会议排着或正在跑的纠错
     private func pendingCorrection(_ id: String) -> Job? {
-        if let active = activeJob, active.id == id, active.isCorrection { return active }
+        if isCorrecting(id) { return activeJob }
         return jobs.first { $0.id == id && $0.isCorrection }
     }
 
@@ -260,7 +270,7 @@ public final class MinutesPipeline {
     @discardableResult
     public func enqueue(_ id: String, template: MinutesTemplate? = nil, now: Bool = false) -> Bool {
         guard let m = host?.meeting(id), m.transcription != nil,
-              !(activeJob?.id == id && activeJob?.isMinutes == true) else { return false }
+              !isGeneratingMinutes(id) else { return false }
         if now, let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) { jobs[i].now = true }
         if let i = jobs.firstIndex(where: { $0.id == id && $0.isMinutes }) {
             if let template { jobs[i].kind = .minutes(template: template) }
@@ -285,7 +295,7 @@ public final class MinutesPipeline {
     public func enqueueCorrection(_ id: String, now: Bool = false, autoMinutes: Bool = false) -> Bool {
         guard let m = host?.meeting(id), m.transcription != nil,
               (try? store.loadTranscript(id)) != nil,
-              !(activeJob?.id == id && activeJob?.isCorrection == true) else { return false }
+              !isCorrecting(id) else { return false }
         if let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) {
             jobs[i].now = jobs[i].now || now
             if autoMinutes, case .correction(autoMinutes: false) = jobs[i].kind {
@@ -407,8 +417,7 @@ public final class MinutesPipeline {
         guard let m = host?.meeting(job.id) else { return startNext() }
         switch job.kind {
         case let .minutes(template): startMinutes(job, template: template, meeting: m)
-        case let .correction(autoMinutes):
-            startCorrection(job, method: correctionMethod, autoMinutes: autoMinutes, meeting: m)
+        case .correction: startCorrection(job, method: correctionMethod, meeting: m)
         }
     }
 
@@ -428,6 +437,27 @@ public final class MinutesPipeline {
         return generation
     }
 
+    /// 进度回调：来自后台线程，回到主线程再更新；任务已被取消或换掉（token 过期）时不更新
+    private func reporter(token: Int) -> @Sendable (MinutesActivity) -> Void {
+        { [weak self] a in
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                self.activity = a
+            }
+        }
+    }
+
+    /// 任务结束、`activeJob` 交出去之前：下一个开始不了（或已切换引擎）就先释放旧模型，再让给转写
+    /// （清掉 activeJob 会放开转写），然后开始下一个
+    private func endActiveJob() {
+        let switchedEngine = activeGenerator.map { !isSameGenerator($0, generator) } ?? false
+        if nextJob == nil || switchedEngine { releaseModel() }
+        activity = nil
+        activeGenerator = nil
+        activeJob = nil
+        startNext()
+    }
+
     private func startMinutes(_ job: Job, template: MinutesTemplate, meeting m: Meeting) {
         let previous = cancelled
         let token = begin(job)
@@ -436,14 +466,7 @@ public final class MinutesPipeline {
         // 以开始时的转写稿为准。从磁盘读：与之后读回比较的值一致，不受小数秒影响。
         // 会中标注以开始时宿主里的会议为准（`m`），和转写稿快照一起算出区间
         let snapshot = Result { try store.loadTranscript(job.id) }
-
-        // 进度回调来自后台线程，回到主线程再更新
-        let report: @Sendable (MinutesActivity) -> Void = { [weak self] a in
-            Task { @MainActor in
-                guard let self, self.generation == token else { return }
-                self.activity = a
-            }
-        }
+        let report = reporter(token: token)
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
             let result: Result<Minutes, Error>
@@ -453,8 +476,8 @@ public final class MinutesPipeline {
                 guard let transcript = try snapshot.get() else { throw MinutesPipelineError.noTranscript }
                 try await generator.load { report(.loading($0)) }
                 report(.generating(0))
-                // createdAt 取整秒：写盘会丢掉小数秒，免得回调里的纪要和读回的不相等
-                let createdAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+                // createdAt 取整秒：免得回调里的纪要和读回的不相等
+                let createdAt = wholeSecondNow()
                 result = .success(try await generateMinutes(
                     transcript: transcript, title: m.title, startedAt: m.startedAt, template: template,
                     annotations: m.minutesAnnotations(in: transcript), generator: generator, model: model, createdAt: createdAt,
@@ -486,17 +509,11 @@ public final class MinutesPipeline {
                 outcome = .failed(error.localizedDescription)
             }
         }
-        let switchedEngine = activeGenerator.map { !isSameGenerator($0, generator) } ?? false
-        // 下一场开始不了（或已切换引擎）就先释放旧模型，再让给转写（清掉 activeJob 会放开转写）
-        if nextJob == nil || switchedEngine { releaseModel() }
-        activity = nil
-        activeGenerator = nil
-        activeJob = nil
-        startNext()
+        endActiveJob()
         if let outcome { onFinish?(id, outcome) }
     }
 
-    private func startCorrection(_ job: Job, method: CorrectionMethod, autoMinutes: Bool, meeting m: Meeting) {
+    private func startCorrection(_ job: Job, method: CorrectionMethod, meeting m: Meeting) {
         let previous = cancelled
         let token = begin(job)
         let generator = generator
@@ -504,12 +521,7 @@ public final class MinutesPipeline {
         let hotwords = hotwords
         // 以开始时的转写稿为准，写盘前再与最新的比对（`Transcript.applyCorrection`）
         let snapshot = Result { try store.loadTranscript(job.id) }
-        let report: @Sendable (MinutesActivity) -> Void = { [weak self] a in
-            Task { @MainActor in
-                guard let self, self.generation == token else { return }
-                self.activity = a
-            }
-        }
+        let report = reporter(token: token)
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
             let result: Result<CorrectionResult, Error>
@@ -521,20 +533,19 @@ public final class MinutesPipeline {
                 report(.generating(0))
                 let review = try await correctTranscript(transcript, title: m.title, hotwords: hotwords, method: method,
                                                          generator: generator, progress: { report(.generating($0)) })
-                let createdAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
                 result = .success(CorrectionResult(snapshot: transcript, review: review, engine: model,
-                                                   createdAt: createdAt, hotwords: hotwords))
+                                                   createdAt: wholeSecondNow(), hotwords: hotwords))
             } catch {
                 result = .failure(error)
             }
-            self?.finishCorrection(job, token: token, autoMinutes: autoMinutes, result: result)
+            self?.finishCorrection(job, token: token, result: result)
         }
     }
 
     /// 纠错结束：写盘前重读最新的转写稿再应用；失败只记失败状态。之后按需走自动纪要的规则，
     /// 在决定释不释放模型之前排上纪要：纠错和纪要之间模型只加载一次
-    private func finishCorrection(_ job: Job, token: Int, autoMinutes: Bool, result: Result<CorrectionResult, Error>) {
-        guard token == generation, activeJob?.id == job.id, activeJob?.isCorrection == true else { return }
+    private func finishCorrection(_ job: Job, token: Int, result: Result<CorrectionResult, Error>) {
+        guard token == generation, isCorrecting(job.id) else { return }
         task = nil
         let id = job.id
         // 纠错期间会议被删除时什么都不写
@@ -549,15 +560,9 @@ public final class MinutesPipeline {
                 setState(.failed, error: error.localizedDescription, for: job)
             }
             // 此刻 activeJob 还是这个纠错：纪要照常入队，startNext 等下面清掉 activeJob 后才开始
-            if autoMinutes { autoGenerateMinutes(id) }
+            if case .correction(autoMinutes: true) = job.kind { autoGenerateMinutes(id) }
         }
-        let switchedEngine = activeGenerator.map { !isSameGenerator($0, generator) } ?? false
-        // 下一个开始不了（或已切换引擎）就先释放旧模型，再让给转写
-        if nextJob == nil || switchedEngine { releaseModel() }
-        activity = nil
-        activeGenerator = nil
-        activeJob = nil
-        startNext()
+        endActiveJob()
     }
 
     private func cancelActive() {
