@@ -1,9 +1,49 @@
 import Foundation
 
-/// 在线纪要模型的默认上下文与单次最大输出预算
+/// 在线纪要模型的默认上下文与单次正文预算。分段按正文预算留输出；请求的输出上限另含思考，见 `OnlineOutputLimit`
 public enum OnlineMinutesDefaults {
     public static let contextTokens = 64_000
     public static let maxOutputTokens = 8_192
+}
+
+/// 在线请求的输出上限（`max_tokens` / `maxOutputTokens`）。各家的思考都算在这个上限里，所以不按正文预算发，
+/// 按模型接受的值发，给思考留出余量。超过模型的上限会被拒（DeepSeek 实测 400），所以按服务商和模型分别取
+/// （各家文档，2026-11）：
+/// - DeepSeek：接受 1–393216；取 65536，即思考模式不传时的默认值。旧名 deepseek-chat / reasoner 已转到 deepseek-flash
+/// - 阿里云百炼：qwen-plus 32768；qwen-max 8192；qwen-turbo 查不到，按 8192；其他（qwen3.5-plus 起 64K 以上）按 32768
+/// - OpenAI：gpt-4.1 系 32768；gpt-4o 系和其他 16384
+/// - Anthropic：Sonnet 4.5、Haiku 4.5 64000；其他按 32000（Opus 4 / 4.1 的上限，更新的模型都不低于它）
+/// - Gemini：2.0 及更早 8192；2.5 起 65536
+/// - 自定义网关：后面是什么模型、接受多大都不知道，用以前一直被接受的 8192
+///
+/// 调用方要的正文预算比这个还大时按调用方的发
+enum OnlineOutputLimit {
+    static func tokens(providerID: String, model: String) -> Int {
+        let model = model.lowercased()
+        switch providerID {
+        case OnlineMinutesProvider.deepSeek.providerID:
+            return 65_536
+        case OnlineMinutesProvider.dashScope.providerID:
+            if model.hasPrefix("qwen-max") || model.hasPrefix("qwen-turbo") { return 8_192 }
+            return 32_768
+        case OnlineMinutesProvider.openAI.providerID:
+            return model.hasPrefix("gpt-4.1") ? 32_768 : 16_384
+        case OnlineMinutesProvider.anthropic.providerID:
+            return model.hasPrefix("claude-sonnet-4-5") || model.hasPrefix("claude-haiku-4-5") ? 64_000 : 32_000
+        case OnlineMinutesProvider.gemini.providerID:
+            let name = model.hasPrefix("models/") ? String(model.dropFirst("models/".count)) : model
+            return name.hasPrefix("gemini-1") || name.hasPrefix("gemini-2.0") ? 8_192 : 65_536
+        default:
+            return 8_192
+        }
+    }
+}
+
+extension OnlineEndpointConfig {
+    /// 发出去的输出上限：至少是这个模型的 `OnlineOutputLimit`
+    func requestTokens(_ maxTokens: Int) -> Int {
+        max(maxTokens, OnlineOutputLimit.tokens(providerID: providerID, model: trimmedModel))
+    }
 }
 
 /// 纯本地启发式 token 估算：中日韩字符按高权重估算，西文按字母数字词数与字符数估算，
@@ -201,7 +241,7 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
             try await OnlineTextSupport.postJSON(
                 url: url,
                 headers: headers,
-                payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: config.requestTokens(maxTokens),
                                       includeResponseFormat: format),
                 timeout: requestTimeout,
                 transport: transport
@@ -360,7 +400,8 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
             try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
                                                  timeout: self.requestTimeout, transport: self.transport)
         }
-        let response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens))
+        let response = try await send(buildPayload(system: system, prompt: prompt,
+                                                   maxTokens: config.requestTokens(maxTokens)))
         try response.checkSuccess()
 
         let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
@@ -479,7 +520,7 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
         let response = try await OnlineTextSupport.postJSON(
             url: url,
             headers: headers,
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+            payload: buildPayload(system: system, prompt: prompt, maxTokens: config.requestTokens(maxTokens),
                                   responseMimeType: "application/json"),
             timeout: requestTimeout,
             transport: transport

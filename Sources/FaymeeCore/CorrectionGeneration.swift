@@ -50,6 +50,8 @@ public func correctTranscript(
         return "[\(tags.joined(separator: " "))] \(s.text)"
     }
     let system = correctionSystemPrompt(method, references: references.promptWords, speakers: !labels.isEmpty)
+    // 留给输出的只算正文（改了的句子）：分段按正文的长短定。思考的余量不占分段，在线引擎发请求时
+    // 把输出上限另外放大到模型接受的值（`OnlineOutputLimit`），本机纠错不思考
     let budget = Budget(generator, system: system,
                         outputTokens: min(generator.maxOutputTokens, generator.contextTokens / 4))
     let items = sentences.map { TranscriptItem.sentence($0) }
