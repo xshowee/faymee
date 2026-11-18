@@ -107,4 +107,59 @@ import Testing
         let adoptedRepeated = repeated.adopt(october)
         #expect(!adoptedRepeated)
     }
+
+    @Test func 忽略后不再显示() {
+        var t = corrected()
+        let ignored = t.ignore(october)
+        #expect(ignored)
+        #expect(t.numberSuggestions.isEmpty)
+        #expect(t.correction?.suggestions == [NumberSuggestion(sentence: "s2", from: "十月", to: "四月", ignored: true)])
+        let again = t.ignore(october)
+        #expect(!again)
+    }
+
+    // MARK: - 重新纠错
+
+    @Test func 重新纠错前_撤销全部并清掉未忽略的建议() {
+        let other = NumberSuggestion(sentence: "s1", from: "要", to: "一")
+        var t = corrected([october, other])
+        t.ignore(october)
+        let changed = t.resetForRecorrection()
+        #expect(changed)
+        #expect(t.sentences.map(\.text) == ["我们要避免对动", "十月底上线"])
+        #expect(t.correctedCount == 0)
+        #expect(t.correction?.suggestions == [NumberSuggestion(sentence: "s2", from: "十月", to: "四月", ignored: true)])
+        let again = t.resetForRecorrection()
+        #expect(!again)
+    }
+
+    @Test func 忽略的建议在重新纠错后保留_不再出现() throws {
+        var t = corrected()
+        t.ignore(october)
+        t.resetForRecorrection()
+        let review = CorrectionReview(texts: ["s1": "我们要避免被动"], suggestions: [october], rejections: [:])
+        try t.applyCorrection(CorrectionResult(snapshot: t, review: review, engine: "llama/qwen3.5-4b-q4km",
+                                               createdAt: created, hotwords: []))
+        #expect(t.sentences[0].text == "我们要避免被动")
+        #expect(t.numberSuggestions.isEmpty)
+        #expect(t.correction?.suggestions.count == 1)
+    }
+
+    @Test func 重新纠错前_采纳过的建议也撤销() {
+        var t = corrected()
+        t.adopt(october)
+        t.resetForRecorrection()
+        #expect(t.sentences[1].text == "十月底上线")
+        #expect(t.correction?.suggestions.isEmpty == true)
+    }
+
+    @Test func 重新纠错不碰手动改过的句子() {
+        var t = corrected()
+        t.edit(sentence: "s1", to: "我们要避免被动局面")
+        t.resetForRecorrection()
+        let s = t.sentences[0]
+        #expect(s.text == "我们要避免被动局面")
+        #expect(s.original == "我们要避免被动")
+        #expect(t.editCount == 1)
+    }
 }

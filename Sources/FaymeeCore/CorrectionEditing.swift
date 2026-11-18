@@ -35,6 +35,28 @@ extension Transcript {
         return true
     }
 
+    /// 忽略数字建议：标记后不再显示，重新纠错也不再出现同一建议（`applyCorrection` 保留已忽略的）。
+    /// 没有这条建议或已忽略过时返回 false
+    @discardableResult
+    public mutating func ignore(_ suggestion: NumberSuggestion) -> Bool {
+        guard let i = correction?.suggestions.firstIndex(where: { $0.isSame(as: suggestion) && !$0.ignored })
+        else { return false }
+        correction?.suggestions[i].ignored = true
+        return true
+    }
+
+    /// 「重新纠错」开跑前的复位：撤销全部纠错（含采纳过的建议），清掉未忽略的建议；手动改过的句子不动。
+    /// 要在入队前写盘：纠错开始时读的就是复位后的转写稿。没有变化时返回 false
+    @discardableResult
+    public mutating func resetForRecorrection() -> Bool {
+        var changed = undoAllCorrections()
+        if let suggestions = correction?.suggestions, suggestions.contains(where: { !$0.ignored }) {
+            correction?.suggestions = suggestions.filter(\.ignored)
+            changed = true
+        }
+        return changed
+    }
+
     private static func canAdopt(_ suggestion: NumberSuggestion, in s: TranscriptSentence) -> Bool {
         s.original == nil && !suggestion.from.isEmpty && s.text.components(separatedBy: suggestion.from).count == 2
     }
