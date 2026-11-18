@@ -96,7 +96,8 @@ public struct TextDiff: Sendable {
     }
 
     /// 数字建议的单元：先向两边并上紧挨着的、`attach` 认的相同文字（数字和「月」「点」这类单位），
-    /// 原文一边为空或在原文里不止出现一次时，再在 `bounds` 里先左后右逐字扩，直到在原文里只出现一次。
+    /// 有一边为空（补字、删字）或原文在原文里不止出现一次时，再在 `bounds` 里先左后右逐字扩，直到两边都不空、
+    /// 原文只出现一次（「可能是『』？」没法看）。
     /// 采纳建议时把原文唯一的那处换掉（ticket 02），所以必须唯一；扩到头也不唯一时为 nil
     func suggestionUnit(_ segment: Segment, within bounds: Range<Int>?,
                         attach: (String) -> Bool) -> (before: String, after: String)? {
@@ -111,7 +112,7 @@ public struct TextDiff: Sendable {
         var leftTurn = true
         while true {
             let unit = text(lo...hi)
-            if !unit.before.isEmpty, before.occurrences(of: unit.before) == 1 { return unit }
+            if !unit.before.isEmpty, !unit.after.isEmpty, before.occurrences(of: unit.before) == 1 { return unit }
             let canLeft = extendable(lo - 1), canRight = extendable(hi + 1)
             guard canLeft || canRight else { return nil }
             if (leftTurn && canLeft) || !canRight { lo -= 1 } else { hi += 1 }

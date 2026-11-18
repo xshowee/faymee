@@ -5,14 +5,16 @@ import Testing
 /// 都用真实的整句改写走 `reviewCorrections`，切分交给 `TextDiff`
 @Suite struct OnlineCorrectionGuardTests {
     /// 一份转写稿快照：每个字符串一句，id 依次是 s1、s2……
-    private func sentences(_ texts: [String]) -> [TranscriptSentence] {
-        texts.enumerated().map { TranscriptSentence(id: "s\($0 + 1)", start: Double($0), end: Double($0) + 1, text: $1) }
+    private func sentences(_ texts: [String], speakers: [String?]? = nil) -> [TranscriptSentence] {
+        texts.enumerated().map {
+            TranscriptSentence(id: "s\($0 + 1)", start: Double($0), end: Double($0) + 1, text: $1, speaker: speakers?[$0])
+        }
     }
 
     /// 在线整句改写：`rewrites` 是句子 id → 改后的整句，默认全部句子可改
     private func review(_ rewrites: [String: String], in texts: [String], editable: Set<String>? = nil,
-                        hotwords: [String] = []) -> CorrectionReview {
-        let all = sentences(texts)
+                        hotwords: [String] = [], speakers: [String?]? = nil) -> CorrectionReview {
+        let all = sentences(texts, speakers: speakers)
         let references = ReferenceWords(hotwords: hotwords, speakerNames: [], title: "", sentences: all)
         let changes = all.compactMap { s in
             rewrites[s.id].map { CorrectionChange(sentenceID: s.id, offset: 0, before: s.text, after: $0) }
@@ -127,6 +129,13 @@ import Testing
         #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
     }
 
+    @Test func 两个人各说一句相同的话不算整句重复() {
+        let r = review(["s2": ""], in: ["好的", "好的"], speakers: ["spk1", "spk2"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+        #expect(review(["s2": ""], in: ["好的", "好的"], speakers: ["spk1", "spk1"]).texts == ["s2": ""])
+    }
+
     @Test func 与相邻句不同的整句不能删() {
         let r = review(["s2": ""], in: ["我们下周发布", "我们下周再发布"])
         #expect(r.texts.isEmpty)
@@ -196,5 +205,30 @@ import Testing
         let r = review(["s1": "我们要避免被动的局面"], in: ["我们要避免对动的局面", "第二句"], editable: ["s2"])
         #expect(r.texts.isEmpty)
         #expect(r.rejections == [CorrectionRule.notEditable.rawValue: 1])
+    }
+
+    // MARK: 识别残留里有数字字符
+
+    @Test func 含数字字符的识别残留照删_不转为建议() {
+        let duplicate = review(["s2": ""], in: ["我们看一下数据", "我们看一下数据"])
+        #expect(duplicate.texts == ["s2": ""])
+        #expect(duplicate.suggestions.isEmpty)
+        let repeated = review(["s1": "等一下我们开始"], in: ["等一下等一下等一下等一下等一下我们开始"])
+        #expect(repeated.texts == ["s1": "等一下我们开始"])
+        #expect(repeated.rejections.isEmpty)
+    }
+
+    @Test func 全是数字的复读不算识别残留_按数字处理不删() {
+        // 「五五五五五」可能是真的编号；读音不近、别处也没有「五」，建议也丢弃
+        let r = review(["s1": "编号是五"], in: ["编号是五五五五五"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.number.rawValue: 1])
+    }
+
+    @Test func 删掉数字的建议_建议的写法不为空() throws {
+        let r = review(["s1": "这是第步了"], in: ["这是第一步了"])
+        let suggestion = try #require(r.suggestions.first)
+        #expect(!suggestion.to.isEmpty)
+        #expect("这是第一步了".replacingOccurrences(of: suggestion.from, with: suggestion.to) == "这是第步了")
     }
 }

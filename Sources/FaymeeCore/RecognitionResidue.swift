@@ -1,8 +1,10 @@
 import Foundation
 
 /// 在线纠错能删的识别残留（spec「护栏」规则 5）。只有这三种删字能过，其他删字一律不过：
-/// - 紧挨着的同一单元连续重复 `minimumRepeats` 次以上，删到只剩 1 次（口吃「我我我」「就是就是」到不了这个次数）；
-/// - 与上一句完全相同的整句重复，删成空句（只认上一句，相同的两句不会都被删掉）；
+/// - 紧挨着的同一单元连续重复 `minimumRepeats` 次以上，至少留 1 次（口吃「我我我」「就是就是」到不了这个次数；
+///   全是数字的单元不算）；
+/// - 与上一句（同一个说话人）完全相同的整句重复，删成空句（只认上一句，相同的两句不会都被删掉；
+///   两个人各说一句「好的」是真的对话，不删）；
 /// - `[breath]`、`/sil` 这类标记（同 `ASROutputGuard.clean` 认的那些）。
 ///
 /// 复读按“字”算，标点、空白不算（「好的，好的，……」的单元是「好的」），同 `ASROutputGuard`；
@@ -34,7 +36,7 @@ struct RecognitionResidue {
             .map { ($0.beforeRange, characterCount($0.before)) }
         let previous = sentences.firstIndex { $0.id == sentence.id }.flatMap { $0 > 0 ? sentences[$0 - 1] : nil }
         wholeSentence = characterCount(diff.after) == 0
-            && previous.map { Self.content($0.text) == Self.content(diff.before) } == true
+            && previous.map { $0.speaker == sentence.speaker && Self.content($0.text) == Self.content(diff.before) } == true
     }
 
     /// 这一处删字是不是识别残留
@@ -66,6 +68,8 @@ struct RecognitionResidue {
         for i in chars.indices {
             for unit in 1...maximumUnit where i + unit * minimumRepeats <= chars.count {
                 let pattern = chars[i..<i + unit]
+                // 全是数字的不算（「五五五五五」可能是真的编号），同 `ASROutputGuard`
+                guard !pattern.allSatisfy({ containsNumber(String($0)) }) else { continue }
                 var count = 1
                 while i + unit * (count + 1) <= chars.count,
                       chars[(i + unit * count)..<(i + unit * (count + 1))] == pattern {

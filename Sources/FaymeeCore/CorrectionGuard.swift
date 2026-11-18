@@ -266,6 +266,11 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
     default:
         break
     }
+    // 识别残留照删，即使含数字字符（「看一下」整句重复、「等一下」复读）：留下的那份里数字还在。
+    // 全是数字的复读不算残留（见 `RecognitionResidue`），往下按数字处理
+    if segment.kind == .delete, residue.isResidue(segment) {
+        return .apply(counts: 0)
+    }
     // 规则 7：任一边含数字的一处（替换、补字、删字都算）不应用，转为数字建议
     if containsNumber(segment.before) || containsNumber(segment.after) {
         let near = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
@@ -286,8 +291,8 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
         }
         return .apply(counts: inserted)
     case .delete:
-        // 规则 5：只删识别残留，残留的删除不计入规则 6
-        return residue.isResidue(segment) ? .apply(counts: 0) : .reject(.deletion)
+        // 规则 5：只删识别残留（上面已放过），其他删字一律不过
+        return .reject(.deletion)
     default:
         break
     }
