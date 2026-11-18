@@ -339,6 +339,9 @@ func characterCount(_ text: String) -> Int {
     text.count { !TextDiff.isPunctuation(String($0)) }
 }
 
+/// 人称代词的字（「我们」「他们」随前一个字算）。参考词不收含这些字的词（`ReferenceWords.wholeWords(in:)`）
+let personalPronounCharacters: Set<Character> = ["我", "你", "您", "他", "她", "它", "咱"]
+
 /// 规则 7：含阿拉伯数字或汉字数字字符
 func containsNumber(_ text: String) -> Bool {
     text.contains { $0.isASCII && $0.isNumber || "〇零一二三四五六七八九十百千万亿两".contains($0) }

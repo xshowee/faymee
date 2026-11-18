@@ -56,6 +56,29 @@ import Testing
         #expect(review([fix("自然体", "智能体")], in: [text], title: "智能体评审会").texts.count == 1)
     }
 
+    @Test func 转写稿别处的参考词是整词_代词_虚词不算() {
+        let others = ["我们这个方案先放一放", "这个我们下周再说", "下一步做智能体的评测", "智能体要能规划"]
+        let references = ReferenceWords(hotwords: [], speakerNames: [], title: "",
+                                        sentences: sentences(["s1 占位"] + others))
+        // 「我们」「这个」别处各出现了两次，但不是有意义的词
+        #expect(references.match(in: "我们来", covering: 0..<2, sentence: "s1") == nil)
+        #expect(references.match(in: "这个来", covering: 0..<2, sentence: "s1") == nil)
+        // 分词时「智能体」是「智能|体」两个词，连起来照样算
+        #expect(references.match(in: "这个智能体", covering: 2..<5, sentence: "s1") == 2..<5)
+        // 词中间切出来的片段不算
+        #expect(references.match(in: "能体", covering: 0..<2, sentence: "s1") == nil)
+    }
+
+    @Test(arguments: [
+        ("他们下午过来", "他们", "我们", ["我们下午开会", "我们先过一遍"]),
+        ("他是说明天来", "是说", "不说", ["他不说明天的事", "我们不说这个"]),
+    ])
+    func 改成别处出现过的虚词_不放宽拼音(text: String, from: String, to: String, others: [String]) {
+        let r = review([fix(from, to)], in: [text] + others)
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.pinyin.rawValue: 1])
+    }
+
     @Test func 单字不算参考词() {
         // 的→了 拼音比 0.5：单字参考词会把它放过去
         let r = review([fix("的", "了")], in: ["好的我们开始", "了", "了"], hotwords: ["了"])
