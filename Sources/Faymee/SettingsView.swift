@@ -143,7 +143,7 @@ struct SettingsView: View {
                         config: online.activeMinutesConfig,
                         credentialError: online.minutesCredentialError,
                         testState: model.minutesTestState,
-                        privacyCaption: "仅上传转写文字（用于纪要和纠错）、会议标题与会中笔记，录音与声纹不上传",
+                        privacyCaption: "仅上传转写文字（用于纪要和纠错）、热词、会议标题与会中笔记，录音与声纹不上传",
                         onFlushSync: { model.flushOnlineSettingsSync() },
                         onTestConnection: { model.testMinutesConnection() }
                     )
