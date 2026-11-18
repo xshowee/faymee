@@ -136,14 +136,38 @@ private protocol ConnectionProbable: TextGenerator {
     func probeConnection() async throws
 }
 
+/// 三个在线协议适配器共用的：配置就绪即可用、按字数估 token、关思考的同一个引擎
+protocol OnlineTextGenerator: TextGenerator {
+    var config: OnlineEndpointConfig { get }
+    var transport: any HTTPTransport { get }
+    var requestTimeout: TimeInterval { get }
+    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    var thinkingDisabled: Bool { get }
+
+    init(config: OnlineEndpointConfig, transport: any HTTPTransport, contextTokens: Int, maxOutputTokens: Int,
+         requestTimeout: TimeInterval, thinkingDisabled: Bool)
+}
+
+extension OnlineTextGenerator {
+    public var isDownloaded: Bool { config.isReady }
+
+    public func countTokens(_ text: String) -> Int {
+        OnlineTokenEstimator.countTokens(text)
+    }
+
+    public func withThinkingDisabled() -> any TextGenerator {
+        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
+             requestTimeout: requestTimeout, thinkingDisabled: true)
+    }
+}
+
 /// OpenAI Chat Completions 兼容协议适配器（覆盖 DeepSeek、阿里云百炼、OpenAI 及自定义网关）
-public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
-    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
     let thinkingDisabled: Bool
 
     public convenience init(
@@ -175,17 +199,6 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
         self.thinkingDisabled = thinkingDisabled
-    }
-
-    public func withThinkingDisabled() -> any TextGenerator {
-        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
-             requestTimeout: requestTimeout, thinkingDisabled: true)
-    }
-
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
@@ -342,13 +355,12 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
 }
 
 /// Anthropic Messages 原生协议适配器
-public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
-    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
     let thinkingDisabled: Bool
     private static let apiVersion = "2023-06-01"
 
@@ -381,17 +393,6 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
         self.thinkingDisabled = thinkingDisabled
-    }
-
-    public func withThinkingDisabled() -> any TextGenerator {
-        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
-             requestTimeout: requestTimeout, thinkingDisabled: true)
-    }
-
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
@@ -485,16 +486,15 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
 }
 
 /// Google Gemini 原生 generateContent 协议适配器
-public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     private static let safetyFinishReasons: Set<String> = [
         "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII",
     ]
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
-    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
     let thinkingDisabled: Bool
 
     public convenience init(
@@ -526,17 +526,6 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
         self.thinkingDisabled = thinkingDisabled
-    }
-
-    public func withThinkingDisabled() -> any TextGenerator {
-        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
-             requestTimeout: requestTimeout, thinkingDisabled: true)
-    }
-
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
