@@ -201,44 +201,66 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
 
         let url = try endpointURL()
         let headers = authHeaders()
-        let thinkingOff = thinkingDisabled ? thinkingOffFields() : [:]
-        let send = { (payload: [String: Any]) in
-            try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
-                                                 timeout: self.requestTimeout, transport: self.transport)
+        func send(format: Bool, extra: [String: Any], tokens: Int) async throws -> HTTPResponse {
+            try await OnlineTextSupport.postJSON(
+                url: url,
+                headers: headers,
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens,
+                                      includeResponseFormat: format, extra: extra),
+                timeout: requestTimeout,
+                transport: transport
+            )
         }
+        let headroom = OnlineTextSupport.reasoningHeadroomTokens
+        var (format, extra, tokens) = (true, thinkingDisabled ? thinkingOffFields() : [:], maxTokens)
 
         // 400 时先去掉 response_format 重试；关思考的开关还被拒，再去掉开关、留出思考的余量
-        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
-                                                   includeResponseFormat: true, extra: thinkingOff))
+        var response = try await send(format: format, extra: extra, tokens: tokens)
         if OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
-            response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
-                                                   includeResponseFormat: false, extra: thinkingOff))
+            format = false
+            response = try await send(format: format, extra: extra, tokens: tokens)
         }
-        if !thinkingOff.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
+        if !extra.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
-            response = try await send(buildPayload(
-                system: system, prompt: prompt, maxTokens: maxTokens + OnlineTextSupport.reasoningHeadroomTokens,
-                includeResponseFormat: false
-            ))
+            (extra, tokens) = ([:], tokens + headroom)
+            response = try await send(format: format, extra: extra, tokens: tokens)
+        }
+        try response.checkSuccess()
+        var choice = try firstChoice(from: response.data)
+
+        // 关思考时思考仍吃光了上限（服务商没有开关，或开关被忽略）：留出思考的余量再试一次，仍为空照常报错
+        if thinkingDisabled, tokens == maxTokens, choice.finishReason == "length",
+           (try? OnlineTextSupport.extractNormalizedText(choice.text ?? "")) == nil
+        {
+            try Task.checkCancellation()
+            response = try await send(format: format, extra: extra, tokens: tokens + headroom)
+            try response.checkSuccess()
+            choice = try firstChoice(from: response.data)
         }
 
-        try response.checkSuccess()
-        let message = try firstMessage(from: response.data)
+        guard let text = choice.text else { throw OnlineAPIError.emptyResponse }
+        return try OnlineTextSupport.extractNormalizedText(text)
+    }
 
-        let contentText: String
+    /// 第一条回复的正文（`content` 为字符串或文本分片）和结束原因。没有正文字段时 `text` 为 nil
+    private func firstChoice(from data: Data) throws -> (text: String?, finishReason: String?) {
+        let choices = try OnlineTextSupport.decodeArrayField("choices", from: data)
+        guard let first = choices.first, let message = first["message"] as? [String: Any] else {
+            throw OnlineAPIError.emptyResponse
+        }
+        let text: String?
         if let string = message["content"] as? String {
-            contentText = string
+            text = string
         } else if let parts = message["content"] as? [[String: Any]] {
-            contentText = parts.compactMap { part -> String? in
+            text = parts.compactMap { part -> String? in
                 if let type = part["type"] as? String, type != "text" { return nil }
                 return part["text"] as? String
             }.joined()
         } else {
-            throw OnlineAPIError.emptyResponse
+            text = nil
         }
-
-        return try OnlineTextSupport.extractNormalizedText(contentText)
+        return (text, first["finish_reason"] as? String)
     }
 
     func probeConnection() async throws {
@@ -287,7 +309,8 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
     /// 各服务商关思考的参数（OpenAI Chat Completions 之外的扩展字段）：
     /// - DeepSeek：`thinking: {type: "disabled"}`（deepseek-flash 等默认思考）
     /// - 阿里云百炼：`enable_thinking: false`（Qwen3.5 及以后的混合思考模型默认思考）
-    /// OpenAI 和自定义网关不发：OpenAI 能关思考的推理模型不收 `max_tokens`，本来就用不了；网关后面是什么模型不知道
+    /// OpenAI 和自定义网关不发：OpenAI 的 `reasoning_effort` 各推理模型取值不一（有的拒收 none），非推理模型
+    /// （默认的 gpt-4.1 系）用不上；网关后面是什么模型不知道。这些靠思考吃光上限时留出余量重试（见 `generate`）
     private func thinkingOffFields() -> [String: Any] {
         switch config.providerID {
         case OnlineMinutesProvider.deepSeek.providerID: ["thinking": ["type": "disabled"]]
@@ -600,7 +623,7 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
     /// 关思考的 `thinkingConfig`，按模型代际（思考算在 maxOutputTokens 里）：
     /// - 2.0 及更早不思考，带 thinkingConfig 反而报错，不发；
     /// - 2.5 用 thinkingBudget：Flash、Flash-Lite 设 0 即关；Pro 关不掉，取最低 128；
-    /// - 3 代起用 thinkingLevel（对 2.5 报错）：Flash 取 minimal（几乎不想），Pro 最低 low。
+    /// - 3 代起用 thinkingLevel（对 2.5 报错）：Flash 取 MINIMAL（几乎不想），Pro 最低 LOW（取值同 API 参考的枚举名）。
     /// `alwaysThinks` 为 true 时关不彻底，输出上限要留出思考的余量
     private func thinkingOff() -> (config: [String: Any], alwaysThinks: Bool)? {
         let model = config.trimmedModel.hasPrefix("models/")
@@ -610,7 +633,7 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         if model.hasPrefix("gemini-2.5") {
             return pro ? (["thinkingBudget": 128], true) : (["thinkingBudget": 0], false)
         }
-        return (["thinkingLevel": pro ? "low" : "minimal"], true)
+        return (["thinkingLevel": pro ? "LOW" : "MINIMAL"], true)
     }
 
     private func buildPayload(

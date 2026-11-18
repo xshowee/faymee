@@ -85,13 +85,41 @@ import Testing
         #expect(bodies.map { $0["max_tokens"] as? Int } == [8192, 8192, 8192 + 16_384])
     }
 
-    @Test func 正文为空仍算失败_不当成没有修改() async throws {
+    private let starved: [String: Any] = ["choices": [["message": ["content": "", "reasoning_content": "想了很久"],
+                                                       "finish_reason": "length"]]]
+
+    @Test func 思考吃光上限时留出余量再试一次_自定义网关也适用() async throws {
         let transport = FakeHTTPTransport()
-        try transport.enqueue(json: ["choices": [["message": ["content": "", "reasoning_content": "想了很久"],
-                                                  "finish_reason": "length"]]])
+        try transport.enqueue(json: starved)
+        try transport.enqueue(json: openAIReply(edits))
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .custom, config: config(.custom),
+                                                          transport: transport)
+
+        let review = try await correct(generator)
+
+        #expect(review.texts == ["s1": "我们要避免被动的局面"])
+        let bodies = transport.recordedRequests.compactMap { $0.bodyJSONObject() }
+        #expect(bodies.map { $0["max_tokens"] as? Int } == [8192, 8192 + 16_384])
+        #expect(bodies.map { $0["response_format"] != nil } == [true, true])
+    }
+
+    @Test func 留出余量后正文仍为空算失败_不当成没有修改_纪要不重试() async throws {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: starved)
+        try transport.enqueue(json: starved)
         let generator = OnlineMinutesEngine.makeGenerator(provider: .deepSeek, config: config(.deepSeek),
                                                           transport: transport)
         await #expect(throws: OnlineAPIError.emptyResponse) { _ = try await correct(generator) }
+        #expect(transport.recordedRequests.count == 2)
+
+        let minutesTransport = FakeHTTPTransport()
+        try minutesTransport.enqueue(json: starved)
+        let minutes = OnlineMinutesEngine.makeGenerator(provider: .deepSeek, config: config(.deepSeek),
+                                                        transport: minutesTransport)
+        await #expect(throws: OnlineAPIError.emptyResponse) {
+            _ = try await minutes.generate(system: "s", prompt: "p", maxTokens: 8192, grammar: nil)
+        }
+        #expect(minutesTransport.recordedRequests.count == 1)
     }
 
     private func anthropicReply(_ text: String) -> [String: Any] {
@@ -143,12 +171,12 @@ import Testing
         let pro25 = try await geminiRequest(model: "models/gemini-2.5-pro")
         #expect(pro25["thinkingConfig"] as? [String: Int] == ["thinkingBudget": 128])
         #expect(pro25["maxOutputTokens"] as? Int == 8192 + 16_384)
-        // 3 代起用思考等级，Flash 有 minimal，Pro 最低 low
+        // 3 代起用思考等级，Flash 有 MINIMAL，Pro 最低 LOW
         let flash3 = try await geminiRequest(model: "gemini-3-flash-preview")
-        #expect(flash3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "minimal"])
+        #expect(flash3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "MINIMAL"])
         #expect(flash3["maxOutputTokens"] as? Int == 8192 + 16_384)
         let pro3 = try await geminiRequest(model: "gemini-3-pro-preview")
-        #expect(pro3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "low"])
+        #expect(pro3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "LOW"])
         #expect(pro3["maxOutputTokens"] as? Int == 8192 + 16_384)
         // 2.0 及更早不思考，带 thinkingConfig 反而报错
         let flash20 = try await geminiRequest(model: "gemini-2.0-flash")
