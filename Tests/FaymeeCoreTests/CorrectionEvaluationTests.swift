@@ -24,7 +24,7 @@ import Testing
 ///
 ///     FAYMEE_CORRECTION_EVAL_OUT=… FAYMEE_CORRECTION_EVAL_CASES=<dir> FAYMEE_CORRECTION_EVAL_ENGINE=local \
 ///     [FAYMEE_CORRECTION_EVAL_RUNS=3] [FAYMEE_CORRECTION_EVAL_LABEL=…] [FAYMEE_CORRECTION_EVAL_ONLY=名1,名2] \
-///     [FAYMEE_DEEPSEEK_API_KEY=… FAYMEE_DEEPSEEK_MODEL=…] swift test --filter CorrectionEvaluation/correct
+///     [FAYMEE_DEEPSEEK_API_KEY=… FAYMEE_DEEPSEEK_MODEL=…] swift test --filter CorrectionEvaluationTests/correct
 ///
 /// 三、裁判：`FAYMEE_CORRECTION_EVAL_JUDGE=<结果目录>` 里真实会议（set == real）的每处修改交给在线模型
 /// （默认 deepseek-v4-pro）判断，写 `<结果目录>/judge-<用例>-r<n>.json`。只作参考，不进门槛
