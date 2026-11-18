@@ -4,7 +4,7 @@ import Foundation
 public enum CorrectionScope: Sendable {
     /// 本机：只换读音相近的字词，补字、删字、改标点一律不收
     case wordsOnly
-    /// 在线：换字词、补漏字、删识别造成的多字、调整句内标点（ticket 03 接上补字、删字的规则 4、5）
+    /// 在线：换字词、补漏字、删识别造成的多字、调整句内标点
     case full
 }
 
@@ -19,9 +19,9 @@ public enum CorrectionRule: String, Codable, CaseIterable, Sendable {
     case scope
     /// 规则 3：换字词读音不近
     case pinyin
-    /// 规则 4：补字（ticket 03）
+    /// 规则 4：补字超过每句合计、连续补 2 字以上却没有来源
     case insertion
-    /// 规则 5：删字（ticket 03）
+    /// 规则 5：删的不是识别残留（口吃、口语词、随意删字）
     case deletion
     /// 规则 6：改动比例超限
     case changeRatio

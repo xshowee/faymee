@@ -1,7 +1,7 @@
 import Testing
 @testable import FaymeeCore
 
-/// 纠错护栏（spec「护栏」「测试决定」护栏：换字词与数字部分；补字、删字的规则 4、5 归 ticket 03）
+/// 纠错护栏（spec「护栏」「测试决定」护栏：换字词与数字部分；在线的补字、删字见 OnlineCorrectionGuardTests）
 @Suite struct CorrectionGuardTests {
     /// 一份转写稿快照：每个字符串一句，id 依次是 s1、s2……
     private func sentences(_ texts: [String]) -> [TranscriptSentence] {

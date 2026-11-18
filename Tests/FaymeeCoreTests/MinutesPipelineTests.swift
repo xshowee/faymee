@@ -1218,12 +1218,15 @@ private final class Fixture {
 private func isCorrection(_ prompt: String) -> Bool { prompt.contains("要校对的转写稿") }
 /// 纠错把 s1 的「讨论」换成同音的「讨轮」
 private let oneFix = #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}]}"#
+/// 在线整句改写：同样把 s1 的「讨论」换成「讨轮」
+private let oneEdit = #"{"edits": [{"id": "s1", "text": "我们今天讨轮 v2.3 的发布时间，支付接口还没准备好"}]}"#
 
 @MainActor @Suite struct MinutesPipelineCorrectionTests {
-    /// 纠错开关开着；纠错输出 `oneFix`，纪要输出 `oneOverview`
+    /// 纠错开关开着；纠错输出 `oneFix`（在线 `oneEdit`），纪要输出 `oneOverview`
     private func fixture(requiresPower: Bool = true, isOnlineEngine: Bool = false) -> Fixture {
         let engine = FakeGenerator()
-        engine.respond = { isCorrection($0) ? oneFix : oneOverview }
+        let correction = isOnlineEngine ? oneEdit : oneFix
+        engine.respond = { isCorrection($0) ? correction : oneOverview }
         let f = Fixture(engine, requiresPower: requiresPower, isOnlineEngine: isOnlineEngine)
         f.pipeline.correctsTranscripts = true
         return f
@@ -1373,30 +1376,54 @@ private let oneFix = #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}
         #expect(f.engine.prompts.map(isCorrection) == [true, false])
     }
 
-    @Test func 在线引擎时纠错先不支持_不跑不报错直接走纪要() async throws {
+    @Test func 在线引擎时转写完也先纠错再生成纪要_用电池也不等() async throws {
         let f = fixture(requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
         f.addMeeting()
 
         #expect(f.pipeline.transcriptionFinished("m1"))
-        #expect(!f.pipeline.enqueueCorrection("m1", now: true))
         try await f.drain()
 
-        #expect(f.engine.prompts.map(isCorrection) == [false])
-        #expect(f.host.meetings["m1"]?.correction == nil)
+        let t = try #require(try f.store.loadTranscript("m1"))
+        #expect(t.sentences[0].text == "我们今天讨轮 v2.3 的发布时间，支付接口还没准备好")
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        #expect(f.host.correctionHistory["m1"] == [.queued, .running, .done])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
     }
 
-    @Test func 排队中的纠错在切到在线后丢掉_直接走纪要() async throws {
+    @Test func 在线配置没补齐时纠错排队_补齐后开始() async throws {
+        let f = fixture(requiresPower: false, isOnlineEngine: true)
+        f.engine.isDownloaded = false
+        f.pipeline.modelAvailabilityChanged()
+        f.addMeeting()
+
+        f.pipeline.transcriptionFinished("m1")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(f.pipeline.correctionWaitReason(for: "m1") == .onlineConfig)
+        #expect(f.engine.generations == 0)
+
+        f.engine.isDownloaded = true
+        f.pipeline.modelAvailabilityChanged()
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+    }
+
+    @Test func 排队中的纠错在切到在线后用在线跑() async throws {
         let f = fixture()
         f.addMeeting()
         f.pipeline.isSuspended = true
         f.pipeline.transcriptionFinished("m1")
 
+        f.engine.respond = { isCorrection($0) ? oneEdit : oneOverview }
         f.pipeline.setEngine(generator: f.engine, model: "online/model", requiresPower: false, isOnlineEngine: true)
         f.pipeline.isSuspended = false
         try await f.drain()
 
-        #expect(f.host.correctionHistory["m1"] == [.queued, nil])
-        #expect(f.engine.prompts.map(isCorrection) == [false])
+        #expect(f.host.correctionHistory["m1"] == [.queued, .running, .done])
+        #expect(try f.store.loadTranscript("m1")?.correction?.engine == "online/model")
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
         #expect(f.host.meetings["m1"]?.minutes?.status == .done)
     }
 
@@ -1416,7 +1443,7 @@ private let oneFix = #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}
         }
     }
 
-    @Test func 重启时在线引擎下排队的纠错清掉() async throws {
+    @Test func 重启时在线引擎下排队的纠错照常恢复() async throws {
         let f = fixture(requiresPower: false, isOnlineEngine: true)
         f.addMeeting()
         f.host.meetings["m1"]?.correction = CorrectionState(status: .queued)
@@ -1424,7 +1451,8 @@ private let oneFix = #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}
         f.pipeline.restore(Array(f.host.meetings.values))
         try await f.drain()
 
-        #expect(f.host.meetings["m1"]?.correction == nil)
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(try f.store.loadTranscript("m1")?.correctedCount == 1)
         #expect(f.host.meetings["m1"]?.minutes?.status == .done)
     }
 

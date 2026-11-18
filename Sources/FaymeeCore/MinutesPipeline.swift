@@ -95,7 +95,7 @@ public final class MinutesPipeline {
     /// 当前的热词表，纠错的参考词之一。由 App 在热词变化时设置
     @ObservationIgnored public var hotwords: [String] = []
 
-    /// 当前纪要引擎对应的纠错方式；nil 表示这个引擎还不支持纠错（在线，ticket 03 接上），
+    /// 当前纪要引擎对应的纠错方式；本机换字词、在线整句改写。nil 表示这个引擎不支持纠错（现在没有），
     /// 这时纠错不排队、排着的在开始时丢掉，都不报错，直接走纪要
     public var correctionMethod: CorrectionMethod? { CorrectionMethod.forMinutesEngine(isOnline: isOnlineEngine) }
 

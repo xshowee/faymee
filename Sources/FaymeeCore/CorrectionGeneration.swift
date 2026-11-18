@@ -5,18 +5,20 @@ import Foundation
 public enum CorrectionMethod: Hashable, Sendable {
     /// 本机：只输出替换 `{"fixes": [{"id", "from", "to"}]}`，GBNF 文法限定 id 范围和条数
     case wordFixes
-    // ticket 03：case sentenceRewrite —— 在线输出改后的整句 `{"edits": [{"id", "text"}]}`，范围 `.full`
+    /// 在线：输出改后的整句 `{"edits": [{"id", "text"}]}`，只列改了的句子，由代码比对出改了什么。
+    /// 没有文法，靠各协议的 JSON 模式（Anthropic 没有，同纪要只靠截取）
+    case sentenceRewrite
 
     public var scope: CorrectionScope {
         switch self {
         case .wordFixes: .wordsOnly
+        case .sentenceRewrite: .full
         }
     }
 
-    /// 纪要引擎对应的纠错方式；还不支持的引擎为 nil（这一张里在线还不支持，03 接上），
-    /// 这时纠错不跑、不报错，直接走纪要
+    /// 纪要引擎对应的纠错方式。为 nil 时纠错不跑、不报错，直接走纪要（现在每种引擎都支持）
     public static func forMinutesEngine(isOnline: Bool) -> CorrectionMethod? {
-        isOnline ? nil : .wordFixes
+        isOnline ? .sentenceRewrite : .wordFixes
     }
 }
 
@@ -91,6 +93,25 @@ public func correctTranscript(
                 continue
             }
             review.merge(reviewWordFixes(fixes, context: correction))
+        case .sentenceRewrite:
+            var edits: [SentenceEdit]?
+            for _ in 0..<2 where edits == nil {
+                try Task.checkCancellation()
+                edits = parseSentenceEdits(try await generator.generate(system: system, prompt: prompt,
+                                                                        maxTokens: budget.outputTokens, grammar: nil))
+            }
+            guard let edits else {
+                review.reject(.unparseable)
+                continue
+            }
+            let texts = Dictionary(sentences.map { ($0.id, $0.text) }, uniquingKeysWith: { a, _ in a })
+            // 不认识的 id 原样交给护栏，按规则 1 记一条；没改的句子不算修改
+            let changes = edits.compactMap { edit -> CorrectionChange? in
+                let before = texts[edit.id] ?? ""
+                guard edit.text != before else { return nil }
+                return CorrectionChange(sentenceID: edit.id, offset: 0, before: before, after: edit.text)
+            }
+            review.merge(reviewCorrections(changes, context: correction))
         }
     }
     if segments.isEmpty { progress(1) }
@@ -118,6 +139,24 @@ func correctionSystemPrompt(_ method: CorrectionMethod, references: [String], sp
         - 标着“只读”的上文只供理解，不要改。
         \(referenceLine)
         只输出 JSON：{"fixes": [{"id": "s12", "from": "对动", "to": "被动"}]}
+        """
+    case .sentenceRewrite:
+        return """
+        你是会议转写稿的校对助手。转写稿由语音识别生成，常有这几类错误：
+        - 读音相近的错字词，例如“被动”识别成“对动”、“工位上”识别成“工会上”、“端到端”识别成“端道的”；
+        - 漏掉的字；
+        - 识别残留：同一个字或词失控地连续重复很多遍（“吧吧吧吧吧吧”），与上一句完全相同的整句重复，\
+        [breath]、/sil 这类标记。
+        \(format)
+        任务：根据上下文改正这些错误，输出改后的整句。
+        - 可以换读音相近的字词、补漏掉的字、删识别残留、调整句内标点。
+        - 口语词（嗯、那个、就是）和口吃（我我我觉得、就是就是）都保留，不算错误。不润色、不改说法、不调语序。
+        - 不合并、不拆分句子，不在句子之间挪动文字。与上一句完全相同的重复句，text 输出空字符串 "" 表示删掉。
+        - 拿不准就不改。只列出改了的句子，没改的不要列；没有要改的就输出空列表。
+        - text 是这一句改后的完整内容，不带句子编号和说话人。
+        - 标着“只读”的上文只供理解，不要改。
+        \(referenceLine)
+        只输出 JSON：{"edits": [{"id": "s12", "text": "我们要避免被动的局面"}]}
         """
     }
 }
@@ -158,5 +197,49 @@ func parseWordFixes(_ output: String) -> [WordFix]? {
         guard let entry = entry as? [String: Any], let id = entry["id"] as? String,
               let from = entry["from"] as? String, let to = entry["to"] as? String else { return nil }
         return WordFix(id: id, from: from, to: to)
+    }
+}
+
+/// 在线输出的一条整句改写：`{"id": "s12", "text": "…"}`。`text` 为空表示整句删掉（与上一句重复）
+public struct SentenceEdit: Hashable, Sendable {
+    public var id: String
+    public var text: String
+
+    public init(id: String, text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+/// 取输出里第一个 `{` 到最后一个 `}` 当 JSON（同 `parseDraft`）。没有 `edits` 列表时为 nil（解析失败）；
+/// 单条形状不对只丢掉那一条，同一句只认第一条，`text` 开头抄了行首的「[s12 说话人 2] 」时去掉。
+/// 输出被截断（常规会议一次整场，改得多时会碰到输出上限）时，退到最后一个写完的条目，救回前面的
+func parseSentenceEdits(_ output: String) -> [SentenceEdit]? {
+    guard let open = output.firstIndex(of: "{") else { return nil }
+    func entries(_ json: String) -> [Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])?["edits"] as? [Any]
+    }
+    var found: [Any]?
+    if let close = output.lastIndex(of: "}"), open < close {
+        found = entries(String(output[open...close]))
+    }
+    if found == nil, output.contains(#""edits""#) {
+        // 截断：从后往前试每个 `}`，补上 `]}` 收尾
+        var end = output.endIndex
+        while found == nil, let close = output[open..<end].lastIndex(of: "}") {
+            found = entries(output[open...close] + "]}")
+            end = close
+        }
+    }
+    guard let found else { return nil }
+    var seen = Set<String>()
+    return found.compactMap { entry in
+        guard let entry = entry as? [String: Any], let id = entry["id"] as? String, var text = entry["text"] as? String,
+              seen.insert(id).inserted else { return nil }
+        let tag = "[\(id)"
+        if text.hasPrefix(tag + "]") || text.hasPrefix(tag + " "), let close = text.firstIndex(of: "]") {
+            text = String(text[text.index(after: close)...]).trimmingCharacters(in: .whitespaces)
+        }
+        return SentenceEdit(id: id, text: text)
     }
 }
