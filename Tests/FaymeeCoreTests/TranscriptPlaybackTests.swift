@@ -116,6 +116,18 @@ private func transcript(_ items: [TranscriptItem]) -> Transcript {
             """)
     }
 
+    @Test func 纠错删成空句的不占一行() {
+        let t = transcript([
+            sentence("s1", 0.48, 3.2, "我们下周发布"),
+            sentence("s2", 3.5, 6, ""),
+            sentence("s3", 65.9, 70, "然后看一下数据"),
+        ])
+        #expect(t.plainText(meeting: nil) == """
+            [00:00] 我们下周发布
+            [01:05] 然后看一下数据
+            """)
+    }
+
     @Test func 新的两种空白按各自的文字单独一行_后面照常列出其中的句子() {
         let t = transcript([
             .gap(TranscriptGap(start: 600, end: 780.5, reason: .lidClosedSystemSoundOnly)),
