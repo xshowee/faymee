@@ -20,6 +20,8 @@ private func status(_ state: TranscriptionState?, activity: TranscriptionActivit
     @Test(arguments: [
         (TranscriptionWaitReason?.none, "排队中", String?.none, false),
         (.onlineConfig, "等待配置在线转写", "前往设置", true),
+        // 等下载模型时不给按钮：界面在旁边放下载控件
+        (.modelDownload(id: "sherpa-onnx/funasr-nano-int8-2025-12-30"), "等待下载转写模型", nil, false),
     ])
     func 排队中显示在等什么_等待在线配置时提供前往设置(_ wait: TranscriptionWaitReason?, _ text: String,
                                               _ action: String?, _ opensSettings: Bool) {
@@ -79,6 +81,10 @@ private func status(_ state: TranscriptionState?, activity: TranscriptionActivit
         ("", String?.none),
         ("apple/speechanalyzer", nil),
         ("apple/other", nil),
+        // 本机模型目录里的 sherpa 模型
+        ("sherpa-onnx/funasr-nano-int8-2025-12-30", nil),
+        ("sherpa-onnx/paraformer-zh-2023-09-14", nil),
+        ("sherpa-onnx/qwen3-asr-0.6B-int8-2026-03-25", nil),
         ("dashscope/qwen3-asr-flash-filetrans", "dashscope/qwen3-asr-flash-filetrans"),
         ("openai/gpt-transcribe", "openai/gpt-transcribe"),
         ("openai-compatible/whisper-large-v3", "openai-compatible/whisper-large-v3"),

@@ -60,6 +60,11 @@ public enum LiveCaptionStatus: Hashable, Sendable {
 ///
 /// 每次暂停、出错都停掉引擎，之后来的第一块音频开始新的一次转写；换了音频格式（切换麦克风）时
 /// 结束旧的转写（让它吐完剩下的定稿句子）、开新的，字幕接着显示，不插分隔行
+///
+/// 选了定稿模型（`finalizer`）时，会话创建时在后台加载它、录音结束（`stop`）时释放，暂停期间也留着
+/// （大模型反复加载慢）。留着最近约 1 分钟的音频；引擎每确定一句，把这一句前后各多 0.3 秒的音频交给它重转，
+/// 面板先显示流式结果，重转完再替换成它的文字。重转是逐句排队的，跟不上时丢最旧的请求、那句保留流式结果；
+/// 暂停、出错时丢掉排队的请求和缓存的音频
 @MainActor @Observable
 public final class LiveCaptionSession {
     public private(set) var lines: [LiveCaptionLine] = []
@@ -105,16 +110,43 @@ public final class LiveCaptionSession {
     @ObservationIgnored private var currentStartedAt: Date?
     @ObservationIgnored private var failedAt: Date?
     @ObservationIgnored private var stopped = false
+    /// 实时字幕定稿；没选定稿模型时为 nil
+    @ObservationIgnored private let finalizer: SentenceFinalizer?
+    /// 最近的音频，切出句子交给定稿。只在有定稿时记
+    @ObservationIgnored private var audio = RecentAudio()
+    /// 已被定稿结果替换的句子
+    @ObservationIgnored private var finalized: Set<Int> = []
 
-    /// 创建即开始准备语音模型。now 只给测试替换
+    /// 定稿时句子前后各多带的秒数
+    static let finalizePadding: TimeInterval = 0.3
+
+    /// 相邻两句定稿去重时最多去掉几个字。两句的音频最多重叠约 1 秒（各多带 0.3 秒，X-ASR 的句末又比最后一个字
+    /// 晚约 0.3 秒），比会后转写的补边重叠（约 0.5 秒，4 个字）长；三场会议实测有 5、6 个字的重复
+    static let maxFinalizeTwins = 6
+
+    /// 定稿因积压丢掉的句子数（测量用）
+    var finalizeDropped: Int { finalizer?.dropped ?? 0 }
+
+    /// 创建即开始准备语音模型（选了定稿模型时也开始加载它）。now 只给测试替换
     public init(engine: any StreamingTranscriber, recordingStartedAt: Date, hotwords: [String],
-                now: @escaping () -> Date = Date.init) {
+                finalizer: LiveCaptionFinalizerModel? = nil, now: @escaping () -> Date = Date.init) {
         self.engine = engine
         self.recordingStartedAt = recordingStartedAt
         self.hotwords = hotwords
         self.now = now
+        self.finalizer = finalizer.map { SentenceFinalizer(model: $0, hotwords: hotwords) }
         prepare()
+        if let results = self.finalizer?.results {
+            Task { [weak self] in
+                for await result in results {
+                    self?.replace(result.id, with: result.text)
+                }
+            }
+        }
     }
+
+    /// 没调 `stop` 就丢弃时也放掉定稿模型
+    deinit { finalizer?.cancel() }
 
     /// 送入一块音频。at 是这块音频的墙钟时间（取收到的时刻即可）。
     /// 准备中、暂停、出错时直接丢掉
@@ -127,7 +159,9 @@ public final class LiveCaptionSession {
         }
         if current == nil { begin(format: buffer.format) }
         // 每块都带上录音里的时间：中途丢过音频（分路缓冲满、引擎积压、录音重启）时引擎据此对齐
-        current?.transcription.append(buffer, at: time.timeIntervalSince(recordingStartedAt))
+        let seconds = time.timeIntervalSince(recordingStartedAt)
+        current?.transcription.append(buffer, at: seconds)
+        if finalizer != nil { audio.append(buffer, at: seconds) }
     }
 
     /// 面板不可见：停掉引擎、释放模型，丢掉没定稿的文字。恢复时在字幕里插入分隔行。
@@ -154,11 +188,12 @@ public final class LiveCaptionSession {
         prepare()
     }
 
-    /// 录音结束：停掉引擎，之后什么都不做
+    /// 录音结束：停掉引擎、释放定稿模型，之后什么都不做
     public func stop() {
         stopped = true
         prepareToken += 1
         cancelTranscriptions()
+        finalizer?.cancel()
     }
 
     private func begin(format: AVAudioFormat) {
@@ -189,6 +224,7 @@ public final class LiveCaptionSession {
             producedResult(token)
             if volatileOwner == token { clearVolatile() }
             lines.append(.sentence(LiveCaption(id: nextID, start: s.start, end: s.end, text: s.text)))
+            finalize(nextID, start: s.start, end: s.end)
             nextID += 1
             trim()
         case .failed(let reason):
@@ -257,6 +293,42 @@ public final class LiveCaptionSession {
         live.removeAll()
         current = nil
         clearVolatile()
+        finalizer?.dropPending()
+        audio.reset()
+    }
+
+    /// 把这一句的音频交给定稿。音频已经不在缓存里时不定稿，保留流式结果
+    private func finalize(_ id: Int, start: TimeInterval, end: TimeInterval) {
+        guard let finalizer,
+              let samples = audio.clip(from: start - Self.finalizePadding, to: end + Self.finalizePadding)
+        else { return }
+        finalizer.submit(id: id, samples: samples)
+    }
+
+    /// 定稿结果替换对应的句子（按 id，晚到的也只换那一句）。那句已经被丢掉、结果为空时不换。
+    ///
+    /// 前一句紧挨着这句（两句各多带的音频重叠）且已定稿时，它的定稿常常带上这句开头的几个字
+    /// （X-ASR 的句子常常首尾相接，句末时间又比最后一个字晚约 0.3 秒）：从前一句去掉和这句开头相同的字，
+    /// 规矩同会后转写（`SentenceAssembly.droppingTextTwins`），最多 `maxFinalizeTwins` 个字。缩短补边会丢字（ticket 03），所以不缩
+    private func replace(_ id: Int, with text: String) {
+        guard !stopped, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let index = lines.firstIndex(where: { if case .sentence(let s) = $0 { s.id == id } else { false } }),
+              case .sentence(var caption) = lines[index]
+        else { return }
+        caption.text = text
+        lines[index] = .sentence(caption)
+        finalized.insert(id)
+        if index > 0, case .sentence(var previous) = lines[index - 1], finalized.contains(previous.id),
+           caption.start - previous.end < 2 * Self.finalizePadding {
+            let trimmed = SentenceAssembly.droppingTextTwins(of: SegmentRecognition(text: previous.text, tokens: nil),
+                                                             before: SegmentRecognition(text: text, tokens: nil),
+                                                             limit: Self.maxFinalizeTwins).text
+            // 前一句整句都是重复的字时不动，免得留下空行
+            if trimmed != previous.text, trimmed.contains(where: { !$0.isPunctuation && !$0.isWhitespace }) {
+                previous.text = trimmed
+                lines[index - 1] = .sentence(previous)
+            }
+        }
     }
 
     private func insertGap(from start: Date) {

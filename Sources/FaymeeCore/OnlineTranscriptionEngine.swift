@@ -20,17 +20,18 @@ public enum OnlineTranscriptionEngine {
         }
     }
 
+    /// 按设置建会后转写引擎。`waitReason` 为 nil 表示就绪；否则排队的完整转写在等它
+    /// （在线：等补齐配置；本机：由 `local` 给出，如所选模型还没下载完）
     @MainActor
     public static func makeEngine(
         settings: OnlineModelSettings,
         transport: any HTTPTransport,
-        local: () -> (transcriber: any Transcriber, name: String),
+        local: () -> (transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?),
         reference: () -> (any Transcriber)?
-    ) -> (transcriber: any Transcriber, name: String, isReady: Bool) {
+    ) -> (transcriber: any Transcriber, name: String, waitReason: TranscriptionWaitReason?) {
         switch settings.transcriptionMode {
         case .local:
-            let resolved = local()
-            return (resolved.transcriber, resolved.name, true)
+            return local()
         case .online:
             let config = settings.activeTranscriptionConfig
             let transcriber = makeTranscriber(
@@ -39,7 +40,7 @@ public enum OnlineTranscriptionEngine {
                 transport: transport,
                 referenceTranscriber: reference()
             )
-            return (transcriber, config.sourceIdentifier, config.isReady)
+            return (transcriber, config.sourceIdentifier, config.isReady ? nil : .onlineConfig)
         }
     }
 

@@ -183,7 +183,8 @@ struct TranscriptSection: View {
     private var speakerStatus: SpeakerStatus {
         SpeakerStatus(transcription: meeting.transcription, diarization: meeting.diarization,
                       activity: model.transcription.activity(for: meeting.id), transcript: transcript,
-                      canDiarize: model.transcription.canDiarize)
+                      canDiarize: model.transcription.canDiarize,
+                      waitReason: model.transcription.diarizationWaitReason(for: meeting.id))
     }
 
     /// 改说话人（改名、合并、单句改）：转写中不能改（同改文字），区分说话人排队或进行中也不能改，
@@ -207,7 +208,7 @@ struct TranscriptSection: View {
 
     private func voiceprintActions(_ transcript: Transcript) -> VoiceprintActions {
         let library = model.voiceprints.library
-        let current = model.transcription.voiceprintModel
+        let current = model.selectedVoiceprintModel
         return VoiceprintActions(
             enrollment: { speaker in
                 library.enrollmentOption(speaker: speaker.id, in: transcript, meetingID: meeting.id,
@@ -251,7 +252,7 @@ struct TranscriptSection: View {
         guard let speaker = edited.speaker(id) else { return }
         let option = model.voiceprints.library.enrollmentOption(
             speaker: id, in: edited, meetingID: meeting.id,
-            currentVoiceprintModel: model.transcription.voiceprintModel)
+            currentVoiceprintModel: model.selectedVoiceprintModel)
         enrollOffer = option.isEnabled
             ? EnrollOffer(speakerID: id, name: speaker.displayName, title: option.title) : nil
     }
@@ -374,7 +375,10 @@ struct TranscriptSection: View {
     /// 转写排队或进行中时不显示，由转写状态说明
     @ViewBuilder private var speakerStatusView: some View {
         let status = speakerStatus
-        if let text = status.text {
+        if case let .queued(.modelDownload(id)) = status, let downloader = downloader(forModel: id) {
+            // 同转写等模型：说明要下多大的声纹模型，用户点“下载”才开始；下好后自动区分说话人
+            ModelDownloadControls(style: .waiting(.voiceprint), downloader: downloader)
+        } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)
             } else if case .failed = status {
@@ -399,6 +403,11 @@ struct TranscriptSection: View {
         }
     }
 
+    /// 排队在等下载的模型（`.queued(.modelDownload(id))`）的下载器
+    private func downloader(forModel id: String) -> ModelDownloader? {
+        model.modelSelections.catalog.model(id: id).flatMap { model.modelDownloads.downloader(for: $0) }
+    }
+
     /// “重新区分说话人”可选的人数上限
     private static let maxSpeakerCount = 8
 
@@ -414,7 +423,10 @@ struct TranscriptSection: View {
         let status = TranscriptionStatus(state: meeting.transcription,
                                          activity: model.transcription.activity(for: meeting.id),
                                          waitReason: model.transcription.waitReason(for: meeting.id))
-        if let text = status.text {
+        if case let .queued(.modelDownload(id)) = status, let downloader = downloader(forModel: id) {
+            // 不静默下载：说明要下多大的模型，用户点“下载”才开始；下好后自动开始转写
+            ModelDownloadControls(style: .waiting(.transcription), downloader: downloader)
+        } else if let text = status.text {
             if let p = status.progress {
                 progress(text, p)
             } else if case .failed = status {

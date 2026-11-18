@@ -95,7 +95,7 @@ final class AppModel {
     /// 正在合盖、用的又是内置麦克风：此刻没有在录到声音
     var isLidGapOpen: Bool { current?.openGap != nil }
 
-    @ObservationIgnored let store = MeetingStore()
+    @ObservationIgnored let store: MeetingStore
     /// 自动更新。录音、整理期间推迟重启，由 syncTranscriptionSuspension 同步忙闲
     @ObservationIgnored let updater = AppUpdater()
     /// 声纹库。界面（说话人菜单、声纹管理窗口）经它读写；转写管线识别时自己读盘
@@ -125,8 +125,74 @@ final class AppModel {
         didSet { syncTranscriptionSuspension() }
     }
 
-    /// 纪要模型的下载器。只在用户点“下载”时开始；下载完成或删除模型时通知纪要管线（见 init）
-    @ObservationIgnored let modelDownloader = MinutesEngine.makeDownloader()
+    /// 本机模型目录里需要下载的模型的下载器，每个模型一个（`ModelPicker` 和各管线共用）
+    @ObservationIgnored let modelDownloads = ModelDownloads(directory: LocalModel.defaultDirectory,
+                                                            transport: URLSessionModelTransport())
+    /// 每个用途选中的本机模型（设置里的选择框）。会后转写的默认值看是否已有会议，在 init 里一次决定。
+    /// 转写、纪要管线和声纹模型（lazy）都读它，而 meetings 的 didSet 在 init 里就会建出这些管线：
+    /// 必须是没有默认值的 let，编译器才保证它在 self 能被用到（任何 didSet、lazy 跑起来）之前已经赋值
+    @ObservationIgnored let modelSelections: ModelSelections
+
+    /// 设置里「声纹」选中的模型 → 转写管线的区分引擎和匹配阈值。打进 App 的模型由 build.sh 拷进
+    /// Contents/Resources；直接 swift run（没打包）时没有，不区分说话人
+    @ObservationIgnored private(set) lazy var voiceprintModel = VoiceprintModelBinding(
+        selections: modelSelections, downloads: modelDownloads, bundleResources: Bundle.main.resourceURL)
+
+    /// 设置里的「重算声纹库」：换声纹模型后用新模型从原会议录音重算。每写回一个人，声纹库界面跟着重读
+    @ObservationIgnored private(set) lazy var voiceprintRecomputation: VoiceprintRecomputation = {
+        let r = VoiceprintRecomputation(voiceprints: voiceprints.store, meetings: store)
+        r.onLibraryChange = { [weak self] in self?.voiceprints.reload() }
+        return r
+    }()
+
+    /// 设置里选中的声纹模型 id。声纹库里模型与它不同的人不参与识别、需要重算或重新登记
+    var selectedVoiceprintModel: String? { modelSelections.selectedID(for: .voiceprint) }
+
+    /// 所选声纹模型能不能用（打进 App 的总能用，需要下载的看是否下好）
+    var selectedVoiceprintModelIsReady: Bool {
+        guard let selected = modelSelections.selected(for: .voiceprint) else { return false }
+        // 读下载器的状态（可观察），下载完成时界面跟着变
+        return modelDownloads.downloader(for: selected)?.isReady ?? modelDownloads.isReady(selected)
+    }
+
+    /// 声纹模型现在不能删的原因：正在转写（可能接着区分说话人）或重算声纹库时，引擎还要读模型文件
+    var voiceprintModelDeleteBlockedReason: String? {
+        if voiceprintRecomputation.isRunning { return "正在重算声纹库，结束后才能删除模型" }
+        return transcriptionModelDeleteBlockedReason
+    }
+
+    /// 会后转写模型现在不能删的原因：正在转写（可能接着区分说话人）时引擎还要读模型文件
+    /// （读到一半的模型会让 sherpa-onnx 直接退出进程）
+    var transcriptionModelDeleteBlockedReason: String? {
+        transcription.activeID != nil ? "正在转写或区分说话人，结束后才能删除模型" : nil
+    }
+
+    /// 会后转写、实时字幕定稿选择框里的模型现在不能删的原因。Paraformer、Fun-ASR-Nano 两个用途共用同一份模型文件，
+    /// 哪边在用都不能删：正在转写（同上），或本场录音的实时字幕定稿正拿着它（删到一半同样会让 sherpa-onnx 退出进程）
+    func asrModelDeleteBlockedReason(_ m: CatalogModel) -> String? {
+        if liveFinalizeModelID == m.id { return "本场录音的实时字幕定稿正在用它，录音结束后才能删除" }
+        return m.roles.contains(.transcription) ? transcriptionModelDeleteBlockedReason : nil
+    }
+
+    /// App 退出前：取消在后台用 onnxruntime 的会后任务（会后转写、区分说话人、重算声纹库），
+    /// 之后由调用方等它们放掉模型（`SherpaBackgroundWork.waitUntilReleased`）。
+    /// 转写管线暂停即取消正在进行的那场并放回队首、状态记为排队，下次启动照常恢复；重算声纹库已写回的人保留
+    func cancelBackgroundWorkForQuit() {
+        transcription.isSuspended = true
+        voiceprintRecomputation.cancel()
+    }
+
+    /// 用所选声纹模型重算声纹库；所选模型还不能用（没下载）时什么都不做
+    func recomputeVoiceprints() {
+        guard let extractor = voiceprintModel.makeExtractor() else { return }
+        voiceprintRecomputation.start(with: extractor)
+    }
+
+    /// 选中的纪要模型的下载器（详情页纪要等模型时显示它）。只在用户点“下载”时开始；
+    /// 下载完成或删除模型时通知纪要管线（见 init）
+    var modelDownloader: ModelDownloader {
+        modelDownloads.downloader(for: MinutesEngine.selectedModel(modelSelections))!
+    }
 
     /// 在线转写与在线纪要设置，API Key 存于系统钥匙串；默认保持纯本机模式
     @ObservationIgnored let onlineSettings = OnlineModelSettings(
@@ -137,8 +203,15 @@ final class AppModel {
     @ObservationIgnored private lazy var onlineCoordinator = OnlineEngineCoordinator(
         settings: onlineSettings,
         transport: httpTransport,
-        makeTranscription: { TranscriptionEngine.make(settings: $0, transport: $1) },
-        makeMinutes: { MinutesEngine.make(settings: $0, transport: $1) },
+        makeTranscription: { [unowned self] in
+            TranscriptionEngine.make(settings: $0, transport: $1, selections: modelSelections,
+                                     downloads: modelDownloads)
+        },
+        makeMinutes: { [unowned self] in
+            MinutesEngine.make(settings: $0, transport: $1, selections: modelSelections)
+        },
+        selections: modelSelections,
+        downloads: modelDownloads,
         syncDebounce: .milliseconds(500)
     )
 
@@ -177,6 +250,12 @@ final class AppModel {
             livePanel.captionsEnabled = liveCaptionsEnabled
         }
     }
+    /// 本场录音的实时字幕在用的模型 id（所选模型没下载完时是 SpeechAnalyzer）；不在录音时为 nil。
+    /// 设置里据此不让删正在用的模型
+    private(set) var liveCaptionModelID: String?
+    /// 本场录音的实时字幕定稿在用的模型 id；不用（选了“不用”或所选模型没下载完）或不在录音时为 nil。
+    /// 设置里据此不让删正在用的模型
+    private(set) var liveFinalizeModelID: String?
     /// 本场录音的实时字幕，录音开始时建、停止时丢弃（字幕不存盘）。会中面板观察它
     private(set) var liveCaptions: LiveCaptions? {
         didSet {
@@ -208,17 +287,21 @@ final class AppModel {
     /// 会后转写队列。界面直接观察它的 queue / activeID / activity，手动转写调 enqueue；
     /// 会议的转写状态在 meeting.transcription 里，由本类作为 TranscriptionHost 写入
     @ObservationIgnored private(set) lazy var transcription: TranscriptionPipeline = {
-        let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport)
-        let diarization = DiarizationEngine.make()
+        let engine = TranscriptionEngine.make(settings: onlineSettings, transport: httpTransport,
+                                              selections: modelSelections, downloads: modelDownloads)
+        let diarization = voiceprintModel.makeEngine()
         let pipeline = TranscriptionPipeline(store: store, transcriber: engine.transcriber,
-                                             engine: engine.name, isEngineReady: engine.isReady,
+                                             engine: engine.name, isEngineReady: engine.waitReason == nil,
+                                             engineWaitReason: engine.waitReason ?? .onlineConfig,
                                              diarizer: diarization.diarizer,
+                                             diarizerWaitReason: diarization.waitReason,
                                              voiceprints: VoiceprintStore(), host: self)
         pipeline.voiceprintThreshold = diarization.voiceprintThreshold
         pipeline.isSuspended = true
         pipeline.hotwords = hotwords
         pipeline.diarizes = diarizeSpeakers
         pipeline.onFinish = { [weak self] in self?.transcriptionFinished($0, $1) }
+        voiceprintModel.bind(pipeline)
         return pipeline
     }()
 
@@ -226,7 +309,8 @@ final class AppModel {
     /// 手动生成调 enqueue；会议的纪要状态在 meeting.minutes 里，由本类作为 MinutesHost 写入。
     /// 和转写管线互相让行（coordinate），录音、整理、启动恢复期间和转写一起暂停
     @ObservationIgnored private(set) lazy var minutes: MinutesPipeline = {
-        let engine = MinutesEngine.make(settings: onlineSettings, transport: httpTransport)
+        let engine = MinutesEngine.make(settings: onlineSettings, transport: httpTransport,
+                                        selections: modelSelections)
         let pipeline = MinutesPipeline(store: store, generator: engine.generator, model: engine.name,
                                        requiresPower: engine.requiresPower, isOnlineEngine: engine.isOnline,
                                        host: self)
@@ -239,6 +323,11 @@ final class AppModel {
     }()
 
     init() {
+        // 先读会议目录、定好各用途的模型，再做别的：已有安装的判断要看会议，而 meetings 一赋值就会建管线
+        let store = MeetingStore()
+        let loadedMeetings = store.loadAll()
+        self.store = store
+        modelSelections = .atLaunch(meetings: loadedMeetings)
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
@@ -248,7 +337,7 @@ final class AppModel {
         systemSoundEnabled = UserDefaults.standard.bool(forKey: "systemSound")
         hotkeys.onPress = { [weak self] in self?.shortcutPressed($0) }
         noteInput.onSave = { [weak self] text, time in self?.addNote(text, at: time) }
-        meetings = store.loadAll()
+        meetings = loadedMeetings
         reloadHotwords()
         if let hotwordsError { lastError = hotwordsError }
         // 不依赖 init 里的赋值是否触发 hotwordsText 的 didSet，直接算一次
@@ -277,8 +366,13 @@ final class AppModel {
             guard let self, self.minutes.isOnPower != onPower else { return }
             self.minutes.isOnPower = onPower
         }
-        // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”
-        modelDownloader.onAvailabilityChange = { [weak self] in self?.minutes.modelAvailabilityChanged() }
+        // 下载完成：排队的纪要接着开始；删除模型：排队的纪要回到“等待下载模型”。
+        // 每个纪要模型的下载器都接上：管线只看当前引擎的模型在不在
+        for entry in modelSelections.catalog.models(for: .minutes) {
+            modelDownloads.downloader(for: entry)?.observeAvailability { [weak self] in
+                self?.minutes.modelAvailabilityChanged()
+            }
+        }
         Notifier.onAction = { [weak self] in self?.handleNoticeAction($0) }
         Notifier.setUp()
         onlineCoordinator.bind(transcription: transcription, minutes: minutes)
@@ -764,8 +858,12 @@ final class AppModel {
     /// 录音开始：建好本场的实时字幕（面板第一次看得见时才准备模型），按上次的状态决定是否打开面板
     private func startLiveCaptions() {
         guard let m = current else { return }
-        liveCaptions = LiveCaptions(engine: LiveCaptionEngine.make(), recordingStartedAt: m.startedAt,
-                                    hotwords: hotwords)
+        let choice = LiveCaptionEngine.make(selections: modelSelections)
+        liveCaptionModelID = choice.modelID
+        let finalizer = LiveCaptionFinalizerModel(selected: modelSelections.selected(for: .liveFinalize))
+        liveFinalizeModelID = finalizer?.id
+        liveCaptions = LiveCaptions(engine: choice.engine, recordingStartedAt: m.startedAt, hotwords: hotwords,
+                                    finalizer: finalizer)
         if opensLivePanelOnStart { livePanel.show() }
     }
 
@@ -774,6 +872,8 @@ final class AppModel {
         opensLivePanelOnStart = livePanel.isOpen
         livePanel.close()
         liveCaptions = nil
+        liveCaptionModelID = nil
+        liveFinalizeModelID = nil
     }
 
     // MARK: - 会中标注
@@ -1058,11 +1158,6 @@ final class AppModel {
     /// 正在加载模型或生成纪要时不能删除模型：引擎还在用这个文件。
     /// 被取消的生成退出前也算在用（加载模型时可能一时不理会取消）
     var canDeleteModel: Bool { !minutes.isEngineInUse }
-
-    func deleteModel() async throws {
-        guard canDeleteModel else { return }
-        try await modelDownloader.delete()
-    }
 
     private func update(_ m: Meeting) {
         if let i = meetings.firstIndex(where: { $0.id == m.id }) {

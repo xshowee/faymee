@@ -45,38 +45,52 @@ public enum ModelDownloadPhase: Hashable, Sendable {
     case failed(String)
 }
 
-/// 本机纪要模型的下载器：按 `LocalModel.downloadURLs` 的顺序下载，写到同目录的 `.partial` 文件，
-/// SHA-256 校验通过后才改名到 `LocalModel.url(in:)`（`isDownloaded` 只看大小，所以必须先校验）。
+/// 本机模型的下载器：一个主模型加它依赖的辅助模型（如 Paraformer 的标点模型），所有文件逐个下载。
+/// 每个文件按 `ModelFile.downloadURLs` 的顺序试，写到同目录的 `<文件>.partial`，SHA-256 校验通过后才改名到位
+/// （`LocalModel.isDownloaded` 只看大小，所以必须先校验）。整体进度按所有文件的总字节数计。
 /// 只在用户点了“下载”时开始，不会自己开始，启动时也不自动续传
 @MainActor @Observable
 public final class ModelDownloader {
     public let model: LocalModel
-    /// 模型目录。没有默认值：只有 App 传约定目录，测试一律用临时目录
+    /// 随主模型一起下载的辅助模型；全部下好才算就绪
+    public let dependencies: [LocalModel]
+    /// 模型根目录（各模型在其下的 `directoryName` 子目录）。没有默认值：只有 App 传约定目录，测试一律用临时目录
     public let directory: URL
     public private(set) var phase: ModelDownloadPhase = .notDownloaded
-    /// 已下载到本地的字节数（含之前中断留下的）
+    /// 已下载到本地的字节数（所有文件合计，含之前中断留下的）
     public private(set) var receivedBytes: Int64 = 0
-    /// 模型变得可用（下载完成）或不再可用（删除）时调用。App 在这里调 `MinutesPipeline.modelAvailabilityChanged()`。
-    /// 按磁盘上的文件判断，变了就调用：取消时恰好下完、改名到位的也算
-    @ObservationIgnored public var onAvailabilityChange: (() -> Void)?
+    /// 模型变得可用（下载完成）或不再可用（删除）时要通知的（`observeAvailability`）
+    @ObservationIgnored private var availabilityObservers: [() -> Void] = []
+    /// 删除 / 取消时，这个辅助模型要不要留着（还有别的已下载模型依赖它）。由 `ModelDownloads` 设置
+    @ObservationIgnored public var keepsDependency: (LocalModel) -> Bool = { _ in false }
 
     @ObservationIgnored private let transport: any ModelTransport
     @ObservationIgnored private var task: Task<Void, Never>?
     /// 每次开始下载加一，旧任务迟到的进度和结果据此丢弃
     @ObservationIgnored private var generation = 0
 
-    public init(model: LocalModel, directory: URL, transport: any ModelTransport) {
+    public init(model: LocalModel, dependencies: [LocalModel] = [], directory: URL, transport: any ModelTransport) {
         self.model = model
+        self.dependencies = dependencies
         self.directory = directory
         self.transport = transport
         refreshFromDisk()
     }
 
+    /// 辅助模型在前：主模型下好时辅助模型一定也下好了
+    var allModels: [LocalModel] { dependencies + [model] }
+    /// 主模型和辅助模型的总字节数
+    public var totalBytes: Int64 { allModels.reduce(0) { $0 + $1.size } }
     public var isReady: Bool { phase == .ready }
     public var isRunning: Bool { phase == .downloading || phase == .verifying }
-    public var progress: Double { model.size > 0 ? Double(receivedBytes) / Double(model.size) : 0 }
+    public var progress: Double { totalBytes > 0 ? Double(receivedBytes) / Double(totalBytes) : 0 }
 
-    var partialURL: URL { directory.appendingPathComponent(model.fileName + ".partial") }
+    /// 模型变得可用（下载完成）或不再可用（删除）时调用 `handler`，App 在这里通知排队的管线。
+    /// 按磁盘上的文件判断，变了就调用：取消时恰好下完、改名到位的也算。
+    /// 可以有多个：同一份模型可能有几处在等（会后转写和声纹各自的管线、纪要管线），各自订阅，互不顶掉
+    public func observeAvailability(_ handler: @escaping () -> Void) {
+        availabilityObservers.append(handler)
+    }
 
     /// 开始或继续下载（也用于“重试”）。已就绪、正在下载时什么都不做
     public func start() {
@@ -85,7 +99,7 @@ public final class ModelDownloader {
         let token = generation
         let previous = task
         phase = .downloading
-        let job = DownloadJob(model: model, directory: directory, partial: partialURL, transport: transport,
+        let job = DownloadJob(models: allModels, directory: directory, transport: transport,
                               progress: { [weak self] event in
             Task { @MainActor in self?.report(event, token: token) }
         })
@@ -104,22 +118,24 @@ public final class ModelDownloader {
         phase = receivedBytes > 0 ? .paused : .notDownloaded
     }
 
-    /// 取消下载并删掉已下的部分
+    /// 取消下载，删掉这次已下的全部内容（含已下好的文件和辅助模型），回到未下载。
+    /// 取消时恰好全部下完的不动，照样算就绪；别的模型还在用的辅助模型也不动
     public func cancel() async {
         await stop()
-        try? FileManager.default.removeItem(at: partialURL)
+        if !allModels.allSatisfy({ $0.isDownloaded(in: directory) }) {
+            for m in allModels where !isKept(m) {
+                try? remove(m)
+            }
+        }
         refreshFromDisk()
     }
 
-    /// 删除模型（和没下完的部分）。之后状态回到未下载，排队的纪要等待重新下载
+    /// 删除模型（和没下完的部分），以及没有别的模型依赖的辅助模型。之后状态回到未下载，排队的任务等待重新下载
     public func delete() async throws {
         await stop()
-        let fm = FileManager.default
-        try? fm.removeItem(at: partialURL)
-        let url = model.url(in: directory)
         var failure: Error?
-        if fm.fileExists(atPath: url.path) {
-            do { try fm.removeItem(at: url) } catch { failure = error }
+        for m in allModels where !isKept(m) {
+            do { try remove(m) } catch { failure = failure ?? error }
         }
         refreshFromDisk()
         if let failure { throw failure }
@@ -128,6 +144,30 @@ public final class ModelDownloader {
     /// 等这次下载结束（完成、失败、暂停），测试用
     public func waitUntilFinished() async {
         await task?.value
+    }
+
+    private func isKept(_ m: LocalModel) -> Bool { m != model && keepsDependency(m) }
+
+    /// 删掉一个模型的文件和部分文件。有自己的目录时整个目录删掉；放在根目录下的只删自己的文件
+    @discardableResult
+    private func remove(_ m: LocalModel) throws -> Bool {
+        let fm = FileManager.default
+        if !m.directoryName.isEmpty {
+            let dir = m.directory(in: directory)
+            guard fm.fileExists(atPath: dir.path) else { return false }
+            try fm.removeItem(at: dir)
+            return true
+        }
+        var failure: Error?
+        for file in m.files {
+            let url = m.url(of: file, in: directory)
+            try? fm.removeItem(at: partialURL(url))
+            if fm.fileExists(atPath: url.path) {
+                do { try fm.removeItem(at: url) } catch { failure = error }
+            }
+        }
+        if let failure { throw failure }
+        return true
     }
 
     /// 停下正在进行的下载，等它真的不再写文件
@@ -141,14 +181,16 @@ public final class ModelDownloader {
     /// 按磁盘上的文件得出状态；模型是否可用变了就通知
     private func refreshFromDisk() {
         let wasReady = isReady
-        if model.isDownloaded(in: directory) {
-            receivedBytes = model.size
+        if allModels.allSatisfy({ $0.isDownloaded(in: directory) }) {
+            receivedBytes = totalBytes
             phase = .ready
         } else {
-            receivedBytes = min(fileSize(partialURL), model.size)
-            phase = receivedBytes > 0 ? .paused : .notDownloaded
+            receivedBytes = bytesOnDisk(allModels, in: directory)
+            // 只有还没下全的模型下了一部分才算“已暂停”：别的模型已经下好的辅助模型不算
+            let unfinished = allModels.filter { !$0.isDownloaded(in: directory) }
+            phase = bytesOnDisk(unfinished, in: directory) > 0 ? .paused : .notDownloaded
         }
-        if isReady != wasReady { onAvailabilityChange?() }
+        if isReady != wasReady { availabilityObservers.forEach { $0() } }
     }
 
     private func report(_ event: DownloadJob.Event, token: Int) {
@@ -156,6 +198,7 @@ public final class ModelDownloader {
         switch event {
         case let .received(bytes): receivedBytes = bytes
         case .verifying: phase = .verifying
+        case .downloading: phase = .downloading
         }
     }
 
@@ -169,13 +212,30 @@ public final class ModelDownloader {
             // 暂停
             refreshFromDisk()
         case let .failure(error):
-            receivedBytes = min(fileSize(partialURL), model.size)
+            receivedBytes = bytesOnDisk(allModels, in: directory)
             phase = .failed(error.localizedDescription)
         }
     }
 }
 
-/// 模型状态的文字：设置里的一行（`text`），和详情页纪要“等待下载模型”时的说明（`minutesText`）
+/// 文件的部分下载：同目录的 `<文件名>.partial`
+func partialURL(_ file: URL) -> URL {
+    file.deletingLastPathComponent().appendingPathComponent(file.lastPathComponent + ".partial")
+}
+
+/// 磁盘上已有的字节数：下好的文件算全部，没下完的算部分文件的大小
+private func bytesOnDisk(_ models: [LocalModel], in root: URL) -> Int64 {
+    models.reduce(0) { total, m in
+        m.files.reduce(total) { sum, file in
+            let url = m.url(of: file, in: root)
+            if fileHasSize(url, file.size) { return sum + file.size }
+            return sum + min(fileSize(partialURL(url)), file.size)
+        }
+    }
+}
+
+/// 模型状态的文字：设置里的一行（`text`），详情页纪要“等待下载模型”时的说明（`minutesText`），
+/// 和别的任务等模型时的说明（`waitText(for:)`）
 public struct ModelDownloadStatus: Hashable, Sendable {
     public var phase: ModelDownloadPhase
     public var receivedBytes: Int64
@@ -191,18 +251,18 @@ public struct ModelDownloadStatus: Hashable, Sendable {
 
     public var text: String {
         switch phase {
-        case .notDownloaded: "未下载（约 \(formatGigabytes(totalBytes))）"
+        case .notDownloaded: "未下载（约 \(formatModelSize(totalBytes))）"
         case .downloading: "下载中 \(percent)（\(amount)）"
         case .paused: "已暂停，已下载 \(percent)（\(amount)）"
         case .verifying: "正在校验模型…"
-        case .ready: "已就绪，占用 \(formatGigabytes(totalBytes))"
+        case .ready: "已就绪，占用 \(formatModelSize(totalBytes))"
         case let .failed(reason): "下载失败：\(reason)"
         }
     }
 
     public var minutesText: String {
         switch phase {
-        case .notDownloaded: "生成纪要需要下载约 \(formatGigabytes(totalBytes)) 的模型"
+        case .notDownloaded: "生成纪要需要下载约 \(formatModelSize(totalBytes)) 的模型"
         case .downloading: "正在下载模型 \(percent)"
         case .paused: "模型下载已暂停（\(percent)）"
         case .verifying: "正在校验模型…"
@@ -211,13 +271,31 @@ public struct ModelDownloadStatus: Hashable, Sendable {
         }
     }
 
+    /// 某个用途的任务（会后转写、区分说话人）在等这个模型时详情页的说明，如“等待下载转写模型（约 1.0 GB）”
+    public func waitText(for role: ModelRole) -> String {
+        let purpose = role.waitingName
+        return switch phase {
+        case .notDownloaded: "等待下载\(purpose)模型（约 \(formatModelSize(totalBytes))）"
+        case .downloading: "正在下载\(purpose)模型 \(percent)"
+        case .paused: "\(purpose)模型下载已暂停（\(percent)）"
+        case .verifying: "正在校验模型…"
+        case .ready: "模型已就绪"
+        case let .failed(reason): "\(purpose)模型下载失败：\(reason)"
+        }
+    }
+
     private var percent: String { "\(Int((progress * 100).rounded(.down)))%" }
-    private var amount: String { "\(formatGigabytes(receivedBytes)) / \(formatGigabytes(totalBytes))" }
+    /// 已下 / 总共，两边用同一个单位（按总大小选：不到 1 GB 用 MB）
+    private var amount: String {
+        let gb = formatModelSize(totalBytes).hasSuffix("GB")
+        func f(_ b: Int64) -> String { gb ? formatGigabytes(b) : String(format: "%.0f MB", Double(b) / 1e6) }
+        return "\(f(receivedBytes)) / \(f(totalBytes))"
+    }
 }
 
 extension ModelDownloader {
     public var status: ModelDownloadStatus {
-        ModelDownloadStatus(phase: phase, receivedBytes: receivedBytes, totalBytes: model.size)
+        ModelDownloadStatus(phase: phase, receivedBytes: receivedBytes, totalBytes: totalBytes)
     }
 }
 
@@ -232,48 +310,76 @@ extension Result where Failure == Error {
     }
 }
 
-/// 一次下载：在后台执行，不碰下载器的状态
+/// 一次下载：在后台执行，不碰下载器的状态。所有文件逐个下载、逐个校验
 private struct DownloadJob: Sendable {
-    let model: LocalModel
+    let models: [LocalModel]
     let directory: URL
-    let partial: URL
     let transport: any ModelTransport
     let progress: @Sendable (Event) -> Void
 
     enum Event: Sendable {
-        /// 部分文件现在多大
+        /// 所有文件合计现在下了多少
         case received(Int64)
+        case downloading
         case verifying
     }
 
     func run() async throws {
-        // 上一次暂停时恰好下完、改了名
-        if model.isDownloaded(in: directory) { return }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try await fetchFromSources()
+        for m in models {
+            for file in m.files {
+                try Task.checkCancellation()
+                let url = m.url(of: file, in: directory)
+                // 上一次暂停时恰好下完、改了名；或者别的模型已经下好了这个辅助模型
+                if fileHasSize(url, file.size) { continue }
+                // 两个主模型依赖同一个辅助模型、同时下载时，不能同时写同一个部分文件
+                try await ModelFileLocks.shared.withLock(url.path) {
+                    if fileHasSize(url, file.size) { return }
+                    try await download(file, to: url)
+                }
+            }
+        }
+    }
+
+    private func download(_ file: ModelFile, to url: URL) async throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let partial = partialURL(url)
+        // 别的文件已经下了多少，这个文件的进度加上它就是整体进度
+        let base = bytesOnDisk(models, in: directory) - min(fileSize(partial), file.size)
+        progress(.downloading)
+        try await FileFetch(file: file, partial: partial, transport: transport, base: base, progress: progress)
+            .fetchFromSources()
         try Task.checkCancellation()
         progress(.verifying)
-        guard try sha256(of: partial) == model.sha256 else {
+        guard try sha256(of: partial) == file.sha256 else {
             // 不知道坏在哪一段，只能整个重下
             try? FileManager.default.removeItem(at: partial)
             throw ModelDownloadError.checksumMismatch
         }
         try Task.checkCancellation()
-        let url = model.url(in: directory)
-        // 大小不对的旧文件（不算已下载）。大小对的文件 run 一开始就返回了，不会走到这里
+        // 大小不对的旧文件（不算已下载）。大小对的文件一开始就跳过了，不会走到这里
         if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
         try FileManager.default.moveItem(at: partial, to: url)
     }
+}
+
+/// 下载一个文件到它的部分文件
+private struct FileFetch: Sendable {
+    let file: ModelFile
+    let partial: URL
+    let transport: any ModelTransport
+    /// 其他文件已下的字节数，报进度时加上
+    let base: Int64
+    let progress: @Sendable (DownloadJob.Event) -> Void
 
     /// 按顺序试每个来源，直到部分文件完整。一个来源下到一半断了（这次有进展）就从断点重连它，
     /// 连上也没进展才换下一个，所以不会无限重试。换来源也接着断点下：各来源是同一个文件，最后靠哈希兜底
-    private func fetchFromSources() async throws {
+    func fetchFromSources() async throws {
         var lastError: Error = ModelDownloadError.noSource
         var index = 0
-        while index < model.downloadURLs.count {
+        while index < file.downloadURLs.count {
             let before = fileSize(partial)
             do {
-                try await fetch(model.downloadURLs[index])
+                try await fetch(file.downloadURLs[index])
                 return
             } catch {
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
@@ -289,24 +395,27 @@ private struct DownloadJob: Sendable {
     private func fetch(_ url: URL) async throws {
         var offset = fileSize(partial)
         // 比完整文件还长：不知道哪里错了，从头来
-        if offset > model.size {
+        if offset > file.size {
             try? FileManager.default.removeItem(at: partial)
             offset = 0
         }
-        if offset == model.size { return }
+        if offset == file.size, FileManager.default.fileExists(atPath: partial.path) { return }
         let response = try await transport.get(url, from: offset)
         defer { response.cancel() }
         let writeOffset: Int64
+        let range = response.contentRange.flatMap(ContentRange.init)
         switch response.status {
         case 206:
-            guard let range = response.contentRange.flatMap(ContentRange.init), range.start == offset else {
-                throw ModelDownloadError.badResponse
-            }
-            if let total = range.total, total != model.size { throw ModelDownloadError.sizeMismatch }
+            guard let range, range.start == offset else { throw ModelDownloadError.badResponse }
+            if let total = range.total, total != file.size { throw ModelDownloadError.sizeMismatch }
+            writeOffset = offset
+        case 200 where offset > 0 && range?.start == offset:
+            // ModelScope 对不走 LFS 的小文件回 200，但内容按 Range 给了、带着 Content-Range：按部分内容续传
+            if let total = range?.total, total != file.size { throw ModelDownloadError.sizeMismatch }
             writeOffset = offset
         case 200:
             // 服务器不认 Range，从头给了整个文件
-            if let length = response.contentLength, length != model.size { throw ModelDownloadError.sizeMismatch }
+            if let length = response.contentLength, length != file.size { throw ModelDownloadError.sizeMismatch }
             writeOffset = 0
         default:
             throw ModelDownloadError.httpStatus(response.status)
@@ -319,29 +428,54 @@ private struct DownloadJob: Sendable {
         try handle.truncate(atOffset: UInt64(writeOffset))
         try handle.seekToEnd()
         var written = writeOffset
-        progress(.received(written))
+        progress(.received(base + written))
         // 进度最多每 0.1 秒报一次：每块只有几十 KB，2.5GB 要报上万次
         let clock = ContinuousClock()
         var lastReport = clock.now - .seconds(1)
         for try await chunk in response.body {
             try Task.checkCancellation()
             written += Int64(chunk.count)
-            if written > model.size { throw ModelDownloadError.sizeMismatch }
+            if written > file.size { throw ModelDownloadError.sizeMismatch }
             try handle.write(contentsOf: chunk)
             if clock.now - lastReport >= .milliseconds(100) {
                 lastReport = clock.now
-                progress(.received(written))
+                progress(.received(base + written))
             }
         }
-        progress(.received(written))
+        progress(.received(base + written))
         try handle.close()
-        if written < model.size { throw ModelDownloadError.incomplete }
+        if written < file.size { throw ModelDownloadError.incomplete }
     }
 }
 
-private func fileSize(_ url: URL) -> Int64 {
-    let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-    return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+/// 进程内按文件路径互斥：同一时刻只有一个下载在写某个文件
+actor ModelFileLocks {
+    static let shared = ModelFileLocks()
+    private var held: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func withLock<T: Sendable>(_ path: String, _ body: @Sendable () async throws -> T) async throws -> T {
+        await acquire(path)
+        defer { release(path) }
+        try Task.checkCancellation()
+        return try await body()
+    }
+
+    private func acquire(_ path: String) async {
+        if held.insert(path).inserted { return }
+        await withCheckedContinuation { waiters[path, default: []].append($0) }
+    }
+
+    private func release(_ path: String) {
+        if var queue = waiters[path], !queue.isEmpty {
+            // 直接交给下一个等待者，锁不释放
+            let next = queue.removeFirst()
+            waiters[path] = queue.isEmpty ? nil : queue
+            next.resume()
+        } else {
+            held.remove(path)
+        }
+    }
 }
 
 /// `Content-Range: bytes 100-199/2000`；总长未知时为 `*`
@@ -394,4 +528,17 @@ func sha256(of url: URL) throws -> String {
         hasher.update(data: chunk)
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
+private extension ModelRole {
+    /// “等待下载×模型”里的用途名：会后转写说“转写”，声纹说“声纹”
+    var waitingName: String {
+        switch self {
+        case .transcription: "转写"
+        case .liveCaptions: "实时字幕"
+        case .liveFinalize: "实时字幕定稿"
+        case .minutes: "纪要"
+        case .voiceprint: "声纹"
+        }
+    }
 }

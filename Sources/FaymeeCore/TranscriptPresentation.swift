@@ -37,6 +37,7 @@ public enum TranscriptionStatus: Hashable, Sendable {
         case .notTranscribed, .diarizing, .done: nil
         case .queued(nil): "排队中"
         case .queued(.onlineConfig): "等待配置在线转写"
+        case .queued(.modelDownload): "等待下载转写模型"
         case let .preparing(p): "正在准备转写引擎（\(formatPercent(p))）"
         case let .transcribing(p?): "转写中 \(formatPercent(p))"
         case .transcribing(nil): "转写中…"
@@ -68,8 +69,11 @@ public enum TranscriptionStatus: Hashable, Sendable {
 }
 
 extension Transcript {
-    /// 在线转写来源标识；本机转写引擎（`apple/`）或为空时返回 nil，界面不显示
+    /// 在线转写来源标识；本机转写引擎（`apple/`、本机模型目录里的 `sherpa-onnx/`）或为空时返回 nil，界面不显示。
+    /// 按前缀而不按目录判断：目录以后删掉的模型，旧转写稿照样认作本机
     public var onlineEngineLabel: String? {
-        engine.isEmpty || engine.hasPrefix("apple/") ? nil : engine
+        engine.isEmpty || Self.localEnginePrefixes.contains { engine.hasPrefix($0) } ? nil : engine
     }
+
+    static let localEnginePrefixes = ["apple/", "sherpa-onnx/"]
 }

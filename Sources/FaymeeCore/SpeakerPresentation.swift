@@ -73,8 +73,8 @@ public enum SpeakerStatus: Hashable, Sendable {
     case hidden
     /// 有转写稿、没有说话人（v0.3 旧会议、开关关着转写的），可以补区分
     case notDiarized
-    /// 排队只区分说话人
-    case queued
+    /// 排队只区分说话人，附上在等什么（等下载声纹模型）；只是排在别的任务后面时为 nil
+    case queued(TranscriptionWaitReason?)
     /// 区分中；刚开始、还没有进度时为 nil
     case diarizing(Double?)
     /// 区分失败。没有区分引擎时不能重试
@@ -88,9 +88,11 @@ public enum SpeakerStatus: Hashable, Sendable {
     ///   - activity: `TranscriptionPipeline.activity(for:)`，区分中以它的进度为准
     ///   - transcript: 当前转写稿，没有或读不出来时为 nil（没什么可区分的，不显示）。
     ///     有没有说话人看 `diarization`：管线保存转写稿时同步更新它，完成即新稿有说话人
-    ///   - canDiarize: 有没有区分引擎
+    ///   - canDiarize: 能不能区分（有区分引擎，或在等声纹模型下载）
+    ///   - waitReason: `TranscriptionPipeline.diarizationWaitReason(for:)`
     public init(transcription: TranscriptionState?, diarization: DiarizationState?,
-                activity: TranscriptionActivity?, transcript: Transcript?, canDiarize: Bool) {
+                activity: TranscriptionActivity?, transcript: Transcript?, canDiarize: Bool,
+                waitReason: TranscriptionWaitReason? = nil) {
         if case let .diarizing(p)? = activity { self = .diarizing(p); return }
         if activity != nil { self = .hidden; return }
         switch transcription?.status {
@@ -98,7 +100,7 @@ public enum SpeakerStatus: Hashable, Sendable {
         case nil, .done, .failed: break
         }
         switch diarization?.status {
-        case .queued: self = .queued; return
+        case .queued: self = .queued(waitReason); return
         case .running: self = .diarizing(nil); return
         case nil, .done, .failed: break
         }
@@ -112,6 +114,7 @@ public enum SpeakerStatus: Hashable, Sendable {
 
     public var text: String? {
         switch self {
+        case .queued(.modelDownload): "等待下载声纹模型"
         case .queued: "等待区分说话人"
         case let .diarizing(p?): "区分说话人中 \(formatPercent(p))"
         case .diarizing(nil): "区分说话人中…"

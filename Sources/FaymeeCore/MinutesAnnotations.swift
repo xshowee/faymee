@@ -40,7 +40,8 @@ func expand(_ span: AnnotationSpan, title: String, sentences: [String: Transcrip
         : nil
     let system = expansionSystemPrompt(span.kind, speakers: labels)
     let budget = Budget(generator, system: system,
-                        outputTokens: min(generator.maxOutputTokens, generator.contextTokens * 2 / 5))
+                        outputTokens: min(generator.maxOutputTokens,
+                                         generator.minutesChunking.extractionOutput.of(generator.contextTokens)))
     func prompt(_ given: ArraySlice<TranscriptSentence>) -> String {
         expansionPrompt(title: title, kind: span.kind, note: span.noteText,
                         lines: given.map { labels.line(.sentence($0)) })

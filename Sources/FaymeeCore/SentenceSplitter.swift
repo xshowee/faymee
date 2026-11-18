@@ -19,7 +19,7 @@ enum SentenceSplitter {
     /// 由“长字”推断的停顿，只在已有这么多字后才断，避免切出「第二件事」这类碎片
     static let minCharacters = 6
 
-    private static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
+    static let terminators: Set<Character> = ["。", "！", "？", "；", "!", "?", ";", "…"]
 
     /// 开引号、开括号这类属于后面的话的标点（Unicode 的 Ps、Pi 类：“ ‘ （ 《 「 【 ( [ 等）
     private static func isOpening(_ c: Character) -> Bool {
@@ -28,14 +28,18 @@ enum SentenceSplitter {
         }
     }
 
-    static func split(_ tokens: [TimedToken]) -> [TranscribedSentence] {
-        let (closed, open) = splitKeepingOpen(tokens)
+    /// - Parameter inferPauses: 是否由“长字”推断停顿（见类型说明）。只有停顿并进**后一个**字的时间（SpeechAnalyzer）
+    ///   才成立；逐字时间只有开始、结束取下一个字开始的引擎（sherpa Paraformer）停顿并进前一个字，要关掉，
+    ///   否则会把停顿前的最后一个字切进下一句。关掉后只在句末标点和时间不连续处断句
+    static func split(_ tokens: [TimedToken], inferPauses: Bool = true) -> [TranscribedSentence] {
+        let (closed, open) = splitKeepingOpen(tokens, inferPauses: inferPauses)
         return closed + (sentence(open).map { [$0] } ?? [])
     }
 
     /// 同 `split`，但最后一句没遇到句末标点或停顿时不算断完，原样留下它的字（open），
     /// 实时字幕把它和下一段定稿结果的字拼起来再断。对整段 tokens 断句与分几次断的结果相同
-    static func splitKeepingOpen(_ tokens: [TimedToken]) -> (closed: [TranscribedSentence], open: [TimedToken]) {
+    static func splitKeepingOpen(_ tokens: [TimedToken],
+                                 inferPauses: Bool = true) -> (closed: [TranscribedSentence], open: [TimedToken]) {
         var sentences: [TranscribedSentence] = []
         var current: [TimedToken] = []
 
@@ -64,7 +68,7 @@ enum SentenceSplitter {
             // 收尾类的标点（句号、逗号、问号、闭引号、闭括号等）属于前面的话；开引号、开括号属于后面的话，
             // 停顿的处理同普通的字
             let closesBefore = trimmed.allSatisfy(\.isPunctuation) && !trimmed.contains(where: isOpening)
-            let isLong = token.end - token.start >= pause
+            let isLong = inferPauses && token.end - token.start >= pause
 
             // 两段之间真正的静音（时间不连续）总是断开。静音后紧跟的收尾标点属于前面的话，接上再断：
             // 流式识别时上一段定稿结果没带句号、句号出现在下一段开头，就是这样。

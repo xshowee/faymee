@@ -1,3 +1,4 @@
+import FaymeeCore
 import SwiftUI
 
 /// 混合形态：平时只在菜单栏（LSUIElement），打开“会议记录”窗口时临时变成普通程序，
@@ -127,5 +128,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
         model.saveHotwords()
+        model.cancelBackgroundWorkForQuit()
+        // 停录音时实时字幕（含定稿）已取消，会后转写、区分说话人、重算声纹库刚取消，但识别器可能还在加载或解完手上这段、
+        // 定稿模型可能还在加载或重转手上这句：这时退出进程，onnxruntime 会崩在已析构的全局表上。等它们放掉：通常不到 1 秒，
+        // 正赶上加载 Fun-ASR-Nano 时约 2–3 秒（加载打断不了）。合计最多等 5 秒
+        let deadline = Date().addingTimeInterval(5)
+        SherpaStreamingTranscriber.waitUntilReleased(timeout: 5)
+        SherpaBackgroundWork.waitUntilReleased(timeout: max(0, deadline.timeIntervalSinceNow))
     }
 }

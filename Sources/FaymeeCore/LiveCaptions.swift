@@ -34,15 +34,18 @@ public final class LiveCaptions {
     @ObservationIgnored private let engine: any StreamingTranscriber
     @ObservationIgnored private let recordingStartedAt: Date
     @ObservationIgnored private let hotwords: [String]
+    @ObservationIgnored private let finalizer: LiveCaptionFinalizerModel?
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var stopped = false
 
-    /// recordingStartedAt 是录音开始的墙钟时间（字幕时间的零点）。now 只给测试替换
+    /// recordingStartedAt 是录音开始的墙钟时间（字幕时间的零点）。finalizer 是定稿模型（不定稿时为 nil），
+    /// 和流式引擎一起在面板第一次需要字幕时开始加载、录音结束时释放。now 只给测试替换
     public init(engine: any StreamingTranscriber, recordingStartedAt: Date, hotwords: [String],
-                now: @escaping () -> Date = Date.init) {
+                finalizer: LiveCaptionFinalizerModel? = nil, now: @escaping () -> Date = Date.init) {
         self.engine = engine
         self.recordingStartedAt = recordingStartedAt
         self.hotwords = hotwords
+        self.finalizer = finalizer
         self.now = now
     }
 
@@ -76,7 +79,7 @@ public final class LiveCaptions {
                 session.resume()
             } else {
                 session = LiveCaptionSession(engine: engine, recordingStartedAt: recordingStartedAt,
-                                             hotwords: hotwords, now: now)
+                                             hotwords: hotwords, finalizer: finalizer, now: now)
             }
         } else {
             mixer.isEnabled = false

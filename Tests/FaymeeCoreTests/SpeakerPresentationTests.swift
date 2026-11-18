@@ -120,9 +120,10 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
 
     private func status(transcription: TranscriptionState? = TranscriptionState(status: .done),
                         diarization: DiarizationState? = nil, activity: TranscriptionActivity? = nil,
-                        transcript: Transcript?, canDiarize: Bool = true) -> SpeakerStatus {
+                        transcript: Transcript?, canDiarize: Bool = true,
+                        waitReason: TranscriptionWaitReason? = nil) -> SpeakerStatus {
         SpeakerStatus(transcription: transcription, diarization: diarization, activity: activity,
-                      transcript: transcript, canDiarize: canDiarize)
+                      transcript: transcript, canDiarize: canDiarize, waitReason: waitReason)
     }
 
     /// v0.3 的旧会议：有转写稿、没有说话人，给“区分说话人”
@@ -160,8 +161,17 @@ private func transcript(_ entries: [String?], speakers: [Speaker]?) -> Transcrip
 
     @Test func 排队只区分说话人() {
         let s = status(diarization: .init(status: .queued), transcript: plain)
-        #expect(s == .queued)
+        #expect(s == .queued(nil))
         #expect(s.text == "等待区分说话人")
+        #expect(s.isBusy)
+    }
+
+    /// 所选声纹模型还没下载完：说明在等它（界面换成带“下载”按钮的那一行）
+    @Test func 排队等下载声纹模型() {
+        let s = status(diarization: .init(status: .queued), transcript: plain,
+                       waitReason: .modelDownload(id: "sherpa-onnx/voiceprint"))
+        #expect(s == .queued(.modelDownload(id: "sherpa-onnx/voiceprint")))
+        #expect(s.text == "等待下载声纹模型")
         #expect(s.isBusy)
     }
 

@@ -3,27 +3,20 @@ import CryptoKit
 import Foundation
 import SherpaOnnxC
 
-/// 区分说话人引擎：逐句声纹聚类。用 sherpa-onnx 2.0.1 的声纹提取（3D-Speaker ERes2Net base 中文模型，
-/// 512 维）给转写稿每句算一个声纹，再用 `SentenceClustering` 把句子归成人。纯 CPU，模型从 `modelDirectory` 读。
+/// 区分说话人引擎：逐句声纹聚类。用 sherpa-onnx 2.0.1 的声纹提取给转写稿每句算一个声纹，再用
+/// `SentenceClustering` 把句子归成人。纯 CPU。声纹模型是目录里「声纹」用途选中的那个（默认 3D-Speaker
+/// ERes2Net base 中文模型，512 维，打进 App），见 `engine(for:bundleResources:modelsRoot:)`。
 /// 不用 sherpa-onnx 的 pyannote 分段 + 整段聚类：真实远场会议上它既拆碎又混人（ticket 12、13）
 ///
 /// - 坏模型会让 sherpa-onnx `_Exit` 整个进程：`prepare` 先校验模型文件的 sha256，对不上就抛错，不交给 sherpa-onnx
 /// - 解码和逐句算声纹都是自己的循环，取消后最多再算完一句就抛 `CancellationError`
 /// - 每句一个说话片段（就是这句的起止时间）；太短算不出声纹的句子没有片段，归属为未知
 /// - 内存主要是整段录音解码后的样本（1 小时约 230MB）和聚类的相似度矩阵（1000 个长句约 8MB）
-public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
-    public struct ModelFile: Sendable, Equatable {
-        public let name: String
-        /// 字节数
-        public let size: Int64
-        /// 小写 hex
-        public let sha256: String
-    }
-
-    /// 文件名、大小、sha256 与 scripts/fetch-diarization-models.sh 保持一致
+public final class SherpaOnnxDiarizer: SpeakerDiarizer, VoiceprintExtractor, @unchecked Sendable {
+    /// 打进 App 的声纹模型（没有下载地址）。文件名、大小、sha256 与 scripts/fetch-diarization-models.sh 保持一致
     public static let embeddingModel = ModelFile(
-        name: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", size: 39_593_761,
-        sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b")
+        path: "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", size: 39_593_761,
+        sha256: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b", downloadURLs: [])
     public static let models = [embeddingModel]
 
     /// 声纹库匹配的推荐阈值（余弦相似度），App 传给 `TranscriptionPipeline.voiceprintThreshold`。
@@ -35,33 +28,52 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
     public static func modelsPresent(in directory: URL) -> Bool {
         models.allSatisfy { m in
             let attributes = try? FileManager.default.attributesOfItem(
-                atPath: directory.appendingPathComponent(m.name).path)
+                atPath: directory.appendingPathComponent(m.path).path)
             return (attributes?[.size] as? NSNumber)?.int64Value == m.size
         }
     }
 
     public let engine = "sherpa-onnx-2.0.1/sentence-clustering"
-    public let voiceprintModel = "3dspeaker-eres2net-base-zh-cn-3dspeaker-16k"
+    /// 声纹模型标识 = 目录项 id（ERes2Net base 是 `ModelCatalog.eres2netBaseID`）
+    public let voiceprintModel: String
 
-    private let directory: URL
+    /// 声纹模型文件
+    private let modelURL: URL
+    private let modelFile: ModelFile
+    /// 模型是下载来的（坏了要重新下载），不是打进 App 的（坏了要重装）
+    private let isDownloaded: Bool
     private let threads: Int32
+    /// 按句聚类自动判断人数的阈值（和声纹模型相关）
+    let clusteringThreshold: Double
     private let lock = NSLock()
     private var verified = false
     /// 串行：同一时刻只跑一次区分（每次要占 CPU 和与录音时长成正比的内存）
     private let queue = DispatchQueue(label: "com.faymee.sherpa-diarizer", qos: .utility)
 
-    public init(modelDirectory: URL, threads: Int = 4) {
-        directory = modelDirectory
+    /// 打进 App 的 ERes2Net base，模型文件在 `modelDirectory` 下
+    public convenience init(modelDirectory: URL, threads: Int = 4) {
+        self.init(modelURL: modelDirectory.appendingPathComponent(Self.embeddingModel.path), file: Self.embeddingModel,
+                  voiceprintModel: ModelCatalog.eres2netBaseID, isDownloaded: false, threads: threads)
+    }
+
+    /// 任意单文件的声纹模型（sherpa-onnx 声纹提取器认得的格式：3D-Speaker / WeSpeaker / NeMo）
+    init(modelURL: URL, file: ModelFile, voiceprintModel: String, isDownloaded: Bool,
+         clusteringThreshold: Double = SentenceClustering.defaultThreshold, threads: Int = 4) {
+        self.modelURL = modelURL
+        self.clusteringThreshold = clusteringThreshold
+        modelFile = file
+        self.voiceprintModel = voiceprintModel
+        self.isDownloaded = isDownloaded
         self.threads = Int32(threads)
     }
 
     /// 校验模型文件（存在、大小、sha256），通过一次后不再算
     public func prepare(progress: @escaping (Double) -> Void) async throws {
         if lock.withLock({ verified }) { return progress(1) }
-        let directory = directory
+        let (url, file, isDownloaded) = (modelURL, modelFile, isDownloaded)
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .utility).async {
-                c.resume(with: Result { try Self.models.forEach { try Self.verify($0, in: directory) } })
+                c.resume(with: Result { try Self.verify(file, at: url, isDownloaded: isDownloaded) })
             }
         }
         lock.withLock { verified = true }
@@ -74,7 +86,10 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         let flag = CancelFlag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { c in
+                // 用 onnxruntime 期间算在 SherpaBackgroundWork 里：App 退出前取消、等它放掉模型
+                SherpaBackgroundWork.inFlight.enter()
                 queue.async {
+                    defer { SherpaBackgroundWork.inFlight.leave() }
                     c.resume(with: Result {
                         try self.run(audio: audio, sentences: sentences, speakerCount: speakerCount, flag: flag,
                                      progress: Progress(progress))
@@ -84,6 +99,70 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         } onCancel: {
             flag.cancel()
         }
+    }
+
+    /// 重算声纹库：整段解码一次，每组句子各算一个声纹（各句按时长加权平均，同区分时每人的声纹）
+    public func voiceprints(audio: URL, groups: [[ClosedRange<TimeInterval>]]) async throws -> [Voiceprint?] {
+        try await prepare { _ in }
+        let flag = CancelFlag()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { c in
+                SherpaBackgroundWork.inFlight.enter()
+                queue.async {
+                    defer { SherpaBackgroundWork.inFlight.leave() }
+                    c.resume(with: Result { try self.extract(audio: audio, groups: groups, flag: flag) })
+                }
+            }
+        } onCancel: {
+            flag.cancel()
+        }
+    }
+
+    private func extract(audio: URL, groups: [[ClosedRange<TimeInterval>]], flag: CancelFlag) throws -> [Voiceprint?] {
+        try flag.check()
+        guard groups.contains(where: { !$0.isEmpty }) else { return groups.map { _ in nil } }
+        let samples = try Self.decode(audio, flag: flag)
+        return try withExtractor { extractor, dim in
+            try groups.map { spans in
+                let embedded = try embed(spans, samples: samples, extractor: extractor, dim: dim, flag: flag)
+                guard !embedded.isEmpty else { return nil }
+                return Self.result(embedded, labels: embedded.map { _ in 0 }, dim: dim).voiceprints[0]
+            }
+        }
+    }
+
+    /// 建一个声纹提取器，用完销毁
+    private func withExtractor<T>(_ body: (OpaquePointer, Int) throws -> T) throws -> T {
+        let model = strdup(modelURL.path)
+        let cpu = strdup("cpu")
+        defer { free(model); free(cpu) }
+        var config = SherpaOnnxSpeakerEmbeddingExtractorConfig()
+        config.model = UnsafePointer(model)
+        config.num_threads = threads
+        config.provider = UnsafePointer(cpu)
+        guard let extractor = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config) else {
+            throw SherpaOnnxDiarizerError.engineUnavailable
+        }
+        defer { SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor) }
+        return try body(extractor, Int(SherpaOnnxSpeakerEmbeddingExtractorDim(extractor)))
+    }
+
+    /// 逐句算声纹；太短、算不出的句子跳过。每句之前检查取消，`each` 报告算完第几句
+    private func embed(_ sentences: [ClosedRange<TimeInterval>], samples: [Float], extractor: OpaquePointer, dim: Int,
+                       flag: CancelFlag, each: (Int) -> Void = { _ in })
+        throws -> [(range: ClosedRange<TimeInterval>, vector: [Float])] {
+        var embedded: [(range: ClosedRange<TimeInterval>, vector: [Float])] = []
+        for (i, r) in sentences.enumerated() {
+            try flag.check()
+            let lo = max(0, Int(r.lowerBound * Double(Self.sampleRate)))
+            let hi = min(samples.count, Int(r.upperBound * Double(Self.sampleRate)))
+            if hi - lo > Self.minimumSamples, let v = Self.embedding(samples[lo..<hi], extractor: extractor, dim: dim) {
+                embedded.append((r, v))
+            }
+            each(i)
+        }
+        try flag.check()
+        return embedded
     }
 
     // MARK: - 区分
@@ -103,36 +182,18 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         }
         let samples = try Self.decode(audio, flag: flag) { progress.report($0 * Self.decodeShare) }
 
-        let model = strdup(directory.appendingPathComponent(Self.embeddingModel.name).path)
-        let cpu = strdup("cpu")
-        defer { free(model); free(cpu) }
-        var config = SherpaOnnxSpeakerEmbeddingExtractorConfig()
-        config.model = UnsafePointer(model)
-        config.num_threads = threads
-        config.provider = UnsafePointer(cpu)
-        guard let extractor = SherpaOnnxCreateSpeakerEmbeddingExtractor(&config) else {
-            throw SherpaOnnxDiarizerError.engineUnavailable
-        }
-        defer { SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor) }
-        let dim = Int(SherpaOnnxSpeakerEmbeddingExtractorDim(extractor))
-
-        var embedded: [(range: ClosedRange<TimeInterval>, vector: [Float])] = []
-        for (i, r) in sentences.enumerated() {
-            try flag.check()
-            let lo = max(0, Int(r.lowerBound * Double(Self.sampleRate)))
-            let hi = min(samples.count, Int(r.upperBound * Double(Self.sampleRate)))
-            if hi - lo > Self.minimumSamples, let v = Self.embedding(samples[lo..<hi], extractor: extractor, dim: dim) {
-                embedded.append((r, v))
+        return try withExtractor { extractor, dim in
+            let embedded = try embed(sentences, samples: samples, extractor: extractor, dim: dim, flag: flag) { i in
+                progress.report(Self.decodeShare + Double(i + 1) / Double(sentences.count) * (1 - Self.decodeShare))
             }
-            progress.report(Self.decodeShare + Double(i + 1) / Double(sentences.count) * (1 - Self.decodeShare))
+            let labels = SentenceClustering.cluster(
+                embedded.map {
+                    SentenceClustering.Item(vector: $0.vector, duration: $0.range.upperBound - $0.range.lowerBound)
+                },
+                speakerCount: speakerCount, threshold: clusteringThreshold)
+            progress.report(1)
+            return Self.result(embedded, labels: labels, dim: dim)
         }
-        try flag.check()
-
-        let labels = SentenceClustering.cluster(
-            embedded.map { SentenceClustering.Item(vector: $0.vector, duration: $0.range.upperBound - $0.range.lowerBound) },
-            speakerCount: speakerCount)
-        progress.report(1)
-        return Self.result(embedded, labels: labels, dim: dim)
     }
 
     /// 每句一个片段；每人的声纹是他各句（单位化的）声纹按时长加权平均，再单位化
@@ -229,10 +290,10 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         return samples
     }
 
-    private static func verify(_ model: ModelFile, in directory: URL) throws {
-        let url = directory.appendingPathComponent(model.name)
+    private static func verify(_ model: ModelFile, at url: URL, isDownloaded: Bool) throws {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            throw SherpaOnnxDiarizerError.modelMissing(model.name)
+            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelMissing(model.path)
+                : SherpaOnnxDiarizerError.modelMissing(model.path)
         }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -243,14 +304,59 @@ public final class SherpaOnnxDiarizer: SpeakerDiarizer, @unchecked Sendable {
         }
         let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard size == model.size, hex == model.sha256 else {
-            throw SherpaOnnxDiarizerError.modelCorrupted(model.name)
+            throw isDownloaded ? SherpaOnnxDiarizerError.downloadedModelCorrupted(model.path)
+                : SherpaOnnxDiarizerError.modelCorrupted(model.path)
+        }
+    }
+}
+
+extension SherpaOnnxDiarizer {
+    /// 目录里「声纹」用途的一项 → 区分引擎和它的声纹库匹配阈值。
+    /// 引擎为 nil 表示现在没法用：没选、不是声纹家族、打进 App 的文件不在（直接 `swift run` 没打包）、
+    /// 需要下载的还没下完（只看大小，哈希在 `prepare` 时校验），或打进 App 的文件不是已知的（没有哈希可校验）。
+    /// 阈值取目录项的 `matchThreshold`（「声纹」用途的目录项一定带，`CatalogModel.init` 里查）；
+    /// 没选或不是声纹模型时没有引擎，阈值用不上，给 `VoiceprintLibrary.defaultMatchThreshold`。
+    /// 聚类阈值取 `clusteringThreshold`，没写时用 `SentenceClustering.defaultThreshold`
+    /// - Parameters:
+    ///   - bundleResources: App 的 `Contents/Resources`（`Bundle.main.resourceURL`）
+    ///   - modelsRoot: 下载模型的根目录（`LocalModel.defaultDirectory`）
+    public static func engine(for model: CatalogModel?, bundleResources: URL?, modelsRoot: URL)
+        -> (diarizer: SherpaOnnxDiarizer?, voiceprintThreshold: Float) {
+        guard let model, model.family == .sherpaSpeakerEmbedding, model.roles.contains(.voiceprint),
+              let threshold = model.parameters.matchThreshold else {
+            return (nil, VoiceprintLibrary.defaultMatchThreshold)
+        }
+        let clustering = model.parameters.clusteringThreshold ?? SentenceClustering.defaultThreshold
+        switch model.source {
+        case .system:
+            return (nil, threshold)
+        case let .bundled(directory, fileName):
+            guard let bundleResources, let file = models.first(where: { $0.path == fileName }) else {
+                return (nil, threshold)
+            }
+            let url = bundleResources.appendingPathComponent(directory, isDirectory: true)
+                .appendingPathComponent(fileName)
+            guard fileHasSize(url, file.size) else { return (nil, threshold) }
+            return (SherpaOnnxDiarizer(modelURL: url, file: file, voiceprintModel: model.id, isDownloaded: false,
+                                       clusteringThreshold: clustering), threshold)
+        case let .download(local):
+            // 声纹模型是单个 onnx 文件
+            guard local.files.count == 1, local.isDownloaded(in: modelsRoot) else { return (nil, threshold) }
+            let file = local.files[0]
+            return (SherpaOnnxDiarizer(modelURL: local.url(of: file, in: modelsRoot), file: file,
+                                       voiceprintModel: model.id, isDownloaded: true, clusteringThreshold: clustering),
+                    threshold)
         }
     }
 }
 
 public enum SherpaOnnxDiarizerError: LocalizedError, Equatable {
+    /// 打进 App 的模型不在 / 坏了：要重装
     case modelMissing(String)
     case modelCorrupted(String)
+    /// 下载的模型不在 / 坏了：要重新下载
+    case downloadedModelMissing(String)
+    case downloadedModelCorrupted(String)
     /// sherpa-onnx 创建声纹提取器失败（返回 NULL）
     case engineUnavailable
     case unreadableAudio(String)
@@ -259,6 +365,8 @@ public enum SherpaOnnxDiarizerError: LocalizedError, Equatable {
         switch self {
         case let .modelMissing(name): "缺少区分说话人模型 \(name)，请重新安装 Faymee"
         case let .modelCorrupted(name): "区分说话人模型 \(name) 已损坏，请重新安装 Faymee"
+        case let .downloadedModelMissing(name): "缺少声纹模型 \(name)，请在设置里重新下载"
+        case let .downloadedModelCorrupted(name): "声纹模型 \(name) 已损坏，请在设置里删除后重新下载"
         case .engineUnavailable: "区分说话人引擎启动失败"
         case let .unreadableAudio(reason): "读不了录音：\(reason)"
         }

@@ -13,6 +13,7 @@ final class ScriptedGenerator: TextGenerator, @unchecked Sendable {
     let contextTokens: Int
     private let maxOutputTokensOverride: Int?
     var maxOutputTokens: Int { maxOutputTokensOverride ?? (contextTokens / 2) }
+    var minutesChunking = MinutesChunking.standard
     var outputs: [String]
     /// 设了就在 generate 里抛出
     var error: Error?
@@ -355,6 +356,24 @@ private func generate(_ generator: ScriptedGenerator, transcript: Transcript = t
             return i == 120 ? [line, "[合盖，未录到声音 20:00–22:00]"] : [line]
         }
         #expect(generator.extractionCalls.flatMap(transcriptLines) == expected)
+    }
+
+    /// 分段参数随模型（目录项）走：提取和合并各留多少给输出
+    @Test func 按引擎的分段参数给提取和合并留输出() async throws {
+        let standard = ScriptedGenerator(contextTokens: 4000)
+        standard.respond = echoingResponder
+        _ = try await generate(standard, transcript: longTranscript(count: 200))
+        #expect(Set(standard.calls.filter { !transcriptLines(in: $0.prompt).isEmpty }.map(\.maxTokens)) == [1600])
+        #expect(Set(standard.calls.filter { transcriptLines(in: $0.prompt).isEmpty }.map(\.maxTokens)) == [2000])
+
+        let custom = ScriptedGenerator(contextTokens: 4000)
+        custom.minutesChunking = MinutesChunking(extractionOutput: TokenShare(1, 4), mergeOutput: TokenShare(3, 10))
+        custom.respond = echoingResponder
+        _ = try await generate(custom, transcript: longTranscript(count: 200))
+        #expect(Set(custom.calls.filter { !transcriptLines(in: $0.prompt).isEmpty }.map(\.maxTokens)) == [1000])
+        #expect(Set(custom.calls.filter { transcriptLines(in: $0.prompt).isEmpty }.map(\.maxTokens)) == [1200])
+        // 留给输出的少了，提取分的段更少
+        #expect(custom.extractionCalls.count < standard.extractionCalls.count)
     }
 
     /// 合并时出处只认合并输入里出现过的：转写稿里存在、但提取时没人引用过的句子也要丢掉

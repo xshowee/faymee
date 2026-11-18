@@ -7,13 +7,10 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @State private var confirmingDelete = false
-    @State private var deleteError: String?
 
     var body: some View {
         @Bindable var model = model
         @Bindable var online = model.onlineSettings
-        let downloader = model.modelDownloader
 
         Form {
             Section("录音") {
@@ -28,6 +25,26 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if model.liveCaptionsEnabled {
+                    ModelPicker(role: .liveCaptions, title: "字幕模型",
+                                deleteBlockedReason: { m in
+                                    model.liveCaptionModelID == m.id ? "正在用它显示本场录音的字幕，录音结束后才能删除" : nil
+                                })
+                    if let note = liveCaptionModelNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    ModelPicker(role: .liveFinalize, title: "实时字幕定稿",
+                                deleteBlockedReason: { m in model.asrModelDeleteBlockedReason(m) })
+                    Text(liveFinalizeNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Section("转写") {
@@ -44,7 +61,15 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if online.transcriptionMode == .local {
-                    Text("全程在本机转写，录音不离开这台 Mac")
+                    ModelPicker(role: .transcription, title: "转写模型",
+                                deleteBlockedReason: { m in model.asrModelDeleteBlockedReason(m) })
+                    if model.modelSelections.selected(for: .transcription)?.family == .speechAnalyzer {
+                        // 已有安装升级后默认还用 SpeechAnalyzer：只提示，不弹窗
+                        Label("有更准的本机模型可以下载", systemImage: "sparkles")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("全程在本机转写，录音不离开这台 Mac。换模型后从下一场起生效，正在转写的照常转完；所选模型没下载完时，录完的会议排队等下载")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -73,11 +98,15 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                ModelPicker(role: .voiceprint, title: "声纹模型",
+                            deleteBlockedReason: { _ in model.voiceprintModelDeleteBlockedReason })
+                VoiceprintRecomputeControls()
             }
 
             Section("纪要") {
                 Picker("纪要引擎", selection: $online.minutesMode) {
-                    Text("本机 Qwen3 4B").tag(EngineMode.local)
+                    Text("本机模型").tag(EngineMode.local)
                     Text("在线模型").tag(EngineMode.online)
                 }
                 .pickerStyle(.segmented)
@@ -91,35 +120,14 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if online.minutesMode == .local {
-                    LabeledContent("Qwen3 4B（Q4_K_M）") {
-                        ModelDownloadControls(style: .settings)
-                    }
-                    Text("纪要在本机生成，不上传任何数据。模型约 \(formatGigabytes(downloader.model.size))，只在点“下载”后才开始下载，可以暂停，中断后能续传")
+                    ModelPicker(role: .minutes, title: "纪要模型",
+                                deleteBlockedReason: { _ in
+                                    model.canDeleteModel ? nil : "正在生成纪要，生成完才能删除模型"
+                                })
+                    Text("纪要在本机生成，不上传任何数据。模型只在点“下载”后才开始下载，可以暂停，中断后能续传")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    if downloader.isReady {
-                        HStack {
-                            Button("在访达中显示") {
-                                NSWorkspace.shared.activateFileViewerSelecting([downloader.model.url(in: downloader.directory)])
-                            }
-                            Spacer()
-                            Button("删除模型…", role: .destructive) { confirmingDelete = true }
-                                .disabled(!model.canDeleteModel)
-                        }
-                        if !model.canDeleteModel {
-                            Text("正在生成纪要，生成完才能删除模型")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if let deleteError {
-                        Label(deleteError, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                 } else {
                     OnlineEndpointFields(
                         provider: $online.minutesProvider,
@@ -148,20 +156,44 @@ struct SettingsView: View {
             model.flushOnlineSettingsSync()
             model.cancelInFlightConnectionTests()
         }
-        .confirmationDialog("删除纪要模型？", isPresented: $confirmingDelete) {
-            Button("删除模型", role: .destructive) {
-                Task {
-                    do {
-                        try await model.deleteModel()
-                        deleteError = nil
-                    } catch {
-                        deleteError = "删除模型失败：\(error.localizedDescription)"
-                    }
-                }
-            }
-        } message: {
-            Text("释放约 \(formatGigabytes(downloader.model.size)) 空间。之后生成纪要需要重新下载，已生成的纪要不受影响。")
+    }
+}
+
+extension SettingsView {
+    /// 字幕模型的说明：所选模型没下载完时说明正在用 SpeechAnalyzer；录音中改了选择时说明从下一场起生效
+    private var liveCaptionModelNote: String? {
+        guard let selected = model.modelSelections.selected(for: .liveCaptions) else { return nil }
+        let ready = isDownloaded(selected)
+        if let inUse = model.liveCaptionModelID, inUse != (ready ? selected.id : ModelCatalog.speechAnalyzerID) {
+            let name = modelName(inUse)
+            return "本场录音的字幕仍用 \(name)，下一场录音起生效"
         }
+        guard !ready else { return nil }
+        return "\(selected.name) 还没下载，实时字幕暂时用 SpeechAnalyzer（系统自带）；下载完成后，下一场录音起改用它"
+    }
+
+    /// 实时字幕定稿的说明：做什么；所选模型没下载完时说明暂时不用；录音中改了选择时说明从下一场起生效
+    private var liveFinalizeNote: String {
+        let about = "每句说完后用整段模型再转一遍、替换面板里的这一句，更准但更占内存；只影响会中面板"
+        let selected = model.modelSelections.selected(for: .liveFinalize)
+        let ready = selected.map(isDownloaded) ?? true
+        let wanted = ready ? selected?.id : nil
+        if model.isRecording, model.liveFinalizeModelID != wanted {
+            let inUse = model.liveFinalizeModelID.map(modelName)
+            return about + "。" + (inUse.map { "本场录音仍用 \($0)" } ?? "本场录音不做实时字幕定稿") + "，下一场录音起生效"
+        }
+        guard let selected, !ready else { return about }
+        return about + "。\(selected.name) 还没下载，实时字幕定稿暂时不用；下载完成后，下一场录音起改用它"
+    }
+
+    /// 模型能不能用：读下载器的状态（可观察），下载完成、删除后说明跟着变；不用下载的总能用
+    private func isDownloaded(_ entry: CatalogModel) -> Bool {
+        model.modelDownloads.downloader(for: entry)?.isReady ?? true
+    }
+
+    /// 目录项 id 的显示名
+    private func modelName(_ id: String) -> String {
+        model.modelSelections.catalog.model(id: id)?.name ?? id
     }
 }
 
@@ -339,15 +371,22 @@ private struct OnlineEndpointFields<Provider: OnlineProviderOption>: View {
 }
 
 /// 模型的状态、进度和操作按钮。设置里显示完整状态并可以取消；
-/// 详情页（纪要在等模型时）只显示一句说明和下一步该点的按钮
+/// 详情页（纪要、转写等任务在等模型时）只显示一句说明和下一步该点的按钮
 struct ModelDownloadControls: View {
-    enum Style { case settings, minutes }
+    enum Style: Equatable {
+        case settings
+        case minutes
+        /// 某个用途的任务在等这个模型，说明写成“等待下载转写模型”
+        case waiting(ModelRole)
+    }
 
     @Environment(AppModel.self) private var model
     var style: Style
+    /// 哪个模型的下载器；不给时是纪要模型的
+    var downloader: ModelDownloader?
 
     var body: some View {
-        let downloader = model.modelDownloader
+        let downloader = downloader ?? model.modelDownloader
         let status = downloader.status
 
         HStack(spacing: 6) {
@@ -360,7 +399,7 @@ struct ModelDownloadControls: View {
             default:
                 EmptyView()
             }
-            Text(style == .settings ? status.text : status.minutesText)
+            Text(text(status))
                 .monospacedDigit()
                 .foregroundStyle(status.phase.isFailed ? Color.orange : Color.secondary)
                 .lineLimit(2)
@@ -381,6 +420,16 @@ struct ModelDownloadControls: View {
                 Button("取消") { Task { await downloader.cancel() } }
                     .help("停止下载并删掉已下载的部分")
             }
+        }
+    }
+}
+
+extension ModelDownloadControls {
+    private func text(_ status: ModelDownloadStatus) -> String {
+        switch style {
+        case .settings: status.text
+        case .minutes: status.minutesText
+        case let .waiting(role): status.waitText(for: role)
         }
     }
 }
@@ -418,4 +467,60 @@ private struct UpdateSettings: View {
     }
 
     private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+}
+
+/// 「声纹」一节里的重算声纹库：所选声纹模型与声纹库里有人的模型不同时说明人数、给出按钮；
+/// 进行中显示进度和取消；结束后列出结果和受影响的人
+private struct VoiceprintRecomputeControls: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let recomputation = model.voiceprintRecomputation
+        let selected = model.selectedVoiceprintModel
+        let pending = selected.map { model.voiceprints.library.peopleNeedingReenrollment(voiceprintModel: $0) } ?? []
+
+        switch recomputation.state {
+        case let .running(done, total):
+            LabeledContent("重算声纹库") {
+                HStack {
+                    ProgressView(value: total > 0 ? Double(done) / Double(total) : 0)
+                        .frame(width: 120)
+                    Text("\(done) / \(total) 个样本")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("取消") { recomputation.cancel() }
+                }
+            }
+        default:
+            if !pending.isEmpty {
+                // 所选模型要下载、还没下好时不能重算（ModelPicker 里有下载按钮）
+                let ready = model.selectedVoiceprintModelIsReady
+                LabeledContent("已登记的 \(pending.count) 人需要用新模型重算") {
+                    Button("重算声纹库") { model.recomputeVoiceprints() }
+                        .disabled(!ready)
+                }
+                Text(ready
+                     ? "从这些人登记时的会议录音里取他们的发言，用所选模型重新算声纹。重算前他们不参与识别"
+                     : "所选声纹模型下载好后才能重算。重算前这些人不参与识别")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        switch recomputation.state {
+        case let .finished(report):
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(report.summary.enumerated()), id: \.offset) { _, line in Text(line) }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        case let .failed(message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        default:
+            EmptyView()
+        }
+    }
 }

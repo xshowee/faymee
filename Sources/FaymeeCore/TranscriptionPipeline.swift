@@ -33,6 +33,8 @@ public enum TranscriptionActivity: Hashable, Sendable {
 public enum TranscriptionWaitReason: Hashable, Sendable {
     /// 在线转写配置未补齐
     case onlineConfig
+    /// 所选本机模型（目录项 id）还没下载完。不限于转写：别的用途等模型时也用目录项 id 找下载器
+    case modelDownload(id: String)
 }
 
 /// 转写队列：一次转写一场，其余按入队先后排队。
@@ -60,7 +62,8 @@ public final class TranscriptionPipeline {
     public var diarizes = true
 
     /// 现在开始的完整转写会不会区分说话人（开关开着且有区分引擎）。不会时重新转写丢掉全部说话人信息，
-    /// 确认提示据此把说话人名字也算进修改数（见 `Transcript.retranscribeEditCount(diarizes:)`）
+    /// 确认提示据此把说话人名字也算进修改数（见 `Transcript.retranscribeEditCount(diarizes:)`）。
+    /// 等声纹模型下载时也是不会：之后补上的区分说话人沿用不了旧稿里的名字（旧稿已被新稿替换）
     public var transcriptionDiarizes: Bool { diarizes && diarizer != nil }
     /// 声纹识别的阈值（余弦相似度，超过才认）。引擎给出推荐值后由 App 设置
     public var voiceprintThreshold = VoiceprintLibrary.defaultMatchThreshold
@@ -86,10 +89,12 @@ public final class TranscriptionPipeline {
         didSet { if !isHeld && oldValue { startNext() } }
     }
 
-    /// 当前转写引擎是否就绪（本机恒为 true；在线未补齐配置时为 false，完整转写保持排队）
+    /// 当前转写引擎是否就绪（在线未补齐配置、本机所选模型没下载完时为 false，完整转写保持排队）
     public private(set) var isEngineReady: Bool {
         didSet { reportIdle() }
     }
+    /// 当前引擎没就绪时在等什么（就绪时不用）
+    private var engineWaitReason: TranscriptionWaitReason
 
     /// `isIdle` 变化时调用。纪要管线据此决定能否开始：转写不空闲时不开始新的纪要
     @ObservationIgnored public var onIdleChange: ((Bool) -> Void)?
@@ -101,7 +106,11 @@ public final class TranscriptionPipeline {
     @ObservationIgnored private let store: MeetingStore
     @ObservationIgnored private var transcriber: any Transcriber
     @ObservationIgnored private var engine: String
-    @ObservationIgnored private let diarizer: (any SpeakerDiarizer)?
+    /// 界面据 `canDiarize`、`voiceprintModel` 显示入口，换声纹模型时要跟着变，所以不忽略观察
+    private var diarizer: (any SpeakerDiarizer)?
+    /// 没有区分引擎、是因为所选声纹模型还没下载完时，在等哪个模型（有引擎时为 nil）。
+    /// 这时区分说话人的任务排队等下载，不跳过也不失败；没有引擎又不在等下载（打进 App 的模型不在等）时为 nil
+    public private(set) var diarizerWaitReason: TranscriptionWaitReason?
     @ObservationIgnored private let voiceprints: VoiceprintStore?
     @ObservationIgnored private weak var host: TranscriptionHost?
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -130,41 +139,53 @@ public final class TranscriptionPipeline {
     /// - Parameters:
     ///   - engine: 写进转写稿的引擎名，如 "apple/speechanalyzer"
     ///   - isEngineReady: 转写引擎是否就绪；false 时完整转写任务保持排队
+    ///   - engineWaitReason: 没就绪时在等什么
     ///   - diarizer: 区分说话人引擎；nil 表示没有可用的引擎，完整转写跳过这一步（不算失败）
+    ///   - diarizerWaitReason: diarizer 为 nil、是在等声纹模型下载时传它：区分说话人排队等下载，见 `setDiarizer`
     ///   - voiceprints: 声纹库。区分说话人之后用它认出登记过的人；nil 时不识别
     public init(store: MeetingStore, transcriber: any Transcriber, engine: String,
-                isEngineReady: Bool = true,
-                diarizer: (any SpeakerDiarizer)? = nil, voiceprints: VoiceprintStore? = nil,
-                host: TranscriptionHost) {
+                isEngineReady: Bool = true, engineWaitReason: TranscriptionWaitReason = .onlineConfig,
+                diarizer: (any SpeakerDiarizer)? = nil, diarizerWaitReason: TranscriptionWaitReason? = nil,
+                voiceprints: VoiceprintStore? = nil, host: TranscriptionHost) {
         self.store = store
         self.transcriber = transcriber
         self.engine = engine
         self.isEngineReady = isEngineReady
+        self.engineWaitReason = engineWaitReason
         self.diarizer = diarizer
+        self.diarizerWaitReason = diarizer == nil ? diarizerWaitReason : nil
         self.voiceprints = voiceprints
         self.host = host
     }
 
-    /// 有没有区分说话人引擎。没有时 `enqueueDiarization` 总是返回 false，界面据此隐藏“区分说话人”等入口
-    public var canDiarize: Bool { diarizer != nil }
+    /// 能不能区分说话人：有引擎，或在等声纹模型下载（入队后排队等下载）。不能时 `enqueueDiarization` 总是返回 false，
+    /// 界面据此隐藏“区分说话人”等入口
+    public var canDiarize: Bool { diarizer != nil || diarizerWaitReason != nil }
 
     /// 当前区分引擎的声纹模型标识；没有引擎时为 nil。声纹管理窗口据此标出“需要重新登记”的人
     public var voiceprintModel: String? { diarizer?.voiceprintModel }
 
-    /// 没有排队（或队列里只有因引擎未就绪而挂起的完整转写）、正在转写、预定了转写的会议，被取消的转写也已退出
+    /// 没有排队（或队列里只有因引擎未就绪而挂起的任务）、正在转写、预定了转写的会议，被取消的转写也已退出
     public var isIdle: Bool {
         activeID == nil && cancelled == nil && reserved.isEmpty && !queue.contains { isRunnable($0) }
     }
 
+    /// 完整转写等转写引擎就绪；只区分说话人等声纹模型下载（没有引擎又不在等下载时照常开始，记为失败）
     private func isRunnable(_ id: String) -> Bool {
-        if case .diarization = jobs[id] { return true }
+        if case .diarization = jobs[id] { return diarizer != nil || diarizerWaitReason == nil }
         return isEngineReady
     }
 
-    /// 某场排队中的会议在等什么；不在排队或非等待配置时为 nil
+    /// 某场排队中的会议的完整转写在等什么（等在线配置、等下载模型）；不在排队或只是排在别的会议后面时为 nil
     public func waitReason(for id: String) -> TranscriptionWaitReason? {
         guard queue.contains(id), jobs[id] == .transcription, !isEngineReady else { return nil }
-        return .onlineConfig
+        return engineWaitReason
+    }
+
+    /// 某场排队中的会议的只区分说话人在等什么（等下载声纹模型）；不在排队或只是排在别的会议后面时为 nil
+    public func diarizationWaitReason(for id: String) -> TranscriptionWaitReason? {
+        guard queue.contains(id), case .diarization = jobs[id], diarizer == nil else { return nil }
+        return diarizerWaitReason
     }
 
     /// 引擎就绪状态变化时调用：刷新 `isEngineReady`，就绪后推进排队中的任务
@@ -174,11 +195,31 @@ public final class TranscriptionPipeline {
     }
 
     /// 运行期热切换转写引擎：正在执行的任务继续用启动时的旧引擎与旧标识跑完落盘，
-    /// 下一场起改用新引擎；`isReady` 为 false 时后续完整转写保持排队
-    public func setEngine(transcriber: any Transcriber, engine: String, isReady: Bool = true) {
+    /// 下一场起改用新引擎；`isReady` 为 false 时后续完整转写保持排队，排队原因是 `waitReason`
+    public func setEngine(transcriber: any Transcriber, engine: String, isReady: Bool = true,
+                          waitReason: TranscriptionWaitReason = .onlineConfig) {
         self.transcriber = transcriber
         self.engine = engine
+        engineWaitReason = waitReason
         engineAvailabilityChanged(isReady)
+    }
+
+    /// 运行期换区分说话人引擎（换声纹模型）和它的声纹库匹配阈值：正在执行的任务用开始时的旧引擎、旧阈值跑完落盘，
+    /// 之后开始的完整转写、只区分说话人用新的。
+    ///
+    /// diarizer 为 nil 时：
+    /// - 带 `waitReason`（所选声纹模型还没下载完）：区分说话人排队等下载（spec「切换的语义」）。之后的完整转写照常转写、
+    ///   保存转写稿，说话人状态记为排队、留一个只区分说话人的任务等着；`enqueueDiarization` 照常接受。
+    ///   再调用本方法给出引擎（下载完成）时，排队的自动开始
+    /// - 不带（打进 App 的模型文件不在等，没有可下载的）：之后的完整转写跳过区分说话人（不算失败），
+    ///   `enqueueDiarization` 不接受，已排队的只区分说话人任务开始时按区分失败记下
+    public func setDiarizer(_ diarizer: (any SpeakerDiarizer)?, voiceprintThreshold: Float,
+                            waitReason: TranscriptionWaitReason? = nil) {
+        self.diarizer = diarizer
+        diarizerWaitReason = diarizer == nil ? waitReason : nil
+        self.voiceprintThreshold = voiceprintThreshold
+        reportIdle()
+        startNext()
     }
 
     /// 某场会议正在进行的步骤；不在转写中时为 nil
@@ -226,7 +267,7 @@ public final class TranscriptionPipeline {
     /// - Parameter speakerCount: 指定人数；nil 由引擎判断
     @discardableResult
     public func enqueueDiarization(_ id: String, speakerCount: Int? = nil) -> Bool {
-        guard diarizer != nil, let m = host?.meeting(id), m.status == .done, m.recording != nil,
+        guard canDiarize, let m = host?.meeting(id), m.status == .done, m.recording != nil,
               id != activeID, jobs[id] != .transcription, store.hasTranscript(id) else { return false }
         if !queue.contains(id) { queue.append(id) }
         jobs[id] = .diarization(speakerCount: speakerCount)
@@ -314,6 +355,9 @@ public final class TranscriptionPipeline {
         activity = .preparing(0)
         host?.setTranscription(TranscriptionState(status: .running), for: id)
         let diarizer = diarizes ? diarizer : nil
+        // 声纹模型还没下好：先转写，说话人留给之后的只区分说话人任务
+        let diarizesLater = diarizes && diarizer == nil && diarizerWaitReason != nil
+        let threshold = voiceprintThreshold
         let meeting = m
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
@@ -335,7 +379,9 @@ public final class TranscriptionPipeline {
                 diarization = await Self.diarize(diarizer, audio: audio, sentences: spans, speakerCount: nil,
                                                  report: report)
             }
-            self?.finish(id, token: token, engine: engine, hotwords: hotwords, result: result, diarization: diarization)
+            self?.finish(id, token: token, engine: engine, hotwords: hotwords, result: result,
+                         diarization: diarization.flatMap { r in diarizer.map { ($0, threshold, r) } },
+                         diarizesLater: diarizesLater)
         }
     }
 
@@ -345,27 +391,34 @@ public final class TranscriptionPipeline {
                                   report: @escaping @Sendable (TranscriptionActivity) -> Void) {
         activity = .diarizing(0)
         host?.setDiarization(DiarizationState(status: .running), for: id)
-        // 开始时记下句子时间和转写稿的生成时间，结束时据此判断期间有没有被重新转写
+        // 开始时记下句子时间和转写稿的生成时间，结束时据此判断期间有没有被重新转写；
+        // 引擎和阈值也在开始时记下，期间换了声纹模型，这一场仍按旧模型落盘
         let snapshot: Transcript?
         do {
             snapshot = try store.loadTranscript(id)
         } catch {
             return finishDiarization(id, token: token, createdAt: nil, result: .failure(error))
         }
-        guard let snapshot, let diarizer else {
+        guard let diarizer else {
+            return finishDiarization(id, token: token, createdAt: nil,
+                                     result: .failure(DiarizationStepError.noEngine))
+        }
+        guard let snapshot else {
             return finishDiarization(id, token: token, createdAt: nil,
                                      result: .failure(DiarizationStepError.noTranscript))
         }
+        let threshold = voiceprintThreshold
         task = Task(priority: .utility) { [weak self] in
             await previous?.value
             let result = await Self.diarize(diarizer, audio: audio, sentences: snapshot.sentenceSpans,
                                             speakerCount: speakerCount, report: report)
-            self?.finishDiarization(id, token: token, createdAt: snapshot.createdAt, result: result)
+            self?.finishDiarization(id, token: token, createdAt: snapshot.createdAt,
+                                    result: result.map { (diarizer, threshold, $0) })
         }
     }
 
     private func finishDiarization(_ id: String, token: Int, createdAt: Date?,
-                                   result: Result<DiarizationResult, Error>) {
+                                   result: Result<DiarizedWith, Error>) {
         // 已被取消：结果作废，什么都不写
         guard token == generation, activeID == id else { return }
         activity = nil
@@ -376,9 +429,9 @@ public final class TranscriptionPipeline {
             startNext()
         }
         // 区分期间会议被删除
-        guard let host, host.meeting(id) != nil, let diarizer else { return }
+        guard let host, host.meeting(id) != nil else { return }
         do {
-            let r = try result.get()
+            let (diarizer, threshold, r) = try result.get()
             // 期间转写稿被重新转写（createdAt 变了）：句子已经换了一批，结果作废
             guard let current = try store.loadTranscript(id), current.createdAt == createdAt else {
                 throw DiarizationStepError.retranscribed
@@ -386,7 +439,7 @@ public final class TranscriptionPipeline {
             let updated = current.withSpeakers(r, engine: diarizer.engine, voiceprintModel: diarizer.voiceprintModel,
                                                createdAt: wholeSecondNow())
                 .carryingSpeakerNames(from: current)
-            try store.saveTranscript(recognizingSpeakers(updated), for: id)
+            try store.saveTranscript(recognizingSpeakers(updated, threshold: threshold), for: id)
             host.setDiarization(DiarizationState(status: .done), for: id)
         } catch {
             host.setDiarization(DiarizationState(status: .failed, error: error.localizedDescription), for: id)
@@ -394,10 +447,13 @@ public final class TranscriptionPipeline {
     }
 
     /// 区分说话人之后用声纹库认出登记过的人。声纹库读不出来（文件坏了）时不识别，不让区分失败
-    private func recognizingSpeakers(_ transcript: Transcript) -> Transcript {
+    private func recognizingSpeakers(_ transcript: Transcript, threshold: Float) -> Transcript {
         guard let voiceprints, let library = try? voiceprints.load() else { return transcript }
-        return transcript.recognizingSpeakers(with: library, threshold: voiceprintThreshold)
+        return transcript.recognizingSpeakers(with: library, threshold: threshold)
     }
+
+    /// 一次区分的结果，连同开始时记下的引擎和匹配阈值
+    private typealias DiarizedWith = (diarizer: any SpeakerDiarizer, threshold: Float, result: DiarizationResult)
 
     /// 放回队首时把状态改回排队中：完整转写改转写状态，只区分说话人改说话人状态
     private func setQueued(_ id: String) {
@@ -425,15 +481,20 @@ public final class TranscriptionPipeline {
 
     private func finish(_ id: String, token: Int, engine: String, hotwords: [String],
                         result: Result<[TranscribedSentence], Error>,
-                        diarization: Result<DiarizationResult, Error>?) {
+                        diarization: (diarizer: any SpeakerDiarizer, threshold: Float,
+                                      result: Result<DiarizationResult, Error>)?,
+                        diarizesLater: Bool) {
         // 已被取消：结果作废，什么都不写
         guard token == generation, activeID == id else { return }
         activity = nil
         task = nil
+        /// 转写稿存好了、区分说话人在等声纹模型下载：留一个只区分说话人的任务排在队尾
+        var queuesDiarization = false
         // 写好转写稿、更新状态、回调之后才清 activeID：清掉就算空闲，等着的纪要会马上读转写稿快照
         defer {
+            jobs[id] = queuesDiarization ? .diarization(speakerCount: nil) : nil
+            if queuesDiarization { queue.append(id) }
             activeID = nil
-            jobs[id] = nil
             startNext()
         }
         // 转写期间会议被删除
@@ -443,9 +504,13 @@ public final class TranscriptionPipeline {
         do {
             var transcript = Transcript.assemble(try result.get(), meeting: m, engine: engine,
                                                  hotwords: hotwords, createdAt: Date())
-            // 没走区分这一步（开关关着、没有引擎）时新稿没有说话人：状态如实退回“从未区分”
+            // 没走区分这一步（开关关着、没有引擎）时新稿没有说话人：状态如实退回“从未区分”；
+            // 在等声纹模型下载时记为排队
             var diarizationState: DiarizationState?
-            if let diarization, let diarizer {
+            if diarization == nil, diarizesLater {
+                diarizationState = DiarizationState(status: .queued)
+            }
+            if let (diarizer, threshold, diarization) = diarization {
                 switch diarization {
                 case let .success(r):
                     transcript = transcript.withSpeakers(r, engine: diarizer.engine,
@@ -455,13 +520,14 @@ public final class TranscriptionPipeline {
                     if let old = (try? store.loadTranscript(id)) ?? nil {
                         transcript = transcript.carryingSpeakerNames(from: old)
                     }
-                    transcript = recognizingSpeakers(transcript)
+                    transcript = recognizingSpeakers(transcript, threshold: threshold)
                     diarizationState = DiarizationState(status: .done)
                 case let .failure(error):
                     diarizationState = DiarizationState(status: .failed, error: error.localizedDescription)
                 }
             }
             try store.saveTranscript(transcript, for: id)
+            queuesDiarization = diarizationState?.status == .queued
             outcome = .done(transcript)
             host.setTranscription(TranscriptionState(status: .done), for: id)
             host.setDiarization(diarizationState, for: id)
@@ -507,11 +573,14 @@ public final class TranscriptionPipeline {
 enum DiarizationStepError: LocalizedError {
     case noTranscript
     case retranscribed
+    /// 排队期间区分引擎没了（换成了还没下载的声纹模型）
+    case noEngine
 
     var errorDescription: String? {
         switch self {
         case .noTranscript: "没有转写稿，无法区分说话人"
         case .retranscribed: "区分期间转写稿被重新转写，结果已作废，请重新区分说话人"
+        case .noEngine: "所选声纹模型还不能用，下载好后再区分说话人"
         }
     }
 }

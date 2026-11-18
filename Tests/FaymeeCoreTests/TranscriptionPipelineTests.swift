@@ -60,7 +60,7 @@ private final class SlowToCancelTranscriber: Transcriber, @unchecked Sendable {
 /// 假区分说话人引擎：按脚本返回说话片段和声纹，记录收到的参数。block 为 true 时 diarize 一直等到被取消
 private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
     let engine = "fake/diarizer"
-    let voiceprintModel = "fake/voiceprint"
+    let voiceprintModel: String
     var result = DiarizationResult(segments: [], voiceprints: [:])
     var prepareError: Error?
     var diarizeError: Error?
@@ -72,8 +72,10 @@ private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
     let started: AsyncStream<Void>
     private let startedContinuation: AsyncStream<Void>.Continuation
 
-    init(_ segments: [SpeakerSegment] = [], voiceprints: [Int: Voiceprint] = [:]) {
+    init(_ segments: [SpeakerSegment] = [], voiceprints: [Int: Voiceprint] = [:],
+         voiceprintModel: String = "fake/voiceprint") {
         result = DiarizationResult(segments: segments, voiceprints: voiceprints)
+        self.voiceprintModel = voiceprintModel
         (started, startedContinuation) = AsyncStream.makeStream()
     }
 
@@ -87,7 +89,7 @@ private final class FakeDiarizer: SpeakerDiarizer, @unchecked Sendable {
         calls.append((audio, sentences, speakerCount))
         startedContinuation.yield()
         progress(0.5)
-        if block { try await Task.sleep(for: .seconds(3600)) }
+        while block { try await Task.sleep(for: .milliseconds(5)) }
         onDiarize?()
         if let diarizeError { throw diarizeError }
         return result
@@ -1578,6 +1580,29 @@ private final class Library {
         #expect(try f.store.loadTranscript("m2")?.sentences.map(\.text) == ["新引擎完成"])
     }
 
+    @Test func 切到模型没下载完的本机引擎_排队原因是等待下载这个模型_下好后自动开始() async throws {
+        let model = FakeTranscriber([.init(start: 0, end: 5, text: "本机新模型")])
+        let f = Fixture()
+        let m = f.addMeeting()
+
+        f.pipeline.setEngine(transcriber: model, engine: "sherpa-onnx/fake", isReady: false,
+                             waitReason: .modelDownload(id: "sherpa-onnx/fake"))
+        #expect(f.pipeline.enqueue(m.id))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(f.pipeline.waitReason(for: m.id) == .modelDownload(id: "sherpa-onnx/fake"))
+        #expect(model.calls.isEmpty)
+
+        f.pipeline.engineAvailabilityChanged(true)
+        try await f.drain()
+        #expect(try f.store.loadTranscript(m.id)?.engine == "sherpa-onnx/fake")
+
+        // 再切回在线未配置：原因跟着变回等待配置
+        f.pipeline.setEngine(transcriber: model, engine: "openai/gpt-transcribe", isReady: false)
+        f.addMeeting("m2")
+        f.pipeline.enqueue("m2")
+        #expect(f.pipeline.waitReason(for: "m2") == .onlineConfig)
+    }
+
     @Test func 在线转写失败时保留旧稿并记失败_不回退到旧引擎() async throws {
         let local = FakeTranscriber([.init(start: 0, end: 5, text: "本机旧稿")])
         let online = FakeTranscriber([.init(start: 0, end: 5, text: "不该出现")])
@@ -1621,6 +1646,241 @@ private final class Library {
         f.pipeline.engineAvailabilityChanged(true)
         try await f.drain()
         #expect(f.host.meetings[pendingTranscription.id]?.transcription == TranscriptionState(status: .done))
+    }
+}
+
+/// 声纹模型从目录选择（model-catalog ticket 10）：运行期换区分引擎和匹配阈值
+@MainActor @Suite struct DiarizerHotswapTests {
+    /// 张三登记在旧模型、李四登记在新模型，声纹都是 [1, 0, 0]。两场会议里 spk1 的声纹与他们的相似度都是 0.8
+    private let library = Library([
+        person("p-old", "张三", [1, 0, 0], model: "fake/voiceprint"),
+        person("p-new", "李四", [1, 0, 0], model: "new/voiceprint"),
+    ])
+    private let similar = Voiceprint([0.8, 0.6, 0])
+
+    @Test func 运行期切换声纹模型_进行中的用旧模型和旧阈值跑完_之后的重新区分用新模型和新阈值() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: similar, 3: vp2])
+        old.block = true
+        let new = FakeDiarizer(twoPeopleSegments, voiceprints: [7: similar, 3: vp2], voiceprintModel: "new/voiceprint")
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: old, voiceprints: library.store)
+        // 旧阈值 0.85：0.8 认不出；新阈值 0.7：0.8 认得出
+        f.pipeline.voiceprintThreshold = 0.85
+        f.addMeeting("m1")
+        f.addTranscribedMeeting("m2")
+
+        f.pipeline.enqueue("m1")
+        f.pipeline.enqueueDiarization("m2")
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(new, voiceprintThreshold: 0.7)
+        #expect(f.pipeline.voiceprintModel == "new/voiceprint")
+        #expect(f.pipeline.voiceprintThreshold == 0.7)
+        old.block = false
+        try await f.drain()
+
+        let t1 = try #require(try f.store.loadTranscript("m1"))
+        #expect(t1.diarization?.voiceprintModel == "fake/voiceprint")
+        #expect(t1.speakers.map(\.name) == [nil, nil])
+        let t2 = try #require(try f.store.loadTranscript("m2"))
+        #expect(t2.diarization?.voiceprintModel == "new/voiceprint")
+        // 只有登记在新模型上的李四参与识别；张三的声纹模型不同，相似度再高也不认
+        #expect(t2.speakers.map(\.name) == ["李四", nil])
+        #expect(t2.speakers.map(\.personID) == ["p-new", nil])
+        #expect(old.calls.count == 1)
+        #expect(new.calls.count == 1)
+    }
+
+    @Test func 运行期去掉区分引擎_进行中的只区分说话人照常落定_之后不能再区分() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(diarizer: old)
+        f.addTranscribedMeeting("m1")
+        f.addTranscribedMeeting("m2")
+
+        f.pipeline.enqueueDiarization("m1")
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7)
+        #expect(!f.pipeline.canDiarize)
+        #expect(f.pipeline.voiceprintModel == nil)
+        #expect(!f.pipeline.enqueueDiarization("m2"))
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.diarization == DiarizationState(status: .done))
+        #expect(try f.store.loadTranscript("m1")?.diarization?.voiceprintModel == "fake/voiceprint")
+    }
+
+    @Test func 运行期去掉区分引擎_已排队的只区分说话人记为失败并说明原因() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(diarizer: old)
+        f.addTranscribedMeeting("m1")
+        f.addTranscribedMeeting("m2")
+        f.pipeline.enqueueDiarization("m1")
+        f.pipeline.enqueueDiarization("m2")
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7)
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m2"]?.diarization
+            == DiarizationState(status: .failed, error: "所选声纹模型还不能用，下载好后再区分说话人"))
+        #expect(old.calls.count == 1)
+    }
+
+    @Test func 运行期去掉区分引擎_进行中的完整转写照常写上说话人() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(FakeTranscriber(twoPeople), diarizer: old)
+        f.addMeeting("m1")
+
+        f.pipeline.enqueue("m1")
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7)
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.diarization == DiarizationState(status: .done))
+        #expect(try f.store.loadTranscript("m1")?.diarization?.voiceprintModel == "fake/voiceprint")
+    }
+}
+
+/// 所选声纹模型还没下载完（spec「切换的语义」）：区分说话人排队「等待下载声纹模型」，下好后自动开始；
+/// 转写本身不等声纹模型
+@MainActor @Suite struct DiarizerDownloadWaitTests {
+    private let waiting = TranscriptionWaitReason.modelDownload(id: "new/voiceprint")
+
+    @Test func 完整转写照常保存_说话人排队等下载_不挡纪要_下好后自动区分() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        #expect(f.pipeline.canDiarize)
+        #expect(!f.pipeline.transcriptionDiarizes)
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        // 挂起的区分说话人不算忙：纪要照常开始
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript(m.id))
+        #expect(t.sentences.map(\.text) == ["我们开始吧", "好的我先说", "你接着讲", "没人说话时的噪声"])
+        #expect(t.diarization == nil)
+        #expect(f.host.meetings[m.id]?.transcription == TranscriptionState(status: .done))
+        #expect(f.host.meetings[m.id]?.diarization == DiarizationState(status: .queued))
+        #expect(f.store.loadAll().first?.diarization == DiarizationState(status: .queued))
+        #expect(f.finished.map(\.id) == [m.id])
+        #expect(f.pipeline.queue == [m.id])
+        #expect(f.pipeline.diarizationWaitReason(for: m.id) == waiting)
+        #expect(f.pipeline.waitReason(for: m.id) == nil)
+
+        let new = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2], voiceprintModel: "new/voiceprint")
+        f.pipeline.setDiarizer(new, voiceprintThreshold: 0.7)
+        try await f.until { f.host.meetings[m.id]?.diarization == DiarizationState(status: .done) }
+        try await f.drain()
+
+        let diarized = try #require(try f.store.loadTranscript(m.id))
+        #expect(diarized.diarization?.voiceprintModel == "new/voiceprint")
+        #expect(diarized.sentences.map(\.speaker) == ["spk1", "spk2", "spk1", nil])
+        #expect(f.pipeline.queue.isEmpty)
+        #expect(f.pipeline.diarizationWaitReason(for: m.id) == nil)
+        #expect(f.finished.map(\.id) == [m.id])
+    }
+
+    @Test func 开关关着时不排队区分说话人() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.pipeline.diarizes = false
+        let m = f.addMeeting()
+
+        f.pipeline.enqueue(m.id)
+        try await f.drain()
+
+        #expect(f.host.meetings[m.id]?.diarization == nil)
+        #expect(f.pipeline.queue.isEmpty)
+    }
+
+    @Test func 运行期切到没下载的模型_进行中的照常跑完_排队的和新入队的只区分说话人等下载_不失败() async throws {
+        let old = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2])
+        old.block = true
+        let f = Fixture(diarizer: old)
+        for id in ["m1", "m2", "m3"] { f.addTranscribedMeeting(id) }
+        f.pipeline.enqueueDiarization("m1")
+        f.pipeline.enqueueDiarization("m2", speakerCount: 2)
+        var started = old.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        #expect(f.pipeline.canDiarize)
+        #expect(f.pipeline.voiceprintModel == nil)
+        #expect(f.pipeline.enqueueDiarization("m3"))
+        old.block = false
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.diarization == DiarizationState(status: .done))
+        #expect(try f.store.loadTranscript("m1")?.diarization?.voiceprintModel == "fake/voiceprint")
+        for id in ["m2", "m3"] {
+            #expect(f.host.meetings[id]?.diarization == DiarizationState(status: .queued))
+            #expect(f.pipeline.diarizationWaitReason(for: id) == waiting)
+        }
+        #expect(f.pipeline.queue == ["m2", "m3"])
+
+        let new = FakeDiarizer(twoPeopleSegments, voiceprints: [7: vp1, 3: vp2], voiceprintModel: "new/voiceprint")
+        f.pipeline.setDiarizer(new, voiceprintThreshold: 0.7)
+        try await f.until { f.pipeline.queue.isEmpty && f.pipeline.activeID == nil }
+
+        for id in ["m2", "m3"] {
+            #expect(f.host.meetings[id]?.diarization == DiarizationState(status: .done))
+            #expect(try f.store.loadTranscript(id)?.diarization?.voiceprintModel == "new/voiceprint")
+        }
+        // 排队时指定的人数还在
+        #expect(new.calls.map(\.speakerCount) == [2, nil])
+        #expect(old.calls.count == 1)
+    }
+
+    @Test func 等下载时转写不受影响_排在前面的等待区分不挡后面的转写() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.addTranscribedMeeting("waiting")
+        #expect(f.pipeline.enqueueDiarization("waiting"))
+        f.addMeeting("new")
+
+        f.pipeline.enqueue("new")
+        try await f.drain()
+
+        #expect(f.host.meetings["new"]?.transcription == TranscriptionState(status: .done))
+        #expect(f.pipeline.queue == ["waiting", "new"])
+    }
+
+    @Test func 启动时恢复等下载的只区分说话人_保持排队() async throws {
+        let f = Fixture(FakeTranscriber(twoPeople))
+        f.pipeline.setDiarizer(nil, voiceprintThreshold: 0.7, waitReason: waiting)
+        f.pipeline.isSuspended = true
+        let queued = f.addTranscribedMeeting("queued")
+        f.host.setDiarization(DiarizationState(status: .queued), for: queued.id)
+
+        f.pipeline.restore([f.host.meetings[queued.id]!])
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.host.meetings[queued.id]?.diarization == DiarizationState(status: .queued))
+        #expect(f.pipeline.diarizationWaitReason(for: queued.id) == waiting)
+    }
+
+    @Test func 建管线时就在等下载() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaymeeCoreTests-\(UUID().uuidString)", isDirectory: true))
+        let host = FakeHost(store: store)
+        let pipeline = TranscriptionPipeline(store: store, transcriber: FakeTranscriber(), engine: "fake/1",
+                                             diarizer: nil, diarizerWaitReason: waiting, host: host)
+        #expect(pipeline.canDiarize)
+        #expect(pipeline.diarizerWaitReason == waiting)
+        try? FileManager.default.removeItem(at: store.root)
     }
 }
 

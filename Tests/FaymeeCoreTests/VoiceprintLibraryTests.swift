@@ -119,9 +119,34 @@ private func ids(_ prefix: String = "p") -> () -> String {
         #expect(id == "p1")
         #expect(library.people == [
             VoiceprintPerson(id: "p1", name: "张三", voiceprintModel: "vp-a", samples: [
-                VoiceprintSample(voiceprint: Voiceprint([0, 1]), meetingID: "m1", speechDuration: 12, addedAt: t0),
+                VoiceprintSample(voiceprint: Voiceprint([0, 1]), meetingID: "m1", speechDuration: 12, addedAt: t0,
+                                 source: VoiceprintSampleSource(speakerID: "spk2", speakersCreatedAt: t0)),
             ]),
         ])
+    }
+
+    /// 来源说话人（编号 + 那次区分的时间）留给换声纹模型时重算：从来源会议里找回这个人的句子
+    @Test func 登记时记下来源说话人_写盘后读回_旧文件没有这一项也能读() throws {
+        var library = VoiceprintLibrary()
+        let t = meeting([Speaker(id: "spk3", name: "张三", voiceprint: Voiceprint([1, 0]), speechDuration: 20)])
+        try library.enroll(speaker: "spk3", from: t, meetingID: "m1", now: t0, newID: ids())
+
+        #expect(library.people[0].samples[0].source == VoiceprintSampleSource(speakerID: "spk3", speakersCreatedAt: t0))
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = VoiceprintStore(url: dir.appendingPathComponent("voiceprints.json"))
+        try store.save(library)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as! [String: Any]
+        let sample = ((json["people"] as! [[String: Any]])[0]["samples"] as! [[String: Any]])[0]
+        #expect(sample["source"] as? [String: String] == ["speakerId": "spk3", "speakersCreatedAt": "2027-01-15T08:00:00Z"])
+        #expect(try store.load() == library)
+
+        try Data("""
+        {"people":[{"id":"p1","name":"张三","voiceprintModel":"vp-a","samples":[
+          {"voiceprint":"AACAPwAAAMA=","meetingId":"m1","speechDuration":12,"addedAt":"2027-01-15T08:00:00Z"}]}]}
+        """.utf8).write(to: store.url)
+        #expect(try store.load().people[0].samples[0].source == nil)
     }
 
     @Test func 同名已有人员时加样本而不是新建() throws {
@@ -134,10 +159,10 @@ private func ids(_ prefix: String = "p") -> () -> String {
 
         #expect(id == "p1")
         #expect(library.people.count == 1)
-        #expect(library.people[0].samples == [
-            VoiceprintSample(voiceprint: Voiceprint([1, 0]), meetingID: "m1", speechDuration: 20, addedAt: t0),
-            VoiceprintSample(voiceprint: Voiceprint([0, 1]), meetingID: "m2", speechDuration: 15, addedAt: t0 + 60),
-        ])
+        #expect(library.people[0].samples.map(\.voiceprint) == [Voiceprint([1, 0]), Voiceprint([0, 1])])
+        #expect(library.people[0].samples.map(\.meetingID) == ["m1", "m2"])
+        #expect(library.people[0].samples.map(\.speechDuration) == [20, 15])
+        #expect(library.people[0].samples.map(\.addedAt) == [t0, t0 + 60])
     }
 
     /// 合并说话人后声纹变了，再登记一次：同一场会议只留一份样本
@@ -156,7 +181,8 @@ private func ids(_ prefix: String = "p") -> () -> String {
 
         #expect(library.people[0].samples.map(\.meetingID) == ["m2", "m1"])
         #expect(library.people[0].samples[1] ==
-            VoiceprintSample(voiceprint: Voiceprint([1, 1]), meetingID: "m1", speechDuration: 40, addedAt: t0 + 2))
+            VoiceprintSample(voiceprint: Voiceprint([1, 1]), meetingID: "m1", speechDuration: 40, addedAt: t0 + 2,
+                             source: VoiceprintSampleSource(speakerID: "spk1", speakersCreatedAt: t0)))
     }
 
     @Test func 每人最多十个样本超出时丢最早的() throws {
@@ -183,7 +209,8 @@ private func ids(_ prefix: String = "p") -> () -> String {
         #expect(id == "p1")
         #expect(library.people == [
             VoiceprintPerson(id: "p1", name: "张三", voiceprintModel: "vp-a", samples: [
-                VoiceprintSample(voiceprint: Voiceprint([0, 1]), meetingID: "m1", speechDuration: 12, addedAt: t0 + 5),
+                VoiceprintSample(voiceprint: Voiceprint([0, 1]), meetingID: "m1", speechDuration: 12, addedAt: t0 + 5,
+                                 source: VoiceprintSampleSource(speakerID: "spk1", speakersCreatedAt: t0)),
             ]),
         ])
     }
