@@ -50,6 +50,30 @@ struct CorrectionModelContractTests {
     }
 
     @Test(arguments: correctionModels.map(\.id))
+    func 契约_长会议按真实分段大小_几百个id的文法照样能用(id: String) async throws {
+        let entry = try #require(ModelCatalog.builtIn.model(id: id))
+        let generator = LlamaTextGenerator(catalogModel: entry, directory: modelsDirectory)
+        defer { generator.unload() }
+        try await generator.load { _ in }
+        // 周会重复 6 遍（约 220 句），编号接着排：一段能装下约 200 句，文法里就有约 200 个 id、{0,~200}
+        let base = try transcriptWithErrors().sentences
+        let sentences = (0..<6).flatMap { round in
+            base.enumerated().map { i, s in
+                TranscriptSentence(id: "s\(round * base.count + i + 1)", start: Double(round * 300) + s.start,
+                                   end: Double(round * 300) + s.end, text: s.text)
+            }
+        }
+        let transcript = Transcript(engine: "apple/speechanalyzer", createdAt: Date(timeIntervalSince1970: 0),
+                                    hotwords: [], items: sentences.map { .sentence($0) })
+        let started = Date()
+        let review = try await correctTranscript(transcript, title: "十一月迭代周会", hotwords: [], method: .wordFixes,
+                                                 generator: generator)
+        print("\(id) \(sentences.count) 句纠错 \(String(format: "%.1f", Date().timeIntervalSince(started))) 秒："
+              + "改了 \(review.texts.count) 句，挡掉 \(review.rejections)")
+        #expect(review.rejections[CorrectionRule.unparseable.rawValue] == nil)
+    }
+
+    @Test(arguments: correctionModels.map(\.id))
     func 契约_整场纠错跑通_输出都能解析(id: String) async throws {
         let entry = try #require(ModelCatalog.builtIn.model(id: id))
         let generator = LlamaTextGenerator(catalogModel: entry, directory: modelsDirectory)
