@@ -65,4 +65,71 @@ import Testing
         #expect(r.texts.isEmpty)
         #expect(r.rejections == [CorrectionRule.insertion.rawValue: 1])
     }
+
+    // MARK: 删字（规则 5）
+
+    @Test(arguments: [
+        ("好的 [breath] 我们开始", "好的我们开始"),
+        ("调 agent [breath] 的接口", "调 agent 的接口"),
+        ("我们先 /sil 看一下", "我们先看一下"),
+    ])
+    func 删标记过(text: String, corrected: String) {
+        let r = review(["s1": corrected], in: [text])
+        #expect(r.texts == ["s1": corrected])
+        #expect(r.rejections.isEmpty)
+    }
+
+    @Test(arguments: [
+        ("那我们就开始吧吧吧吧吧吧", "那我们就开始吧"),
+        ("好的好的好的好的好的我们开始", "好的我们开始"),
+        ("好的，好的，好的，好的，好的，我们开始", "好的，我们开始"),
+    ])
+    func 删连续重复五次以上的复读_保留一次过(text: String, corrected: String) {
+        let r = review(["s1": corrected], in: [text])
+        #expect(r.texts == ["s1": corrected])
+        #expect(r.rejections.isEmpty)
+    }
+
+    @Test func 复读删得一次不留不过() {
+        let r = review(["s1": "那我们就开始"], in: ["那我们就开始吧吧吧吧吧吧"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+    }
+
+    @Test func 只重复四次不算复读残留() {
+        let r = review(["s1": "那我们就开始吧"], in: ["那我们就开始吧吧吧吧"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+    }
+
+    @Test(arguments: [
+        ("我我我觉得可以", "我觉得可以"),
+        ("就是就是这个问题", "就是这个问题"),
+        ("嗯我们开始吧", "我们开始吧"),
+        ("那个接口还没好", "接口还没好"),
+        ("接口还没有准备好", "接口没有准备好"),
+    ])
+    func 口吃和口语词不删(text: String, corrected: String) {
+        let r = review(["s1": corrected], in: [text])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+    }
+
+    @Test func 与上一句完全相同的整句重复可以删成空句() {
+        let r = review(["s2": ""], in: ["我们下周发布", "我们下周发布", "好的"])
+        #expect(r.texts == ["s2": ""])
+        #expect(r.rejections.isEmpty)
+    }
+
+    @Test func 删整句只认与上一句相同_两句不会都删掉() {
+        let r = review(["s1": "", "s2": ""], in: ["我们下周发布", "我们下周发布"])
+        #expect(r.texts == ["s2": ""])
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+    }
+
+    @Test func 与相邻句不同的整句不能删() {
+        let r = review(["s2": ""], in: ["我们下周发布", "我们下周再发布"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
+    }
 }

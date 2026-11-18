@@ -206,7 +206,7 @@ public enum ASROutputGuard {
     // MARK: - 标记
 
     /// `[breath]`、`[laughter]` 这类方括号里的英文标记，`/sil`，`<|im_end|>` 这类特殊 token；连同两边的空白一起匹配
-    private static let marker = try! NSRegularExpression(
+    static let marker = try! NSRegularExpression(
         pattern: #"\s*(?:\[[A-Za-z_ ]+\]|/sil\b|<\|[^|>]*\|>)\s*"#)
 
     /// 删掉模型输出里的标记。标记两边原来有空格、且有一边是英文或数字时留一个空格（模型在中英文之间加空格：
@@ -229,6 +229,15 @@ public enum ASROutputGuard {
         }
         result += ns.substring(from: last)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 文字里各个标记（连同两边的空白）的字符位置（`Character` 下标）。纠错删字认识别残留时用
+    static func markerRanges(in text: String) -> [Range<Int>] {
+        marker.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            guard let r = Range(match.range, in: text) else { return nil }
+            let lower = text.distance(from: text.startIndex, to: r.lowerBound)
+            return lower..<lower + text[r].count
+        }
     }
 
     private static func isLatin(_ c: Character) -> Bool {

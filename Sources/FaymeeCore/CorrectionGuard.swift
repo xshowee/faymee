@@ -200,6 +200,7 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
                             context: CorrectionContext) -> CorrectionReview {
     var review = CorrectionReview()
     let diff = TextDiff(from: sentence.text, to: corrected)
+    let residue = RecognitionResidue(diff, sentence: sentence, sentences: context.sentences)
     var applied: [TextDiff.Segment] = []
     var suggestions: [NumberSuggestion] = []
     var discardedNumbers = 0
@@ -214,7 +215,7 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
         let bounds = changes.map { $0.offset..<$0.offset + $0.before.count }
             .first { $0.contains(segment.beforeRange.lowerBound) || $0.upperBound == segment.beforeRange.lowerBound }
             ?? 0..<sentence.text.count
-        switch check(segment, in: diff, bounds: bounds, sentence: sentence, context: context) {
+        switch check(segment, in: diff, bounds: bounds, residue: residue, sentence: sentence, context: context) {
         case .apply(let counts):
             applied.append(segment)
             counted += counts
@@ -255,7 +256,7 @@ private enum Verdict {
     case reject(CorrectionRule)
 }
 
-private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range<Int>,
+private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range<Int>, residue: RecognitionResidue,
                    sentence: TranscriptSentence, context: CorrectionContext) -> Verdict {
     switch (segment.kind, context.scope) {
     case (_, .wordsOnly) where segment.kind != .replace:
@@ -272,8 +273,8 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
         }
         return .apply(counts: inserted)
     case (.delete, .full):
-        // ticket 03：规则 5（只删识别残留，残留的删除不计入规则 6）
-        return .reject(.deletion)
+        // 规则 5：只删识别残留，残留的删除不计入规则 6
+        return residue.isResidue(segment) ? .apply(counts: 0) : .reject(.deletion)
     default:
         break
     }
