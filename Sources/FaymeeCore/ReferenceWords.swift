@@ -19,11 +19,13 @@ public struct ReferenceWords: Sendable {
     /// 转写稿各句里的整词出现几次：全部句子合计，和每句自己的。相减就是「别处」
     let wordCounts: [String: Int]
     let wordCountsBySentence: [String: [String: Int]]
+    /// 以上各种参考词里最长的有几个字，`match` 最长试到这么长
+    let longestWord: Int
 
     public static let minimumLength = 2
     /// 在转写稿别处至少出现这么多次才算参考词
     public static let minimumOccurrences = 2
-    /// 从转写稿别处找参考词时，候选最长几个字
+    /// 标题、转写稿里几个词连起来的参考词最长几个字（单个词再长也算，如 LangChain）
     static let maximumCandidateLength = 8
 
     public init(hotwords: [String], speakerNames: [String], title: String, sentences: [TranscriptSentence]) {
@@ -45,6 +47,7 @@ public struct ReferenceWords: Sendable {
         }
         wordCounts = total
         wordCountsBySentence = bySentence
+        longestWord = (words + titleWords + total.keys).map(\.count).max() ?? 0
     }
 
     /// 参考词提示词里列出的词：热词、说话人名字、标题各段
@@ -54,10 +57,9 @@ public struct ReferenceWords: Sendable {
     /// `range` 为空（补字）时，覆盖插入点即可
     public func match(in text: String, covering range: Range<Int>, sentence: String) -> Range<Int>? {
         let chars = Array(text)
-        let longest = max(Self.maximumCandidateLength, words.map(\.count).max() ?? 0)
         let shortest = max(Self.minimumLength, range.count)
-        guard shortest <= min(longest, chars.count) else { return nil }
-        for length in stride(from: min(longest, chars.count), through: shortest, by: -1) {
+        guard shortest <= min(longestWord, chars.count) else { return nil }
+        for length in stride(from: min(longestWord, chars.count), through: shortest, by: -1) {
             let first = max(0, range.upperBound - length)
             let last = min(range.lowerBound, chars.count - length)
             guard first <= last else { continue }
@@ -77,7 +79,7 @@ public struct ReferenceWords: Sendable {
     }
 
     /// `text` 里的整词：系统分词（`NLTagger`）后，连续的实词连起来的各段，`minimumLength`–`maximumCandidateLength`
-    /// 个字（有重复，按出现次数）。分词常把一个词切开（智能|体、端|到|端），所以连续几个实词连起来也算。
+    /// 个字，单个词不限长（有重复，按出现次数）。分词常把一个词切开（智能|体、端|到|端），所以连续几个实词连起来也算。
     /// 实词是名词、动词、形容词、成语，以及不含数字的 2 字以上其他词（分词器认不出类别的「模型」「差不多」）；
     /// 代词（含人称代词的字，分词器偶尔标错）、副词（「不」）、助词、介词、连词、数字、标点处断开
     static func wholeWords(in text: String) -> [String] {
@@ -94,7 +96,7 @@ public struct ReferenceWords: Sendable {
             for last in first..<tokens.count {
                 guard tokens[last].isContent else { break }
                 let word = text[tokens[first].range.lowerBound..<tokens[last].range.upperBound]
-                guard word.count <= maximumCandidateLength else { break }
+                guard word.count <= maximumCandidateLength || first == last else { break }
                 if word.count >= minimumLength { words.append(String(word)) }
             }
         }

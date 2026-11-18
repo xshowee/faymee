@@ -69,6 +69,16 @@ import Testing
         #expect(references.match(in: "能体", covering: 0..<2, sentence: "s1") == nil)
     }
 
+    @Test func 超过八个字母的英文词也能是参考词() {
+        let text = "我们用LangChain搭了原型"
+        let fromTitle = ReferenceWords(hotwords: [], speakerNames: [], title: "LangChain 评审会",
+                                       sentences: sentences([text]))
+        #expect(fromTitle.match(in: text, covering: 3..<12, sentence: "s1") == 3..<12)
+        let elsewhere = ReferenceWords(hotwords: [], speakerNames: [], title: "",
+                                       sentences: sentences([text, "LangChain 的文档", "换成 LangChain 以后"]))
+        #expect(elsewhere.match(in: text, covering: 3..<12, sentence: "s1") == 3..<12)
+    }
+
     @Test(arguments: [
         ("他们下午过来", "他们", "我们", ["我们下午开会", "我们先过一遍"]),
         ("他是说明天来", "是说", "不说", ["他不说明天的事", "我们不说这个"]),
