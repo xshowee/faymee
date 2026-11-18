@@ -105,6 +105,7 @@ struct TranscriptSection: View {
         // 转写稿由 MeetingDetail 在转写、说话人状态变化时重读，之前的保存错误随之作废
         .onChange(of: meeting.transcription) { saveError = nil }
         .onChange(of: meeting.diarization) { saveError = nil }
+        .onChange(of: meeting.correction) { saveError = nil }
         .onChange(of: meeting.id) {
             voiceprintNotice = nil
             enrollOffer = nil
@@ -1020,8 +1021,9 @@ private struct TranscriptSentenceRow: View {
     private var highlightedText: Text {
         guard sentence.correction != nil else { return Text(sentence.text) }
         var text = AttributedString(sentence.text)
-        let chars = text.characters
-        for range in sentence.correctionHighlights where range.upperBound <= chars.count {
+        for range in sentence.correctionHighlights where range.upperBound <= text.characters.count {
+            // 每次从当前的值取下标：改过属性后不沿用旧值的下标
+            let chars = text.characters
             let lower = chars.index(chars.startIndex, offsetBy: range.lowerBound)
             let upper = chars.index(chars.startIndex, offsetBy: range.upperBound)
             text[lower..<upper].underlineStyle = Text.LineStyle(pattern: .solid, color: .accentColor.opacity(0.7))
