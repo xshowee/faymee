@@ -13,9 +13,14 @@ private func reasoningTokens(_ transport: RecordingHTTPTransport) -> [Int] {
     }
 }
 
+/// 每次请求的结束原因
+private func finishReasons(_ transport: RecordingHTTPTransport) -> [String?] {
+    transport.exchanges.map { (($0.json?["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String) }
+}
+
 /// 在线整句改写纠错的真实请求契约测试（可选）：设 `FAYMEE_ONLINE_CONTRACT=1` 和 `FAYMEE_DEEPSEEK_API_KEY` 才跑。
-/// 只发这里写的合成文字。检查的是请求被接受（JSON 模式、关思考）、服务端没有思考、输出能解析、
-/// 过护栏后口吃和口语词原样保留，
+/// 只发这里写的合成文字。检查的是请求被接受（JSON 模式、按模型放大的输出上限）、默认思考的模型照常思考且
+/// 思考没有吃光上限、输出能解析、过护栏后口吃和口语词原样保留，
 /// 不比较纠错准确率（spec「测试决定」最后一条）
 @Suite(.enabled(if: env["FAYMEE_ONLINE_CONTRACT"] == "1" && !deepSeekKey.isEmpty,
                 "设 FAYMEE_ONLINE_CONTRACT=1 和 FAYMEE_DEEPSEEK_API_KEY 才跑"))
@@ -68,8 +73,11 @@ struct OnlineCorrectionContractTests {
         let reasoning = reasoningTokens(transport)
         print("纠错 思考 token: \(reasoning)")
 
-        // 纠错关思考：deepseek-flash 默认思考，思考吃光输出上限时正文为空（FAYMEE_DEEPSEEK_MODEL=deepseek-flash）
-        #expect(!reasoning.isEmpty && reasoning.allSatisfy { $0 == 0 })
+        // 纠错开着思考：deepseek-flash 默认思考（FAYMEE_DEEPSEEK_MODEL=deepseek-flash），deepseek-chat 是它的非思考模式；
+        // 思考和正文都装进了上限（结束原因是 stop，不是 length）
+        #expect(!reasoning.isEmpty)
+        if config.trimmedModel == "deepseek-flash" { #expect(reasoning.allSatisfy { $0 > 0 }) }
+        #expect(finishReasons(transport).allSatisfy { $0 == "stop" })
 
         #expect(review.rejections[CorrectionRule.unparseable.rawValue] == nil)
         // 口吃、口语词所在的句子：改了也只能是换字词或补字，不会删掉「我我我」「嗯」「那个」
