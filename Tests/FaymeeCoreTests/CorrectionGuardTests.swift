@@ -147,6 +147,20 @@ import Testing
         #expect(r.texts == ["s1": "工位上大家都很被动"])
     }
 
+    // MARK: 否定词、人称代词（spec 之外的保守护栏）
+
+    @Test(arguments: [
+        ("明天我们去公司", "我们去", "他们去"),
+        ("这件事能完成就行", "能完成", "不完成"),
+        ("我们不要开会了", "不要开", "需要开"),
+        ("现在没有问题", "没有", "还有"),
+    ])
+    func 增删或换掉否定词_人称代词的整句不改(text: String, from: String, to: String) {
+        let r = review([fix(from, to)], in: [text])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.negationOrPronoun.rawValue: 1])
+    }
+
     // MARK: 数字
 
     @Test func 十月改四月转为建议_不应用() {

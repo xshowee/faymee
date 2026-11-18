@@ -33,6 +33,41 @@ import Testing
         #expect(r.rejections.isEmpty)
     }
 
+    // MARK: 否定词、人称代词（spec 之外的保守护栏）
+
+    @Test(arguments: [
+        ("明天我们去公司", "明天他们去公司"),
+        ("能完成就行", "不完成就行"),
+        ("我们不要开会了", "我们需要开会了"),
+        ("现在没有问题", "现在还有问题"),
+        ("明天我们去公司", "明天我们不去公司"),
+        ("我觉得可以", "我们觉得可以"),
+    ])
+    func 增删或换掉否定词_人称代词的整句不改(text: String, corrected: String) {
+        let r = review(["s1": corrected], in: [text])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.negationOrPronoun.rawValue: 1])
+    }
+
+    @Test(arguments: [
+        ("我们要避免对动的局面", "我们要避免被动的局面"),
+        ("他在工会上说了这件事", "他在工位上说了这件事"),
+        ("我们做一个端道的方案", "我们做一个端到端方案"),
+        ("请公老师来讲一下", "请龚老师来讲一下"),
+        ("我们用long chain搭了原型", "我们用LangChain搭了原型"),
+    ])
+    func 不碰否定词_人称代词的换字词照常应用(text: String, corrected: String) {
+        let r = review(["s1": corrected], in: [text])
+        #expect(r.texts == ["s1": corrected])
+        #expect(r.rejections.isEmpty)
+    }
+
+    @Test func 删含人称代词的复读残留照常() {
+        let r = review(["s1": "好的我觉得可以"], in: ["好的我我我我我我我觉得可以"])
+        #expect(r.texts == ["s1": "好的我觉得可以"])
+        #expect(r.rejections.isEmpty)
+    }
+
     // MARK: 补字（规则 4）
 
     @Test func 补单字不限来源() {

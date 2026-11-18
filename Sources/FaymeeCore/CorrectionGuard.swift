@@ -27,6 +27,9 @@ public enum CorrectionRule: String, Codable, CaseIterable, Sendable {
     case changeRatio
     /// 规则 7：数字建议读音不近、改后的数字在别处也没出现过，丢弃（只丢这条建议，不连累同一句的其他修改）
     case number
+    /// 增删或换掉了否定词（不、没、别、未、无、非）或人称代词（我、你、他……及「们」的形式）：读音再近，
+    /// 意思也反了或换了人。spec 之外的保守护栏，同「宁可漏改，不能编造」；识别残留照删
+    case negationOrPronoun
     /// 模型输出解析不出（重试后仍不行），这一段没有修改
     case unparseable
 }
@@ -277,6 +280,20 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
     if segment.kind == .delete, residue.isResidue(segment) {
         return .apply(counts: 0)
     }
+    let verdict = checkContent(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
+    // 否定词、人称代词：其他规则都过了也不改。按最小改动处看，拼音按扩开的范围比也藏不住
+    switch verdict {
+    case .apply, .suggest:
+        if changesNegationOrPronoun(segment, in: diff) { return .reject(.negationOrPronoun) }
+    default:
+        break
+    }
+    return verdict
+}
+
+/// 替换、补字、删字（不是识别残留的）逐条过规则 3、4、5、7
+private func checkContent(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range<Int>,
+                          sentence: TranscriptSentence, context: CorrectionContext) -> Verdict {
     // 规则 7：任一边含数字的一处（替换、补字、删字都算）不应用，转为数字建议
     if containsNumber(segment.before) || containsNumber(segment.after) {
         let near = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
@@ -320,6 +337,28 @@ private func pinyinCheck(_ segment: TextDiff.Segment, in diff: TextDiff, bounds:
     return Pinyin.distanceRatio(widened.before, widened.after) <= CorrectionThreshold.pinyin
 }
 
+/// 一处改动两边的否定词、人称代词（按出现先后）是否不同：增、删、换都算。
+/// 「们」并到前面的代词上，「我→我们」「他们→我们」都算换了人，即使改动处只是「们」或「他→我」
+private func changesNegationOrPronoun(_ segment: TextDiff.Segment, in diff: TextDiff) -> Bool {
+    func words(_ text: String, _ range: Range<Int>) -> [String] {
+        let chars = Array(text)
+        var found: [String] = []
+        for i in range {
+            let c = chars[i]
+            if negationCharacters.contains(c) {
+                found.append(String(c))
+            } else if personalPronounCharacters.contains(c) {
+                found.append(i + 1 < chars.count && chars[i + 1] == "们" ? "\(c)们" : String(c))
+            } else if c == "们", i == range.lowerBound, i > 0, personalPronounCharacters.contains(chars[i - 1]) {
+                // 前面的代词不在改动处里（在里面的话上面已经带上「们」了）
+                found.append("\(chars[i - 1])们")
+            }
+        }
+        return found
+    }
+    return words(diff.before, segment.beforeRange) != words(diff.after, segment.afterRange)
+}
+
 /// 改动的两边去掉空白后相同
 private func isWhitespaceOnly(_ segment: TextDiff.Segment) -> Bool {
     segment.before.filter { !$0.isWhitespace } == segment.after.filter { !$0.isWhitespace }
@@ -338,6 +377,9 @@ func exceedsChangeRatio(changed: Int, sentence: String) -> Bool {
 func characterCount(_ text: String) -> Int {
     text.count { !TextDiff.isPunctuation(String($0)) }
 }
+
+/// 否定词的字
+let negationCharacters: Set<Character> = ["不", "没", "别", "未", "无", "非"]
 
 /// 人称代词的字（「我们」「他们」随前一个字算）。参考词不收含这些字的词（`ReferenceWords.wholeWords(in:)`）
 let personalPronounCharacters: Set<Character> = ["我", "你", "您", "他", "她", "它", "咱"]
