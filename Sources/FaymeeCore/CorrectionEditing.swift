@@ -58,7 +58,7 @@ extension Transcript {
     }
 
     private static func canAdopt(_ suggestion: NumberSuggestion, in s: TranscriptSentence) -> Bool {
-        s.original == nil && !suggestion.from.isEmpty && s.text.components(separatedBy: suggestion.from).count == 2
+        s.original == nil && !suggestion.from.isEmpty && s.text.occurrences(of: suggestion.from) == 1
     }
 }
 

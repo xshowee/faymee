@@ -163,7 +163,7 @@ func correctionSystemPrompt(_ method: CorrectionMethod, references: [String], sp
     }
 }
 
-/// 一段的提示词：标题、只读上文、要校对的转写稿
+/// 一段的提示词：标题、只读上文、这一段要纠错的句子
 func correctionPrompt(title: String, context: [String], lines: [String]) -> String {
     var parts = ["会议标题：\(title)"]
     if !context.isEmpty { parts.append("上文（只读，不要改）：\n" + context.joined(separator: "\n")) }
