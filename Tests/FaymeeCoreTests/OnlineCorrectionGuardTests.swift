@@ -132,4 +132,33 @@ import Testing
         #expect(r.texts.isEmpty)
         #expect(r.rejections == [CorrectionRule.deletion.rawValue: 1])
     }
+
+    // MARK: 数字（规则 7）
+
+    @Test func 改数字转为建议_不应用() {
+        let r = review(["s1": "我们四月底上线"], in: ["我们十月底上线"])
+        #expect(r.texts.isEmpty)
+        #expect(r.suggestions == [NumberSuggestion(sentence: "s1", from: "十月", to: "四月")])
+    }
+
+    @Test func 补数字也转为建议() {
+        let r = review(["s1": "我们十一月底上线"], in: ["我们十月底上线"])
+        #expect(r.texts.isEmpty)
+        #expect(r.suggestions == [NumberSuggestion(sentence: "s1", from: "十月", to: "十一月")])
+    }
+
+    @Test func 同一句里的非数字修改照常应用() {
+        let r = review(["s1": "我们四月底之前别太被动"], in: ["我们十月底之前别太对动"])
+        #expect(r.texts == ["s1": "我们十月底之前别太被动"])
+        #expect(r.suggestions == [NumberSuggestion(sentence: "s1", from: "十月", to: "四月")])
+    }
+
+    @Test func 建议的原文在句子里只出现一次_采纳时换得到模型改的那处() throws {
+        let text = "我们三点开会，三点半结束"
+        let r = review(["s1": "我们四点开会，三点半结束"], in: [text])
+        let suggestion = try #require(r.suggestions.first)
+        #expect(r.suggestions.count == 1)
+        #expect(text.occurrences(of: suggestion.from) == 1)
+        #expect(text.replacingOccurrences(of: suggestion.from, with: suggestion.to) == "我们四点开会，三点半结束")
+    }
 }

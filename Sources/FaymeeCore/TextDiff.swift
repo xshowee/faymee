@@ -95,6 +95,30 @@ public struct TextDiff: Sendable {
         return text(lo...hi)
     }
 
+    /// 数字建议的单元：先向两边并上紧挨着的、`attach` 认的相同文字（数字和「月」「点」这类单位），
+    /// 原文一边为空或在原文里不止出现一次时，再在 `bounds` 里先左后右逐字扩，直到在原文里只出现一次。
+    /// 采纳建议时把原文唯一的那处换掉（ticket 02），所以必须唯一；扩到头也不唯一时为 nil
+    func suggestionUnit(_ segment: Segment, within bounds: Range<Int>?,
+                        attach: (String) -> Bool) -> (before: String, after: String)? {
+        guard var lo = segment.ops.min(), var hi = segment.ops.max() else { return nil }
+        func extendable(_ i: Int) -> Bool {
+            guard ops.indices.contains(i), ops[i].kind == .equal, !ops[i].isPunctuation else { return false }
+            guard let bounds else { return true }
+            return bounds.lowerBound <= ops[i].beforeRange.lowerBound && ops[i].beforeRange.upperBound <= bounds.upperBound
+        }
+        while extendable(lo - 1), attach(ops[lo - 1].token) { lo -= 1 }
+        while extendable(hi + 1), attach(ops[hi + 1].token) { hi += 1 }
+        var leftTurn = true
+        while true {
+            let unit = text(lo...hi)
+            if !unit.before.isEmpty, before.occurrences(of: unit.before) == 1 { return unit }
+            let canLeft = extendable(lo - 1), canRight = extendable(hi + 1)
+            guard canLeft || canRight else { return nil }
+            if (leftTurn && canLeft) || !canRight { lo -= 1 } else { hi += 1 }
+            leftTurn.toggle()
+        }
+    }
+
     /// 改后文字里 `range` 所覆盖的比对步骤连同中间的改动，两边各是什么文字。
     /// 参考词校验用：改后命中参考词时，按整个参考词与对应的原文比拼音
     func span(coveringAfter range: Range<Int>) -> (before: String, after: String) {

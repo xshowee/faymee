@@ -263,7 +263,20 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
         return .reject(.scope)
     case (.punctuation, .full):
         return .apply(counts: 0)
-    case (.insert, .full):
+    default:
+        break
+    }
+    // 规则 7：任一边含数字的一处（替换、补字、删字都算）不应用，转为数字建议
+    if containsNumber(segment.before) || containsNumber(segment.after) {
+        let near = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
+        guard let unit = diff.suggestionUnit(segment, within: bounds, attach: isNumberPart),
+              near || context.references.occursElsewhere(unit.after, sentence: sentence.id) else {
+            return .discardSuggestion
+        }
+        return .suggest(unit)
+    }
+    switch segment.kind {
+    case .insert:
         // 规则 4：连续补 2 个字以上的须是参考词，或在前后几句里出现过；补的字计入规则 6
         let inserted = characterCount(segment.after)
         if inserted >= 2,
@@ -272,37 +285,28 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
             return .reject(.insertion)
         }
         return .apply(counts: inserted)
-    case (.delete, .full):
+    case .delete:
         // 规则 5：只删识别残留，残留的删除不计入规则 6
         return residue.isResidue(segment) ? .apply(counts: 0) : .reject(.deletion)
     default:
         break
     }
-    // 换字词：规则 3、7
-    let (unit, near) = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
-    if containsNumber(segment.before) || containsNumber(segment.after) {
-        guard near || context.references.occursElsewhere(unit.after, sentence: sentence.id) else {
-            return .discardSuggestion
-        }
-        return .suggest(unit)
-    }
+    // 换字词：规则 3
+    let near = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
     // 读音不近的替换一律不收（本机只换读音相近的字词；在线也按 spec「改成读音不近的词」应挡）
     return near ? .apply(counts: 0) : .reject(.pinyin)
 }
 
-/// 规则 3：改后命中参考词时按整个参考词与对应原文比，门槛 0.5；否则按改动处在 `bounds` 里扩到
-/// `CorrectionThreshold.pinyinUnit` 个字比，门槛 0.34。返回比较的那一段和是否读音相近
+/// 规则 3：读音是否相近。改后命中参考词时按整个参考词与对应原文比，门槛 0.5；否则按改动处在 `bounds` 里扩到
+/// `CorrectionThreshold.pinyinUnit` 个字比，门槛 0.34
 private func pinyinCheck(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range<Int>,
-                         sentence: TranscriptSentence,
-                         context: CorrectionContext) -> (unit: (before: String, after: String), near: Bool) {
-    let widened = diff.widened(segment, minimum: CorrectionThreshold.pinyinUnit, within: bounds)
+                         sentence: TranscriptSentence, context: CorrectionContext) -> Bool {
     if let reference = context.references.match(in: diff.after, covering: segment.afterRange, sentence: sentence.id) {
         let unit = diff.span(coveringAfter: reference)
-        if Pinyin.distanceRatio(unit.before, unit.after) <= CorrectionThreshold.pinyinReference {
-            return (widened, true)
-        }
+        if Pinyin.distanceRatio(unit.before, unit.after) <= CorrectionThreshold.pinyinReference { return true }
     }
-    return (widened, Pinyin.distanceRatio(widened.before, widened.after) <= CorrectionThreshold.pinyin)
+    let widened = diff.widened(segment, minimum: CorrectionThreshold.pinyinUnit, within: bounds)
+    return Pinyin.distanceRatio(widened.before, widened.after) <= CorrectionThreshold.pinyin
 }
 
 /// 规则 6：`changed` 个字是否超过这句允许的改动量。原句字数不算标点、空白
@@ -322,6 +326,11 @@ func characterCount(_ text: String) -> Int {
 /// 规则 7：含阿拉伯数字或汉字数字字符
 func containsNumber(_ text: String) -> Bool {
     text.contains { $0.isASCII && $0.isNumber || "〇零一二三四五六七八九十百千万亿两".contains($0) }
+}
+
+/// 数字建议的单元向两边并上的字：数字，以及跟在数字后面的单位
+private func isNumberPart(_ token: String) -> Bool {
+    containsNumber(token) || (token.count == 1 && "年月日号点时分秒周天个元块角毛万亿倍度岁%％".contains(token))
 }
 
 /// 把几条（按 offset 排好、不重叠的）修改应用到句子上；某条的 before 与句子对不上时为 nil
