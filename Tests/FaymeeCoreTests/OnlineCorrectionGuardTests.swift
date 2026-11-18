@@ -161,4 +161,40 @@ import Testing
         #expect(text.occurrences(of: suggestion.from) == 1)
         #expect(text.replacingOccurrences(of: suggestion.from, with: suggestion.to) == "我们四点开会，三点半结束")
     }
+
+    // MARK: 改动比例（规则 6）
+
+    @Test func 补字超过改动比例不过_含不到十字的短句() {
+        // 5 个字的短句最多改 3 个字
+        #expect(review(["s1": "我们了开了会了吧"], in: ["我们开会吧"]).texts.count == 1)
+        let short = review(["s1": "我了们了开了会了吧"], in: ["我们开会吧"])
+        #expect(short.texts.isEmpty)
+        #expect(short.rejections == [CorrectionRule.changeRatio.rawValue: 1])
+        // 12 个字最多改 3 个字（30% 向下取整）
+        let long = review(["s1": "这了个方了案我了们下周再了讨论一下"], in: ["这个方案我们下周再讨论一下"])
+        #expect(long.texts.isEmpty)
+        #expect(long.rejections == [CorrectionRule.changeRatio.rawValue: 1])
+    }
+
+    @Test func 识别残留的删除和过了拼音校验的替换不计入改动比例() {
+        let r = review(["s1": "开始吧"], in: ["开始吧吧吧吧吧吧"])
+        #expect(r.texts == ["s1": "开始吧"])
+        // 12 个字最多改 3 个字，这里换了 4 个字，都过了拼音校验
+        let replace = review(["s1": "工位上说端到端方案很被动"], in: ["工会上说端道的方案很对动"])
+        #expect(replace.texts == ["s1": "工位上说端到端方案很被动"])
+    }
+
+    // MARK: 应挡（在线也一样）
+
+    @Test func 改写整句_改说法不过() {
+        let r = review(["s1": "这个方案下次会议再说吧"], in: ["我们下周再讨论这个方案"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections.values.reduce(0, +) == 1)
+    }
+
+    @Test func 改只读上下文不过() {
+        let r = review(["s1": "我们要避免被动的局面"], in: ["我们要避免对动的局面", "第二句"], editable: ["s2"])
+        #expect(r.texts.isEmpty)
+        #expect(r.rejections == [CorrectionRule.notEditable.rawValue: 1])
+    }
 }
