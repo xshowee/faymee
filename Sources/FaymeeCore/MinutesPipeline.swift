@@ -289,7 +289,10 @@ public final class MinutesPipeline {
               !(activeJob?.id == id && activeJob?.isCorrection == true) else { return false }
         if let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) {
             jobs[i].now = jobs[i].now || now
-            if autoMinutes { jobs[i].kind = .correction(autoMinutes: true) }
+            if autoMinutes, case .correction(autoMinutes: false) = jobs[i].kind {
+                jobs[i].kind = .correction(autoMinutes: true)
+                setState(.queued, for: jobs[i])
+            }
         } else {
             let job = Job(id: id, kind: .correction(autoMinutes: autoMinutes), now: now)
             jobs.append(job)
@@ -341,20 +344,24 @@ public final class MinutesPipeline {
     /// 队列顺序、“现在生成”、所选模板都不落盘：上次正在生成的排最前，其余按结束时间；
     /// 模板沿用已有纪要的，没有就用“通用”。
     ///
-    /// 纠错同理，先于纪要排。是不是自动路径不落盘，一律按自动路径恢复：结束后按自动纪要的规则决定要不要排纪要
-    /// （自动路径中途退出时纪要还没排，不这样就再也不会自动生成）。引擎不支持纠错时清掉纠错状态，直接按规则排纪要
+    /// 纠错同理，先于纪要排。是不是自动路径记在纠错状态里（`CorrectionState.automatic`）：自动的结束后按自动纪要的
+    /// 规则决定要不要排纪要（自动路径中途退出时纪要还没排，不这样就再也不会自动生成）；手动的仍是手动，不等接通电源。
+    /// 没记的（旧文件）按自动的恢复。恢复不了的（转写稿没了）清掉纠错状态，自动的直接按规则排纪要
+    /// 删除会议失败、会议还在时也用它把被取消的任务放回队列
     public func restore(_ meetings: [Meeting]) {
-        func pending(_ state: JobState?) -> Bool { state?.status == .queued || state?.status == .running }
-        func order(_ state: (Meeting) -> JobState?) -> [Meeting] {
-            func rank(_ m: Meeting) -> Int { state(m)?.status == .running ? 0 : 1 }
-            return meetings.filter { pending(state($0)) }
+        func order(_ status: (Meeting) -> JobState.Status?) -> [Meeting] {
+            func rank(_ m: Meeting) -> Int { status(m) == .running ? 0 : 1 }
+            return meetings.filter { status($0) == .queued || status($0) == .running }
                 .sorted { (rank($0), $0.endedAt ?? $0.startedAt) < (rank($1), $1.endedAt ?? $1.startedAt) }
         }
-        for m in order(\.correction) where !enqueueCorrection(m.id, autoMinutes: true) {
-            host?.setCorrection(nil, for: m.id)
-            autoGenerateMinutes(m.id)
+        for m in order(\.correction?.status) {
+            let automatic = m.correction?.automatic ?? true
+            if !enqueueCorrection(m.id, now: !automatic, autoMinutes: automatic) {
+                host?.setCorrection(nil, for: m.id)
+                if automatic { autoGenerateMinutes(m.id) }
+            }
         }
-        order(\.minutes).forEach { enqueue($0.id) }
+        order(\.minutes?.status).forEach { enqueue($0.id) }
     }
 
     /// 会议即将被删除：移出队列，正在生成的立即取消。不写任何文件，也不再更新这场会议的状态
@@ -370,7 +377,10 @@ public final class MinutesPipeline {
     private func setState(_ status: JobState.Status, error: String? = nil, for job: Job) {
         switch job.kind {
         case .minutes: host?.setMinutes(MinutesState(status: status, error: error), for: job.id)
-        case .correction: host?.setCorrection(CorrectionState(status: status, error: error), for: job.id)
+        case let .correction(autoMinutes):
+            // 是不是自动的只在排队、进行中有用（恢复队列），完成、失败不记
+            let automatic = status == .queued || status == .running ? autoMinutes : nil
+            host?.setCorrection(CorrectionState(status: status, error: error, automatic: automatic), for: job.id)
         }
     }
 

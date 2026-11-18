@@ -1471,6 +1471,59 @@ private let oneEdit = #"{"edits": [{"id": "s1", "text": "我们今天讨轮 v2.3
         }
     }
 
+    /// 同一个存储上重新开一条管线，按磁盘上的 meeting.json 恢复：模拟重启，也是删除会议失败时重排队列的做法
+    private func restart(_ f: Fixture) -> MinutesPipeline {
+        let pipeline = MinutesPipeline(store: f.store, generator: f.engine, model: "fake/generator", host: f.host)
+        pipeline.correctsTranscripts = true
+        pipeline.restore(f.store.loadAll())
+        return pipeline
+    }
+
+    @Test func 手动纠错重启后恢复仍是手动_不自动生成纪要() async throws {
+        let f = fixture()
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+        f.pipeline.remove("m1")
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes == nil)
+    }
+
+    @Test func 没记是不是自动的旧文件_按自动的恢复() async throws {
+        let f = fixture()
+        var m = f.addMeeting()
+        m.correction = CorrectionState(status: .queued)
+        try f.store.save(m)
+        f.host.meetings["m1"] = m
+        let json = try String(contentsOf: f.store.directory("m1").appendingPathComponent("meeting.json"), encoding: .utf8)
+        #expect(!json.contains("automatic"))
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 手动排着的纠错被自动路径接上后_重启恢复照自动规则生成纪要() async throws {
+        let f = fixture()
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+        f.pipeline.transcriptionFinished("m1")
+        f.pipeline.remove("m1")
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
     @Test func 重启时在线引擎下排队的纠错照常恢复() async throws {
         let f = fixture(requiresPower: false, isOnlineEngine: true)
         f.addMeeting()

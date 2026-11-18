@@ -177,7 +177,25 @@ public struct JobState: Codable, Hashable, Sendable {
 public typealias TranscriptionState = JobState
 public typealias MinutesState = JobState
 public typealias DiarizationState = JobState
-public typealias CorrectionState = JobState
+
+/// 转写纠错的状态：同 `JobState`，多记一项是不是自动路径排的
+public struct CorrectionState: Codable, Hashable, Sendable {
+    public typealias Status = JobState.Status
+
+    public var status: Status
+    /// 失败原因，给用户看
+    public var error: String?
+    /// 排队、进行中时记下：是转写完成自动排的（结束后按自动纪要的规则排纪要）还是手动的。
+    /// App 重启、删除会议失败后恢复队列时据此还原，手动的仍不自动生成纪要、不等接通电源。
+    /// 可选是为了兼容没有此字段的 meeting.json，那时按自动的恢复（加这个字段之前的做法）
+    public var automatic: Bool?
+
+    public init(status: Status, error: String? = nil, automatic: Bool? = nil) {
+        self.status = status
+        self.error = error
+        self.automatic = automatic
+    }
+}
 
 public func formatTimeRange(_ gap: Gap) -> String {
     let start = gap.start.formatted(date: .omitted, time: .shortened)
