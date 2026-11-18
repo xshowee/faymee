@@ -58,10 +58,8 @@ private enum OnlineTextSupport {
     static let connectionTestTimeout: TimeInterval = 30
     static let connectionTestPrompt = "OK"
     static let connectionTestMaxTokens = 16
-    /// 关不掉思考时（服务端拒收关思考的参数，或只能调低）在输出上限上多留的 token，免得思考吃光上限、正文为空
-    static let reasoningHeadroomTokens = 16_384
 
-    /// 关思考的请求被拒（HTTP 400，且不是模型不存在）时才去掉开关重发
+    /// 请求参数被拒（HTTP 400，且不是模型不存在）：去掉 JSON 模式重发
     static func isRejectedParameter(_ response: HTTPResponse) -> Bool {
         response.status == 400 && !OnlineAPIError.isModelNotFoundError(data: response.data)
     }
@@ -136,16 +134,9 @@ private protocol ConnectionProbable: TextGenerator {
     func probeConnection() async throws
 }
 
-/// 三个在线协议适配器共用的：配置就绪即可用、按字数估 token、关思考的同一个引擎
+/// 三个在线协议适配器共用的：配置就绪即可用、按字数估 token
 protocol OnlineTextGenerator: TextGenerator {
     var config: OnlineEndpointConfig { get }
-    var transport: any HTTPTransport { get }
-    var requestTimeout: TimeInterval { get }
-    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
-    var thinkingDisabled: Bool { get }
-
-    init(config: OnlineEndpointConfig, transport: any HTTPTransport, contextTokens: Int, maxOutputTokens: Int,
-         requestTimeout: TimeInterval, thinkingDisabled: Bool)
 }
 
 extension OnlineTextGenerator {
@@ -153,11 +144,6 @@ extension OnlineTextGenerator {
 
     public func countTokens(_ text: String) -> Int {
         OnlineTokenEstimator.countTokens(text)
-    }
-
-    public func withThinkingDisabled() -> any TextGenerator {
-        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
-             requestTimeout: requestTimeout, thinkingDisabled: true)
     }
 }
 
@@ -168,7 +154,6 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
     public let maxOutputTokens: Int
     let transport: any HTTPTransport
     let requestTimeout: TimeInterval
-    let thinkingDisabled: Bool
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -190,15 +175,13 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval,
-        thinkingDisabled: Bool = false
+        requestTimeout: TimeInterval
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
-        self.thinkingDisabled = thinkingDisabled
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
@@ -214,43 +197,25 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
 
         let url = try endpointURL()
         let headers = authHeaders()
-        func send(format: Bool, extra: [String: Any], tokens: Int) async throws -> HTTPResponse {
+        func send(format: Bool) async throws -> HTTPResponse {
             try await OnlineTextSupport.postJSON(
                 url: url,
                 headers: headers,
-                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens,
-                                      includeResponseFormat: format, extra: extra),
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                      includeResponseFormat: format),
                 timeout: requestTimeout,
                 transport: transport
             )
         }
-        let headroom = OnlineTextSupport.reasoningHeadroomTokens
-        var (format, extra, tokens) = (true, thinkingDisabled ? thinkingOffFields() : [:], maxTokens)
 
-        // 400 时先去掉 response_format 重试；关思考的开关还被拒，再去掉开关、留出思考的余量
-        var response = try await send(format: format, extra: extra, tokens: tokens)
+        // 400 时去掉 response_format 重试
+        var response = try await send(format: true)
         if OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
-            format = false
-            response = try await send(format: format, extra: extra, tokens: tokens)
-        }
-        if !extra.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
-            try Task.checkCancellation()
-            (extra, tokens) = ([:], tokens + headroom)
-            response = try await send(format: format, extra: extra, tokens: tokens)
+            response = try await send(format: false)
         }
         try response.checkSuccess()
-        var choice = try firstChoice(from: response.data)
-
-        // 关思考时思考仍吃光了上限（服务商没有开关，或开关被忽略）：留出思考的余量再试一次，仍为空照常报错
-        if thinkingDisabled, tokens == maxTokens, choice.finishReason == "length",
-           (try? OnlineTextSupport.extractNormalizedText(choice.text ?? "")) == nil
-        {
-            try Task.checkCancellation()
-            response = try await send(format: format, extra: extra, tokens: tokens + headroom)
-            try response.checkSuccess()
-            choice = try firstChoice(from: response.data)
-        }
+        let choice = try firstChoice(from: response.data)
 
         guard let text = choice.text else { throw OnlineAPIError.emptyResponse }
         return try OnlineTextSupport.extractNormalizedText(text)
@@ -319,21 +284,8 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
         return message
     }
 
-    /// 各服务商关思考的参数（OpenAI Chat Completions 之外的扩展字段）：
-    /// - DeepSeek：`thinking: {type: "disabled"}`（deepseek-flash 等默认思考）
-    /// - 阿里云百炼：`enable_thinking: false`（Qwen3.5 及以后的混合思考模型默认思考）
-    /// OpenAI 和自定义网关不发：OpenAI 的 `reasoning_effort` 各推理模型取值不一（有的拒收 none），非推理模型
-    /// （默认的 gpt-4.1 系）用不上；网关后面是什么模型不知道。这些靠思考吃光上限时留出余量重试（见 `generate`）
-    private func thinkingOffFields() -> [String: Any] {
-        switch config.providerID {
-        case OnlineMinutesProvider.deepSeek.providerID: ["thinking": ["type": "disabled"]]
-        case OnlineMinutesProvider.dashScope.providerID: ["enable_thinking": false]
-        default: [:]
-        }
-    }
-
     private func buildPayload(
-        system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool, extra: [String: Any] = [:]
+        system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool
     ) -> [String: Any] {
         var messages: [[String: String]] = []
         if !system.isEmpty {
@@ -349,7 +301,6 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
         if includeResponseFormat {
             payload["response_format"] = ["type": "json_object"]
         }
-        payload.merge(extra) { _, new in new }
         return payload
     }
 }
@@ -361,7 +312,6 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
     public let maxOutputTokens: Int
     let transport: any HTTPTransport
     let requestTimeout: TimeInterval
-    let thinkingDisabled: Bool
     private static let apiVersion = "2023-06-01"
 
     public convenience init(
@@ -384,15 +334,13 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval,
-        thinkingDisabled: Bool = false
+        requestTimeout: TimeInterval
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
-        self.thinkingDisabled = thinkingDisabled
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
@@ -412,16 +360,7 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
             try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
                                                  timeout: self.requestTimeout, transport: self.transport)
         }
-        // 关思考：`thinking: {type: "disabled"}`。总在思考的模型（如 Opus 5.5）拒收，就去掉开关、留出思考的余量
-        let thinkingOff: [String: Any] = thinkingDisabled ? ["thinking": ["type": "disabled"]] : [:]
-        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
-                                                   extra: thinkingOff))
-        if !thinkingOff.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
-            try Task.checkCancellation()
-            response = try await send(buildPayload(
-                system: system, prompt: prompt, maxTokens: maxTokens + OnlineTextSupport.reasoningHeadroomTokens
-            ))
-        }
+        let response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens))
         try response.checkSuccess()
 
         let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
@@ -471,7 +410,7 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
         return headers
     }
 
-    private func buildPayload(system: String, prompt: String, maxTokens: Int, extra: [String: Any] = [:]) -> [String: Any] {
+    private func buildPayload(system: String, prompt: String, maxTokens: Int) -> [String: Any] {
         var payload: [String: Any] = [
             "model": config.trimmedModel,
             "max_tokens": maxTokens,
@@ -480,7 +419,6 @@ public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbab
         if !system.isEmpty {
             payload["system"] = system
         }
-        payload.merge(extra) { _, new in new }
         return payload
     }
 }
@@ -495,7 +433,6 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
     public let maxOutputTokens: Int
     let transport: any HTTPTransport
     let requestTimeout: TimeInterval
-    let thinkingDisabled: Bool
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -517,15 +454,13 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval,
-        thinkingDisabled: Bool = false
+        requestTimeout: TimeInterval
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
-        self.thinkingDisabled = thinkingDisabled
     }
 
     public func load(progress: @escaping (Double) -> Void) async throws {
@@ -541,23 +476,14 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
 
         let url = try generateContentURL()
         let headers = authHeaders()
-        let send = { (thinkingConfig: [String: Any]?, maxTokens: Int) in
-            try await OnlineTextSupport.postJSON(
-                url: url,
-                headers: headers,
-                payload: self.buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
-                                           responseMimeType: "application/json", thinkingConfig: thinkingConfig),
-                timeout: self.requestTimeout,
-                transport: self.transport
-            )
-        }
-        let thinking = thinkingDisabled ? thinkingOff() : nil
-        let headroom = OnlineTextSupport.reasoningHeadroomTokens
-        var response = try await send(thinking?.config, maxTokens + (thinking?.alwaysThinks == true ? headroom : 0))
-        if thinking != nil, OnlineTextSupport.isRejectedParameter(response) {
-            try Task.checkCancellation()
-            response = try await send(nil, maxTokens + headroom)
-        }
+        let response = try await OnlineTextSupport.postJSON(
+            url: url,
+            headers: headers,
+            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                  responseMimeType: "application/json"),
+            timeout: requestTimeout,
+            transport: transport
+        )
         try response.checkSuccess()
 
         let (parts, finishReason) = try firstCandidateParts(from: response.data)
@@ -609,35 +535,15 @@ public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable,
         return apiKey.isEmpty ? [:] : ["x-goog-api-key": apiKey]
     }
 
-    /// 关思考的 `thinkingConfig`，按模型代际（思考算在 maxOutputTokens 里）：
-    /// - 2.0 及更早不思考，带 thinkingConfig 反而报错，不发；
-    /// - 2.5 用 thinkingBudget：Flash、Flash-Lite 设 0 即关；Pro 关不掉，取最低 128；
-    /// - 3 代起用 thinkingLevel（对 2.5 报错）：Flash 取 MINIMAL（几乎不想），Pro 最低 LOW（取值同 API 参考的枚举名）。
-    /// `alwaysThinks` 为 true 时关不彻底，输出上限要留出思考的余量
-    private func thinkingOff() -> (config: [String: Any], alwaysThinks: Bool)? {
-        let model = config.trimmedModel.hasPrefix("models/")
-            ? String(config.trimmedModel.dropFirst("models/".count)) : config.trimmedModel
-        let pro = model.contains("pro")
-        if model.hasPrefix("gemini-1") || model.hasPrefix("gemini-2.0") { return nil }
-        if model.hasPrefix("gemini-2.5") {
-            return pro ? (["thinkingBudget": 128], true) : (["thinkingBudget": 0], false)
-        }
-        return (["thinkingLevel": pro ? "LOW" : "MINIMAL"], true)
-    }
-
     private func buildPayload(
         system: String,
         prompt: String,
         maxTokens: Int,
-        responseMimeType: String?,
-        thinkingConfig: [String: Any]? = nil
+        responseMimeType: String?
     ) -> [String: Any] {
         var generationConfig: [String: Any] = ["maxOutputTokens": maxTokens]
         if let responseMimeType {
             generationConfig["responseMimeType"] = responseMimeType
-        }
-        if let thinkingConfig {
-            generationConfig["thinkingConfig"] = thinkingConfig
         }
         var payload: [String: Any] = [
             "contents": [
