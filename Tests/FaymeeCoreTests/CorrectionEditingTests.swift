@@ -162,4 +162,67 @@ import Testing
         #expect(s.original == "我们要避免被动")
         #expect(t.editCount == 1)
     }
+
+    // MARK: - 转写稿菜单
+
+    private func menu(_ transcript: Transcript?, state: CorrectionState? = nil, available: Bool = true,
+                      editable: Bool = true) -> CorrectionMenuItem {
+        CorrectionMenuItem(transcript: transcript, state: state, isAvailable: available, isEditable: editable)
+    }
+
+    @Test func 没纠错过是纠错_纠错过是重新纠错() {
+        var plain = corrected()
+        plain.correction = nil
+        plain.undoAllCorrections()
+        #expect(menu(plain).title == "纠错")
+        #expect(menu(corrected(), state: CorrectionState(status: .done)).title == "重新纠错")
+        // 撤销全部后仍是纠错过的
+        var undone = corrected()
+        undone.undoAllCorrections()
+        #expect(menu(undone, state: CorrectionState(status: .done)).title == "重新纠错")
+    }
+
+    @Test func 开关关着也能点_排队或进行中不能点() {
+        #expect(menu(corrected()).isEnabled)
+        #expect(menu(corrected(), state: CorrectionState(status: .failed)).isEnabled)
+        #expect(!menu(corrected(), state: CorrectionState(status: .queued)).isEnabled)
+        #expect(!menu(corrected(), state: CorrectionState(status: .running)).isEnabled)
+    }
+
+    @Test func 引擎不支持_转写中_没有句子时不能点() {
+        #expect(!menu(corrected(), available: false).isEnabled)
+        #expect(!menu(corrected(), editable: false).isEnabled)
+        #expect(!menu(nil).isEnabled)
+        let empty = Transcript(engine: "e", createdAt: created, hotwords: [], items: [])
+        #expect(!menu(empty).isEnabled)
+    }
+
+    @Test func 重新纠错要先复位() {
+        #expect(menu(corrected(), state: CorrectionState(status: .done)).resets)
+        var plain = corrected()
+        plain.correction = nil
+        #expect(!menu(plain).resets)
+    }
+
+    // MARK: - 下游
+
+    @Test func 撤销一句或采纳建议后_纪要显示转写稿有修改() {
+        let t = corrected()
+        let minutes = Minutes(model: "fake", template: "general", createdAt: created,
+                              source: MinutesSource(transcriptCreatedAt: t.createdAt, textHash: t.textHash),
+                              sections: [])
+        var undone = t
+        undone.undoCorrection(sentence: "s1")
+        #expect(minutes.sync(with: undone, meeting: nil) == .edited)
+        var adopted = t
+        adopted.adopt(october)
+        #expect(minutes.sync(with: adopted, meeting: nil) == .edited)
+    }
+
+    @Test func 复制全文用改后的文字_未采纳的数字建议不算() {
+        var t = corrected()
+        #expect(t.plainText(meeting: nil) == "[00:00] 我们要避免被动\n[00:01] 十月底上线")
+        t.adopt(october)
+        #expect(t.plainText(meeting: nil) == "[00:00] 我们要避免被动\n[00:01] 四月底上线")
+    }
 }

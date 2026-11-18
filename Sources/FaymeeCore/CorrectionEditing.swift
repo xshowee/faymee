@@ -61,3 +61,23 @@ extension Transcript {
         s.original == nil && !suggestion.from.isEmpty && s.text.components(separatedBy: suggestion.from).count == 2
     }
 }
+
+/// 转写稿菜单里的「纠错 / 重新纠错」（spec「界面」）。手动的随时能点，不看「纠错转写稿」开关和纪要模型
+/// 是否就绪（没就绪时排队）
+public struct CorrectionMenuItem: Hashable, Sendable {
+    /// 纠错过（撤销全部后也算）是「重新纠错」，否则「纠错」
+    public let title: String
+    /// 「重新纠错」：入队前先 `resetForRecorrection()` 并写盘
+    public let resets: Bool
+    public let isEnabled: Bool
+
+    /// - isAvailable: 纪要引擎能纠错（`MinutesPipeline.correctionMethod != nil`）。不能时入队会被拒，
+    ///   先复位就白白撤销了纠错
+    /// - isEditable: 转写稿能改（不在重新转写中）
+    public init(transcript: Transcript?, state: CorrectionState?, isAvailable: Bool, isEditable: Bool) {
+        resets = transcript?.correction != nil
+        title = resets ? "重新纠错" : "纠错"
+        let busy = state?.status == .queued || state?.status == .running
+        isEnabled = isAvailable && isEditable && !busy && transcript?.sentences.isEmpty == false
+    }
+}
