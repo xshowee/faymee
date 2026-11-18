@@ -19,7 +19,8 @@ import Testing
 /// `online`（DeepSeek 经 `OnlineMinutesEngine.makeGenerator`，同 App 在线纪要的路径；模型默认 deepseek-flash，即评估时
 /// 这台机器在线纪要选的模型，`FAYMEE_DEEPSEEK_MODEL` 可改）。热词默认不给（新安装热词表是空的），
 /// `FAYMEE_CORRECTION_EVAL_HOTWORDS=1` 时用用例自带的。`online-whatif` 是假设输出上限放大（`FAYMEE_CORRECTION_EVAL_MAX_OUTPUT`，
-/// 默认 32768）的在线，不是 App 的配置；`FAYMEE_CORRECTION_EVAL_FIRST_RUN` 只补跑某一次：
+/// 默认 32768）的在线，不是 App 的配置；`FAYMEE_CORRECTION_EVAL_FIRST_RUN` 只补跑某一次；`FAYMEE_CORRECTION_EVAL_REPLAY=<结果目录>`
+/// 用那次记下的原始输出代替模型生成，只重跑分段和护栏（护栏改了以后重算）：
 ///
 ///     FAYMEE_CORRECTION_EVAL_OUT=… FAYMEE_CORRECTION_EVAL_CASES=<dir> FAYMEE_CORRECTION_EVAL_ENGINE=local \
 ///     [FAYMEE_CORRECTION_EVAL_RUNS=3] [FAYMEE_CORRECTION_EVAL_LABEL=…] [FAYMEE_CORRECTION_EVAL_ONLY=名1,名2] \
@@ -98,6 +99,7 @@ struct CorrectionEvaluationTests {
 
         let transport = RecordingTransport()
         let (generator, method, engineID, local) = try makeEngine(engineName, transport: transport)
+        let replayDirectory = env["FAYMEE_CORRECTION_EVAL_REPLAY"].map { URL(fileURLWithPath: $0) }
         var loadSeconds = 0.0
         if let local {
             let started = Date()
@@ -111,7 +113,13 @@ struct CorrectionEvaluationTests {
             // FAYMEE_CORRECTION_EVAL_FIRST_RUN：补跑某一次（如网络断了的那次）
             let first = Int(env["FAYMEE_CORRECTION_EVAL_FIRST_RUN"] ?? "") ?? 1
             for run in first...max(first, runs) {
-                let recorder = RecordingGenerator(generator)
+                // 重放：用以前某次运行记下的原始输出代替模型，只重跑护栏（护栏改了以后重算本机的结果）
+                let source = try replayDirectory.map { directory -> any TextGenerator in
+                    let file = directory.appendingPathComponent("\(evalCase.name)-r\(run).json")
+                    let old = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]
+                    return ReplayGenerator(generator, outputs: old?["outputs"] as? [String] ?? [])
+                } ?? generator
+                let recorder = RecordingGenerator(source)
                 transport.responses.removeAll()
                 let peak = EvalPeakMemory()
                 let started = Date()
@@ -264,6 +272,8 @@ struct CorrectionEvaluationTests {
 
 private enum EvalError: Error {
     case unknownEngine(String)
+    /// 重放时调用次数比记下的多（分段变了）
+    case replayExhausted
     case noTranscript(String)
 }
 
@@ -336,6 +346,28 @@ private struct ScriptMeta: Decodable {
     var title: String
     var hotwords: [String]
     var lines: [Line]
+}
+
+/// 重放记下的原始输出；分词、上下文长度用原来的引擎，分段才和当时一样
+private final class ReplayGenerator: TextGenerator, @unchecked Sendable {
+    let base: any TextGenerator
+    private var outputs: [String]
+
+    init(_ base: any TextGenerator, outputs: [String]) {
+        self.base = base
+        self.outputs = outputs
+    }
+
+    var contextTokens: Int { base.contextTokens }
+    var maxOutputTokens: Int { base.maxOutputTokens }
+    func countTokens(_ text: String) -> Int { base.countTokens(text) }
+    var isDownloaded: Bool { true }
+    func load(progress: @escaping (Double) -> Void) async throws {}
+    func unload() {}
+    func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
+        guard !outputs.isEmpty else { throw EvalError.replayExhausted }
+        return outputs.removeFirst()
+    }
 }
 
 /// 包一层 HTTP 传输，记下每次在线请求的状态码、`finish_reason`、`usage`
