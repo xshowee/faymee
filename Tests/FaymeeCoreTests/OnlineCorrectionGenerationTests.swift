@@ -81,4 +81,38 @@ import Testing
         let truncated = #"{"edits": [{"id": "s1", "text": "我们要避免被动的局面"}, {"id": "s2", "text": "那我们就"#
         #expect(parseSentenceEdits(truncated) == [SentenceEdit(id: "s1", text: "我们要避免被动的局面")])
     }
+
+    @Test func 补字_删字_删成空句写进转写稿后_下划线位置对得上_撤销后与纠错前一致() async throws {
+        let before = transcript(["这个方案我们下周再讨论", "那我们就开始吧吧吧吧吧吧", "我们下周发布", "我们下周发布"])
+        let generator = ScriptedGenerator(outputs: [#"""
+        {"edits": [{"id": "s1", "text": "这个方案我们下周再来讨论"}, {"id": "s2", "text": "那我们就开始吧"},
+        {"id": "s4", "text": ""}]}
+        """#])
+        let review = try await correctTranscript(before, title: "周会", hotwords: [], method: .sentenceRewrite,
+                                                 generator: generator)
+        var t = before
+        try t.applyCorrection(CorrectionResult(snapshot: before, review: review, engine: "deepseek/deepseek-chat",
+                                               createdAt: Date(timeIntervalSince1970: 60), hotwords: []))
+        #expect(t.sentences.map(\.text) == ["这个方案我们下周再来讨论", "那我们就开始吧", "我们下周发布", ""])
+        #expect(t.correctedCount == 3)
+        #expect(t.editCount == 0)
+
+        // 下划线（ticket 02）按 TextDiff 的 afterRange：补的「来」在改后文字的第 9 个字；删字是空区间，不显示
+        let s = t.sentences
+        let insert = TextDiff(from: try #require(s[0].correction), to: s[0].text).segments
+        #expect(insert.map(\.kind) == [.insert])
+        #expect(insert.map(\.afterRange) == [9..<10])
+        let delete = TextDiff(from: try #require(s[1].correction), to: s[1].text).segments
+        #expect(delete.map(\.kind) == [.delete])
+        #expect(delete.allSatisfy { $0.afterRange.isEmpty })
+        let emptied = TextDiff(from: try #require(s[3].correction), to: s[3].text).segments
+        #expect(emptied.map(\.kind) == [.delete])
+
+        let undone = t.undoCorrection(sentence: "s4")
+        #expect(undone)
+        #expect(t.sentences[3].text == "我们下周发布")
+        t.undoAllCorrections()
+        #expect(t.items == before.items)
+        #expect(t.textHash == before.textHash)
+    }
 }
