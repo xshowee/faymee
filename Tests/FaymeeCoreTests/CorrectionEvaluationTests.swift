@@ -97,7 +97,7 @@ struct CorrectionEvaluationTests {
         let cases = try loadCases(URL(fileURLWithPath: env["FAYMEE_CORRECTION_EVAL_CASES"]!))
             .filter { only.isEmpty || only.contains($0.name) }
 
-        let transport = RecordingTransport()
+        let transport = RecordingHTTPTransport()
         let (generator, method, engineID, local) = try makeEngine(engineName, transport: transport)
         let replayDirectory = env["FAYMEE_CORRECTION_EVAL_REPLAY"].map { URL(fileURLWithPath: $0) }
         var loadSeconds = 0.0
@@ -120,7 +120,7 @@ struct CorrectionEvaluationTests {
                     return ReplayGenerator(generator, outputs: old?["outputs"] as? [String] ?? [])
                 } ?? generator
                 let recorder = RecordingGenerator(source)
-                transport.responses.removeAll()
+                transport.removeAll()
                 let peak = EvalPeakMemory()
                 let started = Date()
                 var review: CorrectionReview?
@@ -148,7 +148,7 @@ struct CorrectionEvaluationTests {
                     },
                     "outputs": recorder.outputs,
                     // 在线：每次请求的 finish_reason 和 usage（不含正文）
-                    "http": transport.responses,
+                    "http": httpSummary(transport),
                 ]
                 if let known = evalCase.known {
                     let texts = Dictionary(zip(sentences.map(\.id), after), uniquingKeysWith: { a, _ in a })
@@ -183,7 +183,7 @@ struct CorrectionEvaluationTests {
             .map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         let key = try #require(env["FAYMEE_DEEPSEEK_API_KEY"], "要 FAYMEE_DEEPSEEK_API_KEY")
         let model = env["FAYMEE_CORRECTION_EVAL_JUDGE_MODEL"] ?? "deepseek-v4-pro"
-        let transport = RecordingTransport()
+        let transport = RecordingHTTPTransport()
         // 裁判是推理模型，思考也算在 max_tokens 里：给足输出上限，每批少放几处
         let judge = OpenAICompatibleTextGenerator(config: deepSeekConfig(model: model, key: key), transport: transport,
                                                   contextTokens: 256_000, maxOutputTokens: 64_000)
@@ -196,7 +196,7 @@ struct CorrectionEvaluationTests {
                   let changes = record["changes"] as? [[String: Any]], !changes.isEmpty else { continue }
             let sentences = try evalCase.transcript().sentences
             var verdicts: [[String: Any]] = []
-            transport.responses.removeAll()
+            transport.removeAll()
             for batch in stride(from: 0, to: changes.count, by: 10).map({ Array(changes[$0..<min($0 + 10, changes.count)]) }) {
                 let items = batch.enumerated().map { n, change -> String in
                     let i = change["index"] as! Int
@@ -222,7 +222,7 @@ struct CorrectionEvaluationTests {
                 }
             }
             let data = try JSONSerialization.data(withJSONObject: ["case": evalCase.name, "judge": model,
-                                                                   "verdicts": verdicts, "http": transport.responses],
+                                                                   "verdicts": verdicts, "http": httpSummary(transport)],
                                                   options: [.prettyPrinted, .sortedKeys])
             try data.write(to: results.appendingPathComponent("judge-" + file))
             let counts = Dictionary(grouping: verdicts, by: { $0["verdict"] as? String ?? "" }).mapValues(\.count)
@@ -230,7 +230,7 @@ struct CorrectionEvaluationTests {
         }
     }
 
-    private func makeEngine(_ name: String, transport: RecordingTransport) throws
+    private func makeEngine(_ name: String, transport: RecordingHTTPTransport) throws
         -> (any TextGenerator, CorrectionMethod, String, LlamaTextGenerator?) {
         switch name {
         case "local", "local-full":
@@ -370,25 +370,19 @@ private final class ReplayGenerator: TextGenerator, @unchecked Sendable {
     }
 }
 
-/// 包一层 HTTP 传输，记下每次在线请求的状态码、`finish_reason`、`usage`
-private final class RecordingTransport: HTTPTransport, @unchecked Sendable {
-    let base = URLSessionHTTPTransport()
-    var responses: [[String: Any]] = []
-
-    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        let started = Date()
-        let response = try await base.send(request)
-        let object = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+/// 每次在线请求的状态码、耗时、`finish_reason`、`usage`（不含正文），写进评估记录
+private func httpSummary(_ transport: RecordingHTTPTransport) -> [[String: Any]] {
+    transport.exchanges.map { exchange in
+        let object = exchange.json
         let choice = (object?["choices"] as? [[String: Any]])?.first
         let message = choice?["message"] as? [String: Any]
-        responses.append([
-            "status": response.status, "seconds": Date().timeIntervalSince(started),
+        return [
+            "status": exchange.response.status, "seconds": exchange.seconds,
             "finishReason": choice?["finish_reason"] ?? NSNull(), "usage": object?["usage"] ?? NSNull(),
             "model": object?["model"] ?? NSNull(),
             "contentLength": (message?["content"] as? String)?.count ?? -1,
             "reasoningLength": (message?["reasoning_content"] as? String)?.count ?? -1,
-        ])
-        return response
+        ]
     }
 }
 

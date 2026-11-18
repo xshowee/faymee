@@ -5,24 +5,11 @@ import Testing
 private let env = ProcessInfo.processInfo.environment
 private let deepSeekKey = env["FAYMEE_DEEPSEEK_API_KEY"] ?? ""
 
-/// 记下真实响应，用来看服务端报的思考 token 数
-private final class RecordingTransport: HTTPTransport, @unchecked Sendable {
-    private let base = URLSessionHTTPTransport()
-    private let lock = NSLock()
-    private var responses: [HTTPResponse] = []
-
-    var reasoningTokens: [Int] {
-        lock.withLock { responses }.map { response in
-            let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
-            let details = (json?["usage"] as? [String: Any])?["completion_tokens_details"] as? [String: Any]
-            return details?["reasoning_tokens"] as? Int ?? 0
-        }
-    }
-
-    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        let response = try await base.send(request)
-        lock.withLock { responses.append(response) }
-        return response
+/// 每次请求服务端报的思考 token 数
+private func reasoningTokens(_ transport: RecordingHTTPTransport) -> [Int] {
+    transport.exchanges.map { exchange in
+        let details = (exchange.json?["usage"] as? [String: Any])?["completion_tokens_details"] as? [String: Any]
+        return details?["reasoning_tokens"] as? Int ?? 0
     }
 }
 
@@ -69,7 +56,7 @@ struct OnlineCorrectionContractTests {
             requiresAPIKey: true,
             providerID: OnlineMinutesProvider.deepSeek.providerID
         )
-        let transport = RecordingTransport()
+        let transport = RecordingHTTPTransport()
         let generator = OnlineMinutesEngine.makeGenerator(provider: .deepSeek, config: config, transport: transport)
         let review = try await correctTranscript(transcript, title: "智能体项目周会", hotwords: ["龚老师"],
                                                  method: .sentenceRewrite, generator: generator)
@@ -78,10 +65,11 @@ struct OnlineCorrectionContractTests {
         }
         print("纠错 建议: \(review.suggestions)")
         print("纠错 挡掉: \(review.rejections)")
-        print("纠错 思考 token: \(transport.reasoningTokens)")
+        let reasoning = reasoningTokens(transport)
+        print("纠错 思考 token: \(reasoning)")
 
         // 纠错关思考：deepseek-flash 默认思考，思考吃光输出上限时正文为空（FAYMEE_DEEPSEEK_MODEL=deepseek-flash）
-        #expect(!transport.reasoningTokens.isEmpty && transport.reasoningTokens.allSatisfy { $0 == 0 })
+        #expect(!reasoning.isEmpty && reasoning.allSatisfy { $0 == 0 })
 
         #expect(review.rejections[CorrectionRule.unparseable.rawValue] == nil)
         // 口吃、口语词所在的句子：改了也只能是换字词或补字，不会删掉「我我我」「嗯」「那个」
