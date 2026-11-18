@@ -111,8 +111,10 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
     public let roles: Set<ModelRole>
     public let family: ModelFamily
     public let source: ModelSource
-    /// 选择框里显示的名字
+    /// 选择框里显示的名字，可能带量化标注，如「Qwen3.5 4B（Q4_K_M）」
     public let name: String
+    /// 只有模型名、不带量化标注的名字，用在说明文字里（如纠错说明「本机 Qwen3.5 4B」）。没有标注时同 `name`
+    public let shortName: String
     /// 内存峰值，如“约 2.1 GB”
     public let memory: String?
     /// 速度，如“20 分钟会议约 2 分钟”
@@ -130,7 +132,7 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
     public let license: String
 
     public init(id: String, roles: Set<ModelRole>, family: ModelFamily, source: ModelSource, name: String,
-                memory: String? = nil, speed: String? = nil, capabilities: ModelCapabilities? = nil,
+                shortName: String? = nil, memory: String? = nil, speed: String? = nil, capabilities: ModelCapabilities? = nil,
                 verdicts: [ModelRole: String] = [:], parameters: ModelParameters = ModelParameters(),
                 dependencies: [String] = [], isHidden: Bool = false, license: String = "") {
         self.id = id
@@ -138,6 +140,7 @@ public struct CatalogModel: Sendable, Equatable, Identifiable {
         self.family = family
         self.source = source
         self.name = name
+        self.shortName = shortName ?? name
         self.memory = memory
         self.speed = speed
         self.capabilities = capabilities
@@ -274,7 +277,7 @@ extension ModelCatalog {
         // MARK: 纪要
         CatalogModel(
             id: LocalModel.qwen3_4B.id, roles: [.minutes], family: .llamaGGUF,
-            source: .download(.qwen3_4B), name: "Qwen3 4B（Q4_K_M）",
+            source: .download(.qwen3_4B), name: "Qwen3 4B（Q4_K_M）", shortName: "Qwen3 4B",
             // ticket 11 实测（M3 Pro / 18GB，4 场真实会议，不开思考）：内存是进程峰值 resident（含 mmap 的
             // 权重 2.5 GB；phys_footprint 约 1.45 GB）；20 分钟会议 180–254 秒，56 分钟会议 594 秒
             memory: "约 3.9 GB", speed: "20 分钟会议约 3–4 分钟",
@@ -284,11 +287,12 @@ extension ModelCatalog {
             license: "Apache-2.0"),
         CatalogModel(
             id: LocalModel.qwen3_5_4B.id, roles: [.minutes], family: .llamaGGUF,
-            source: .download(.qwen3_5_4B), name: "Qwen3.5 4B（Q4_K_M）",
+            source: .download(.qwen3_5_4B), name: "Qwen3.5 4B（Q4_K_M）", shortName: "Qwen3.5 4B",
             // Unsloth 转换的 GGUF（Qwen 没发官方 GGUF）。ticket 11 实测：resident 峰值 3.4 GB（权重 2.7 GB，
             // footprint 约 0.65 GB：混合注意力，KV 小）；20 分钟会议 105–110 秒，56 分钟会议 323 秒
             memory: "约 3.4 GB", speed: "20 分钟会议约 2 分钟",
-            verdicts: [.minutes: "基本不编造截止时间；比 Qwen3 4B 出纪要快、省内存"],
+            // ticket 04 纠错评估（2891 句有标准稿）：三次改 3.5–4.6% 的句子，改过的句子里 7–12% 改坏，字错率 14.02%→13.9% 左右
+            verdicts: [.minutes: "基本不编造截止时间；比 Qwen3 4B 出纪要快、省内存；纠错偏保守，改得少，改过的句子约一成改坏"],
             parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
                                         minutesChunking: .standard, thinking: false),
             license: "Apache-2.0"),

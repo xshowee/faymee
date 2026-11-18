@@ -60,6 +60,12 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Toggle("纠错转写稿", isOn: $model.correctTranscripts)
+                Text(CorrectionCaption.text(correctionEngine))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 if online.transcriptionMode == .local {
                     ModelPicker(role: .transcription, title: "转写模型",
                                 deleteBlockedReason: { m in model.asrModelDeleteBlockedReason(m) })
@@ -124,7 +130,7 @@ struct SettingsView: View {
                                 deleteBlockedReason: { _ in
                                     model.canDeleteModel ? nil : "正在生成纪要，生成完才能删除模型"
                                 })
-                    Text("纪要在本机生成，不上传任何数据。模型只在点“下载”后才开始下载，可以暂停，中断后能续传")
+                    Text("纪要和纠错都在本机进行，不上传任何数据。模型只在点“下载”后才开始下载，可以暂停，中断后能续传")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -137,7 +143,7 @@ struct SettingsView: View {
                         config: online.activeMinutesConfig,
                         credentialError: online.minutesCredentialError,
                         testState: model.minutesTestState,
-                        privacyCaption: "仅上传转写文字、会议标题与会中笔记，录音与声纹不上传",
+                        privacyCaption: "仅上传转写文字（用于纪要和纠错）、热词、会议标题与会中笔记，录音与声纹不上传",
                         onFlushSync: { model.flushOnlineSettingsSync() },
                         onTestConnection: { model.testMinutesConnection() }
                     )
@@ -170,6 +176,16 @@ extension SettingsView {
         }
         guard !ready else { return nil }
         return "\(selected.name) 还没下载，实时字幕暂时用 SpeechAnalyzer（系统自带）；下载完成后，下一场录音起改用它"
+    }
+
+    /// 「纠错转写稿」说明里的纪要引擎：纠错用纪要的引擎，没就绪（模型没下载、在线配置没补齐）时说明要等它
+    private var correctionEngine: CorrectionCaption.Engine {
+        guard model.minutes.isModelDownloaded else { return .notReady }
+        let online = model.onlineSettings
+        if online.minutesMode == .online {
+            return .online(provider: online.minutesProvider.displayName, model: online.minutesModel)
+        }
+        return .local(modelName: MinutesEngine.selectedModel(model.modelSelections).shortName)
     }
 
     /// 实时字幕定稿的说明：做什么；所选模型没下载完时说明暂时不用；录音中改了选择时说明从下一场起生效

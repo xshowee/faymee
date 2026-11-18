@@ -1,9 +1,65 @@
 import Foundation
 
-/// 在线纪要模型的默认上下文与单次最大输出预算
+/// 在线纪要模型的默认上下文与单次正文预算。分段按正文预算留输出；请求的输出上限另含思考，见 `OnlineOutputLimit`
 public enum OnlineMinutesDefaults {
     public static let contextTokens = 64_000
     public static let maxOutputTokens = 8_192
+}
+
+/// 在线请求的输出上限（`max_tokens` / `maxOutputTokens`）。各家的思考都算在这个上限里，所以不按正文预算发，
+/// 按模型接受的值发，给思考留出余量。超过模型的上限会被拒（DeepSeek 实测 400），所以按服务商和模型分别取
+/// （各家文档，2026-11）：
+/// - DeepSeek：接受 1–393216；取 131072，即最高思考档不传时的默认值。实测 deepseek-flash 纠错约 70 分钟的合成转写
+///   （提示词 2.2 万 token）思考 4.2 万、输出共 5.2 万 token，一段的提示词最多约它的两倍，64K 不够。
+///   旧名 deepseek-chat / reasoner 已转到 deepseek-flash
+/// - 阿里云百炼：qwen-plus 32768；qwen-max 8192；qwen-turbo 查不到，按 8192；其他（qwen3.5-plus 起 64K 以上）按 32768
+/// - OpenAI：gpt-4.1 系 32768；gpt-4o 系和其他 16384
+/// - Anthropic：Sonnet 4.5、Haiku 4.5 64000；其他按 32000（Opus 4 / 4.1 的上限，更新的模型都不低于它）
+/// - Gemini：2.0 及更早 8192；2.5 起 65536
+/// - 自定义网关：后面是什么模型、接受多大都不知道，用以前一直被接受的 8192
+///
+/// 调用方要的正文预算比这个还大时按调用方的发。表里没有的模型按服务商取，它的上限若更低会被拒（400），
+/// 这时按调用方的正文预算再发一次（同放大以前）
+enum OnlineOutputLimit {
+    /// 思考吃光上限、正文为空时再试一次的上限。只有自定义网关有：别的已按模型接受的值发，放大会被拒。
+    /// 32768 是常见 OpenAI 兼容模型普遍接受的值（gpt-4.1、qwen-plus 等）；网关不接受时报它的 400
+    static func retryTokens(providerID: String) -> Int? {
+        switch providerID {
+        case OnlineMinutesProvider.deepSeek.providerID, OnlineMinutesProvider.dashScope.providerID,
+             OnlineMinutesProvider.openAI.providerID, OnlineMinutesProvider.anthropic.providerID,
+             OnlineMinutesProvider.gemini.providerID:
+            nil
+        default:
+            32_768
+        }
+    }
+
+    static func tokens(providerID: String, model: String) -> Int {
+        let model = model.lowercased()
+        switch providerID {
+        case OnlineMinutesProvider.deepSeek.providerID:
+            return 131_072
+        case OnlineMinutesProvider.dashScope.providerID:
+            if model.hasPrefix("qwen-max") || model.hasPrefix("qwen-turbo") { return 8_192 }
+            return 32_768
+        case OnlineMinutesProvider.openAI.providerID:
+            return model.hasPrefix("gpt-4.1") ? 32_768 : 16_384
+        case OnlineMinutesProvider.anthropic.providerID:
+            return model.hasPrefix("claude-sonnet-4-5") || model.hasPrefix("claude-haiku-4-5") ? 64_000 : 32_000
+        case OnlineMinutesProvider.gemini.providerID:
+            let name = model.hasPrefix("models/") ? String(model.dropFirst("models/".count)) : model
+            return name.hasPrefix("gemini-1") || name.hasPrefix("gemini-2.0") ? 8_192 : 65_536
+        default:
+            return 8_192
+        }
+    }
+}
+
+extension OnlineEndpointConfig {
+    /// 发出去的输出上限：至少是这个模型的 `OnlineOutputLimit`
+    func requestTokens(_ maxTokens: Int) -> Int {
+        max(maxTokens, OnlineOutputLimit.tokens(providerID: providerID, model: trimmedModel))
+    }
 }
 
 /// 纯本地启发式 token 估算：中日韩字符按高权重估算，西文按字母数字词数与字符数估算，
@@ -58,6 +114,11 @@ private enum OnlineTextSupport {
     static let connectionTestTimeout: TimeInterval = 30
     static let connectionTestPrompt = "OK"
     static let connectionTestMaxTokens = 16
+
+    /// 请求参数被拒（HTTP 400，且不是模型不存在）：去掉 JSON 模式重发
+    static func isRejectedParameter(_ response: HTTPResponse) -> Bool {
+        response.status == 400 && !OnlineAPIError.isModelNotFoundError(data: response.data)
+    }
 
     static func endpointURL(baseURL: String, appendingPath path: String) throws -> URL {
         var trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -129,13 +190,26 @@ private protocol ConnectionProbable: TextGenerator {
     func probeConnection() async throws
 }
 
+/// 三个在线协议适配器共用的：配置就绪即可用、按字数估 token
+protocol OnlineTextGenerator: TextGenerator {
+    var config: OnlineEndpointConfig { get }
+}
+
+extension OnlineTextGenerator {
+    public var isDownloaded: Bool { config.isReady }
+
+    public func countTokens(_ text: String) -> Int {
+        OnlineTokenEstimator.countTokens(text)
+    }
+}
+
 /// OpenAI Chat Completions 兼容协议适配器（覆盖 DeepSeek、阿里云百炼、OpenAI 及自定义网关）
-public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -166,12 +240,6 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         self.requestTimeout = requestTimeout
     }
 
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
-    }
-
     public func load(progress: @escaping (Double) -> Void) async throws {
         try Task.checkCancellation()
         progress(1)
@@ -185,42 +253,66 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
 
         let url = try endpointURL()
         let headers = authHeaders()
-
-        var response = try await OnlineTextSupport.postJSON(
-            url: url,
-            headers: headers,
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens, includeResponseFormat: true),
-            timeout: requestTimeout,
-            transport: transport
-        )
-
-        if response.status == 400, !OnlineAPIError.isModelNotFoundError(data: response.data) {
-            try Task.checkCancellation()
-            response = try await OnlineTextSupport.postJSON(
+        let tokens = config.requestTokens(maxTokens)
+        func send(format: Bool, tokens: Int) async throws -> HTTPResponse {
+            try await OnlineTextSupport.postJSON(
                 url: url,
                 headers: headers,
-                payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens, includeResponseFormat: false),
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens, includeResponseFormat: format),
                 timeout: requestTimeout,
                 transport: transport
             )
         }
 
+        // 400 时先去掉 response_format 重试；仍被拒、且上限比正文预算大（表里没有、上限更低的模型），按正文预算再发
+        var format = true
+        var sent = tokens
+        var response = try await send(format: format, tokens: sent)
+        if OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            format = false
+            response = try await send(format: format, tokens: sent)
+        }
+        if sent > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            sent = maxTokens
+            response = try await send(format: format, tokens: sent)
+        }
         try response.checkSuccess()
-        let message = try firstMessage(from: response.data)
+        var choice = try firstChoice(from: response.data)
 
-        let contentText: String
+        // 思考吃光了上限、正文为空：上限还没到模型接受的值（自定义网关）时放大再试一次，仍为空照常报错
+        if choice.finishReason == "length", (try? OnlineTextSupport.extractNormalizedText(choice.text ?? "")) == nil,
+           let retry = OnlineOutputLimit.retryTokens(providerID: config.providerID), retry > sent
+        {
+            try Task.checkCancellation()
+            response = try await send(format: format, tokens: retry)
+            try response.checkSuccess()
+            choice = try firstChoice(from: response.data)
+        }
+
+        guard let text = choice.text else { throw OnlineAPIError.emptyResponse }
+        return try OnlineTextSupport.extractNormalizedText(text)
+    }
+
+    /// 第一条回复的正文（`content` 为字符串或文本分片）和结束原因。没有正文字段时 `text` 为 nil
+    private func firstChoice(from data: Data) throws -> (text: String?, finishReason: String?) {
+        let choices = try OnlineTextSupport.decodeArrayField("choices", from: data)
+        guard let first = choices.first, let message = first["message"] as? [String: Any] else {
+            throw OnlineAPIError.emptyResponse
+        }
+        let text: String?
         if let string = message["content"] as? String {
-            contentText = string
+            text = string
         } else if let parts = message["content"] as? [[String: Any]] {
-            contentText = parts.compactMap { part -> String? in
+            text = parts.compactMap { part -> String? in
                 if let type = part["type"] as? String, type != "text" { return nil }
                 return part["text"] as? String
             }.joined()
         } else {
-            throw OnlineAPIError.emptyResponse
+            text = nil
         }
-
-        return try OnlineTextSupport.extractNormalizedText(contentText)
+        return (text, first["finish_reason"] as? String)
     }
 
     func probeConnection() async throws {
@@ -266,7 +358,9 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         return message
     }
 
-    private func buildPayload(system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool) -> [String: Any] {
+    private func buildPayload(
+        system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool
+    ) -> [String: Any] {
         var messages: [[String: String]] = []
         if !system.isEmpty {
             messages.append(["role": "system", "content": system])
@@ -286,12 +380,12 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
 }
 
 /// Anthropic Messages 原生协议适配器
-public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class AnthropicTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
     private static let apiVersion = "2023-06-01"
 
     public convenience init(
@@ -323,12 +417,6 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         self.requestTimeout = requestTimeout
     }
 
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
-    }
-
     public func load(progress: @escaping (Double) -> Void) async throws {
         try Task.checkCancellation()
         progress(1)
@@ -340,13 +428,19 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         try Task.checkCancellation()
         try config.validateReady()
 
-        let response = try await OnlineTextSupport.postJSON(
-            url: try endpointURL(),
-            headers: authHeaders(),
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens),
-            timeout: requestTimeout,
-            transport: transport
-        )
+        let url = try endpointURL()
+        let headers = authHeaders()
+        let send = { (payload: [String: Any]) in
+            try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
+                                                 timeout: self.requestTimeout, transport: self.transport)
+        }
+        // 被拒（400）、且上限比正文预算大（表里没有、上限更低的模型）时按正文预算再发一次
+        let tokens = config.requestTokens(maxTokens)
+        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: tokens))
+        if tokens > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens))
+        }
         try response.checkSuccess()
 
         let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
@@ -410,15 +504,15 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
 }
 
 /// Google Gemini 原生 generateContent 协议适配器
-public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Sendable {
+public final class GeminiTextGenerator: OnlineTextGenerator, ConnectionProbable, Sendable {
     private static let safetyFinishReasons: Set<String> = [
         "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII",
     ]
     public let config: OnlineEndpointConfig
     public let contextTokens: Int
     public let maxOutputTokens: Int
-    private let transport: any HTTPTransport
-    private let requestTimeout: TimeInterval
+    let transport: any HTTPTransport
+    let requestTimeout: TimeInterval
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -449,12 +543,6 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         self.requestTimeout = requestTimeout
     }
 
-    public var isDownloaded: Bool { config.isReady }
-
-    public func countTokens(_ text: String) -> Int {
-        OnlineTokenEstimator.countTokens(text)
-    }
-
     public func load(progress: @escaping (Double) -> Void) async throws {
         try Task.checkCancellation()
         progress(1)
@@ -466,18 +554,25 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         try Task.checkCancellation()
         try config.validateReady()
 
-        let response = try await OnlineTextSupport.postJSON(
-            url: try generateContentURL(),
-            headers: authHeaders(),
-            payload: buildPayload(
-                system: system,
-                prompt: prompt,
-                maxTokens: maxTokens,
-                responseMimeType: "application/json"
-            ),
-            timeout: requestTimeout,
-            transport: transport
-        )
+        let url = try generateContentURL()
+        let headers = authHeaders()
+        func send(_ tokens: Int) async throws -> HTTPResponse {
+            try await OnlineTextSupport.postJSON(
+                url: url,
+                headers: headers,
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens,
+                                      responseMimeType: "application/json"),
+                timeout: requestTimeout,
+                transport: transport
+            )
+        }
+        // 被拒（400）、且上限比正文预算大（表里没有、上限更低的模型）时按正文预算再发一次
+        let tokens = config.requestTokens(maxTokens)
+        var response = try await send(tokens)
+        if tokens > maxTokens, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(maxTokens)
+        }
         try response.checkSuccess()
 
         let (parts, finishReason) = try firstCandidateParts(from: response.data)

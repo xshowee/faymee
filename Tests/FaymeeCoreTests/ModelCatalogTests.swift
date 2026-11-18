@@ -11,6 +11,12 @@ import Testing
         }
     }
 
+    @Test func 纪要模型在说明文字里的名字不带量化标注() {
+        #expect(ModelCatalog.builtIn.model(id: LocalModel.qwen3_5_4B.id)?.shortName == "Qwen3.5 4B")
+        let minutes = ModelCatalog.builtIn.models.filter { $0.roles.contains(.minutes) }
+        #expect(minutes.allSatisfy { !$0.shortName.contains("（") })
+    }
+
     @Test func id唯一() {
         let ids = catalog.models.map(\.id)
         #expect(Set(ids).count == ids.count)

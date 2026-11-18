@@ -585,8 +585,8 @@ enum DiarizationStepError: LocalizedError {
     }
 }
 
-/// 当前时间去掉小数秒：转写稿写盘会丢小数秒，取整后回调里的值和磁盘读回的相等
-private func wholeSecondNow() -> Date {
+/// 当前时间去掉小数秒：转写稿、纪要写盘会丢小数秒，取整后回调里的值和磁盘读回的相等
+func wholeSecondNow() -> Date {
     Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
 }
 

@@ -21,6 +21,7 @@ extension Transcript {
     /// - 去掉首尾空白和换行；清空等于取消（不支持删句子）
     /// - 句中的换行换成空格：一句一行，复制全文也是一条一行
     /// - 改回引擎原文等于恢复原文，不再算修改
+    /// - 纠错改过的句子：视为接受这处纠错，清掉 `correction`；original 存修改前（纠错后）的文字
     /// 返回转写稿是否有变化，没有变化就不必写盘
     @discardableResult
     public mutating func edit(sentence id: String, to text: String) -> Bool {
@@ -32,6 +33,7 @@ extension Transcript {
         let original = s.original ?? s.text
         s.original = text == original ? nil : original
         s.text = text
+        s.correction = nil
         items[i] = .sentence(s)
         return true
     }

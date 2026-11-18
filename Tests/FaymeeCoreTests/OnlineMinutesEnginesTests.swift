@@ -77,7 +77,8 @@ private func makeOpenAIConfig(
 
         let body = try #require(recorded.bodyJSONObject())
         #expect(body["model"] as? String == "deepseek-chat")
-        #expect(body["max_tokens"] as? Int == 512)
+        // 输出上限含思考，按模型取（见 OnlineOutputLimit），不按调用方的正文预算 512
+        #expect(body["max_tokens"] as? Int == 131_072)
         let responseFormat = try #require(body["response_format"] as? [String: String])
         #expect(responseFormat == ["type": "json_object"])
         let messages = try #require(body["messages"] as? [[String: String]])
@@ -127,19 +128,21 @@ private func makeOpenAIConfig(
         #expect(firstBody["response_format"] != nil)
         #expect(secondBody["response_format"] == nil)
         #expect(secondBody["model"] as? String == "gpt-4.1-mini")
-        #expect(secondBody["max_tokens"] as? Int == 256)
+        #expect(secondBody["max_tokens"] as? Int == 32_768)
     }
 
-    @Test func 去掉response_format重试仍返回400时抛出badRequest() async throws {
+    @Test func 去掉response_format和降到正文预算重试仍返回400时抛出badRequest() async throws {
         let transport = FakeHTTPTransport()
-        try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
-        try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
+        for _ in 0..<3 {
+            try transport.enqueue(json: ["error": ["message": "bad model"]], status: 400)
+        }
 
         let generator = OpenAICompatibleTextGenerator(config: makeOpenAIConfig(), transport: transport)
         await #expect(throws: OnlineAPIError.badRequest(400, "bad model")) {
             _ = try await generator.generate(system: "s", prompt: "p", maxTokens: 128)
         }
-        #expect(transport.recordedRequests.count == 2)
+        let limits = transport.recordedRequests.compactMap { $0.bodyJSONObject()?["max_tokens"] as? Int }
+        #expect(limits == [32_768, 32_768, 128])
     }
 
     @Test func 服务端400明确为模型不存在时不剥离response_format重试_提及参数不支持仍重试() async throws {
@@ -267,7 +270,7 @@ private func makeAnthropicConfig(
 
         let body = try #require(recorded.bodyJSONObject())
         #expect(body["model"] as? String == "claude-sonnet-4-5")
-        #expect(body["max_tokens"] as? Int == 1_024)
+        #expect(body["max_tokens"] as? Int == 64_000)
         #expect(body["system"] as? String == "系统约束")
         let messages = try #require(body["messages"] as? [[String: String]])
         #expect(messages == [["role": "user", "content": "会议内容"]])
@@ -358,7 +361,7 @@ private func makeGeminiConfig(
         #expect(userParts == [["text": "转写内容"]])
 
         let genConfig = try #require(body["generationConfig"] as? [String: Any])
-        #expect(genConfig["maxOutputTokens"] as? Int == 2_048)
+        #expect(genConfig["maxOutputTokens"] as? Int == 65_536)
         #expect(genConfig["responseMimeType"] as? String == "application/json")
     }
 
@@ -703,7 +706,7 @@ private func makeGeminiConfig(
         // 1 次整场提取（跳过合并）+ 1 次笔记展开 = 2 次 HTTP 调用
         #expect(transport.recordedRequests.count == 2)
         let extractBody = try #require(transport.recordedRequests[0].bodyJSONObject())
-        #expect(extractBody["max_tokens"] as? Int == 8_192)
+        #expect(extractBody["max_tokens"] as? Int == 131_072)
         let extractMessages = try #require(extractBody["messages"] as? [[String: String]])
         let userPrompt = try #require(extractMessages.last?["content"])
         #expect(userPrompt.contains("版本发布评审会"))
@@ -712,7 +715,7 @@ private func makeGeminiConfig(
         #expect(userPrompt.contains("[s600 "))
 
         let expandBody = try #require(transport.recordedRequests[1].bodyJSONObject())
-        #expect(expandBody["max_tokens"] as? Int == 8_192)
+        #expect(expandBody["max_tokens"] as? Int == 131_072)
         let expandPrompt = try #require((expandBody["messages"] as? [[String: String]])?.last?["content"])
         #expect(expandPrompt.contains("预算→王总确认"))
 
@@ -779,11 +782,11 @@ private func makeGeminiConfig(
         #expect(transport.recordedRequests.count >= 3)
         for recorded in transport.recordedRequests {
             let body = try #require(recorded.bodyJSONObject())
-            let maxTokens = try #require(body["max_tokens"] as? Int)
-            #expect(maxTokens == 8_192)
+            // 请求的上限含思考（gpt-4.1-mini 32768）；分段仍按正文预算 8192 留输出
+            #expect(body["max_tokens"] as? Int == 32_768)
             let messages = try #require(body["messages"] as? [[String: String]])
             let usedTokens = messages.reduce(0) { $0 + generator.countTokens($1["content"] ?? "") }
-            #expect(usedTokens + maxTokens <= 64_000)
+            #expect(usedTokens + 8_192 <= 64_000)
         }
         #expect(minutes.sections.first { $0.kind == .overview }?.items.map(\.text) == ["全场合并概要"])
     }

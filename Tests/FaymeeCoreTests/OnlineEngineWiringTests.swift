@@ -624,6 +624,13 @@ private final class WiringHost: TranscriptionHost, MinutesHost {
         meetings[id] = m
         try! store.save(m)
     }
+
+    func setCorrection(_ state: CorrectionState?, for id: String) {
+        guard var m = meetings[id] else { return }
+        m.correction = state
+        meetings[id] = m
+        try! store.save(m)
+    }
 }
 
 @MainActor

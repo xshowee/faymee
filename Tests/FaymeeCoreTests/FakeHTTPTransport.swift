@@ -230,3 +230,30 @@ final class FakeHTTPTransport: HTTPTransport, @unchecked Sendable {
         }
     }
 }
+
+/// 包一层真实的 HTTP 传输，记下每次在线请求的响应和耗时（在线契约测试、纠错评估用）
+final class RecordingHTTPTransport: HTTPTransport, @unchecked Sendable {
+    struct Exchange {
+        let response: HTTPResponse
+        let seconds: TimeInterval
+
+        /// 响应体的 JSON 对象；不是 JSON 时为 nil
+        var json: [String: Any]? { try? JSONSerialization.jsonObject(with: response.data) as? [String: Any] }
+    }
+
+    private let base = URLSessionHTTPTransport()
+    private let lock = NSLock()
+    private var recorded: [Exchange] = []
+
+    var exchanges: [Exchange] { lock.withLock { recorded } }
+
+    func removeAll() { lock.withLock { recorded.removeAll() } }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let started = Date()
+        let response = try await base.send(request)
+        let exchange = Exchange(response: response, seconds: Date().timeIntervalSince(started))
+        lock.withLock { recorded.append(exchange) }
+        return response
+    }
+}

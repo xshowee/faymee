@@ -57,15 +57,17 @@ extension Transcript {
 
     /// 复制全文和导出转写稿共用的行：`[03:15] 张三：文本`。只有显示说话人时句子才带前缀，
     /// 没有说话人的句子写“未知：”（与界面一致，免得被当成上一个人说的）；合盖空白和笔记永远不带。
-    /// 笔记一行是 `[12:03] 笔记：文字`。`clean` 处理句子、说话人名字和笔记（导出时把换行换成空格）
+    /// 笔记一行是 `[12:03] 笔记：文字`。纠错删成空句的句子不出现。`clean` 处理句子、说话人名字和笔记（导出时把换行换成空格）
     func copyLines(notes: [TranscriptNote] = [], _ clean: (String) -> String) -> [String] {
         let showsSpeakers = showsSpeakers
-        return rows(notes: notes).map { row in
+        return rows(notes: notes).compactMap { row in
             switch row {
             case let .note(note):
                 return "[\(formatDuration(note.offset))] 笔记：\(clean(note.text))"
             case let .item(i):
                 let item = items[i]
+                // 纠错删成空句的（与上一句重复的整句）不占一行
+                if case let .sentence(s) = item, s.text.isEmpty { return nil }
                 let text = switch item {
                 case let .sentence(s) where showsSpeakers: "\(clean(speakerName(for: s)))：\(clean(s.text))"
                 case let .sentence(s): clean(s.text)

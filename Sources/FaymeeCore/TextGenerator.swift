@@ -7,8 +7,9 @@ public protocol TextGenerator {
     /// 一次调用能容纳的输入 + 输出长度（token），决定分段大小。
     /// 应已扣除引擎自己套的对话模板、思考等开销
     var contextTokens: Int { get }
-    /// 单次调用允许的最大输出长度（token），与 `contextTokens` 解耦。
-    /// 默认按 `contextTokens / 2` 计算，保持本机模型的既有预算行为
+    /// 单次调用的正文预算（token），与 `contextTokens` 解耦，分段按它留输出。
+    /// 默认按 `contextTokens / 2` 计算，保持本机模型的既有预算行为。在线引擎发请求时输出上限另含思考的余量
+    /// （`OnlineOutputLimit`），不在这里算
     var maxOutputTokens: Int { get }
     /// 纪要每次调用留多少给输出（随模型的输出习惯定，见 `MinutesChunking`）。默认 `.standard`
     var minutesChunking: MinutesChunking { get }

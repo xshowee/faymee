@@ -20,6 +20,8 @@ private final class FakeGenerator: TextGenerator, @unchecked Sendable {
     var block = false
     var loadError: Error?
     var respond: (_ prompt: String) -> String = { _ in oneOverview }
+    /// 设了就按提示词决定要不要在 generate 里抛错
+    var failure: ((_ prompt: String) -> Error?)?
     /// "load"、"generate"、"unload"
     private(set) var events: [String] = []
     private(set) var prompts: [String] = []
@@ -48,6 +50,7 @@ private final class FakeGenerator: TextGenerator, @unchecked Sendable {
         prompts.append(prompt)
         startedContinuation.yield()
         while block { try await Task.sleep(for: .milliseconds(5)) }
+        if let error = failure?(prompt) { throw error }
         return respond(prompt)
     }
 
@@ -114,8 +117,18 @@ private final class FakeHost: MinutesHost, TranscriptionHost {
     let store: MeetingStore
     var meetings: [String: Meeting] = [:]
     private(set) var history: [String: [MinutesState.Status]] = [:]
+    /// 纠错状态的每次变化，nil 表示清掉
+    private(set) var correctionHistory: [String: [CorrectionState.Status?]] = [:]
 
     init(store: MeetingStore) { self.store = store }
+
+    func setCorrection(_ state: CorrectionState?, for id: String) {
+        guard var m = meetings[id] else { return }
+        m.correction = state
+        meetings[id] = m
+        correctionHistory[id, default: []].append(state?.status)
+        try! store.save(m)
+    }
 
     func meeting(_ id: String) -> Meeting? { meetings[id] }
 
@@ -1196,5 +1209,387 @@ private final class Fixture {
 
         #expect(try f.store.loadMinutes("m1")?.model == "gemini/gemini-2.5-flash")
         #expect(f.host.meetings["m1"]?.minutes == MinutesState(status: .done))
+    }
+}
+
+// MARK: - 转写纠错（spec「在管线里的位置」「测试决定」管线）
+
+/// 纠错的提示词里有这一句（纪要的没有）
+private func isCorrection(_ prompt: String) -> Bool { prompt.contains("要校对的转写稿") }
+/// 纠错把 s1 的「讨论」换成同音的「讨轮」
+private let oneFix = #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}]}"#
+/// 在线整句改写：同样把 s1 的「讨论」换成「讨轮」
+private let oneEdit = #"{"edits": [{"id": "s1", "text": "我们今天讨轮 v2.3 的发布时间，支付接口还没准备好"}]}"#
+
+@MainActor @Suite struct MinutesPipelineCorrectionTests {
+    /// 纠错开关开着；纠错输出 `oneFix`（在线 `oneEdit`），纪要输出 `oneOverview`
+    private func fixture(requiresPower: Bool = true, isOnlineEngine: Bool = false) -> Fixture {
+        let engine = FakeGenerator()
+        let correction = isOnlineEngine ? oneEdit : oneFix
+        engine.respond = { isCorrection($0) ? correction : oneOverview }
+        let f = Fixture(engine, requiresPower: requiresPower, isOnlineEngine: isOnlineEngine)
+        f.pipeline.correctsTranscripts = true
+        return f
+    }
+
+    @Test func 转写完先纠错再生成纪要_纪要用的是纠错后的文字() async throws {
+        let f = fixture()
+        f.addMeeting()
+
+        #expect(f.pipeline.transcriptionFinished("m1"))
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript("m1"))
+        #expect(t.sentences[0].text == "我们今天讨轮 v2.3 的发布时间，支付接口还没准备好")
+        #expect(t.sentences[0].correction == "我们今天讨论 v2.3 的发布时间，支付接口还没准备好")
+        #expect(t.correction?.engine == "fake/generator")
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        #expect(minutes.source.textHash == t.textHash)
+        #expect(f.host.correctionHistory["m1"] == [.queued, .running, .done])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 纠错和纪要之间模型只加载一次() async throws {
+        let f = fixture()
+        f.addMeeting()
+
+        f.pipeline.transcriptionFinished("m1")
+        try await f.drain()
+
+        #expect(f.engine.unloads == 1)
+        #expect(f.engine.events.last == "unload")
+        #expect(f.engine.events.dropLast().allSatisfy { $0 != "unload" })
+    }
+
+    @Test func 没开自动纪要时纠错照样跑() async throws {
+        let f = fixture()
+        f.pipeline.autoGenerate = false
+        f.addMeeting()
+
+        #expect(!f.pipeline.transcriptionFinished("m1"))
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes == nil)
+        #expect(f.engine.prompts.map(isCorrection) == [true])
+    }
+
+    @Test func 纠错失败时记失败_纪要照常() async throws {
+        let f = fixture()
+        f.engine.failure = { isCorrection($0) ? EngineError() : nil }
+        f.addMeeting()
+
+        f.pipeline.transcriptionFinished("m1")
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction == CorrectionState(status: .failed, error: "内存不足，关闭一些应用后重试"))
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+        #expect(try f.store.loadTranscript("m1")?.correctedCount == 0)
+    }
+
+    @Test func 失败后重试重新入队() async throws {
+        let f = fixture()
+        f.engine.failure = { isCorrection($0) ? EngineError() : nil }
+        f.addMeeting()
+        f.pipeline.transcriptionFinished("m1")
+        try await f.drain()
+
+        f.engine.failure = nil
+        #expect(f.pipeline.enqueueCorrection("m1", now: true))
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(try f.store.loadTranscript("m1")?.correctedCount == 1)
+    }
+
+    @Test func 开关关着时直接到纪要() async throws {
+        let f = fixture()
+        f.pipeline.correctsTranscripts = false
+        f.addMeeting()
+
+        #expect(f.pipeline.transcriptionFinished("m1"))
+        try await f.drain()
+
+        #expect(f.engine.prompts.map(isCorrection) == [false])
+        #expect(f.host.meetings["m1"]?.correction == nil)
+    }
+
+    @Test func 手动生成纪要排在同一场的纠错后面() async throws {
+        let f = fixture()
+        f.addMeeting()
+        f.pipeline.isSuspended = true
+
+        #expect(f.pipeline.enqueueCorrection("m1"))
+        #expect(f.pipeline.enqueue("m1", now: true))
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 纠错进行中点生成纪要_排在它后面() async throws {
+        let f = fixture()
+        f.engine.block = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1")
+        var started = f.engine.started.makeAsyncIterator()
+        await started.next()
+
+        #expect(f.pipeline.correctionActivity(for: "m1") != nil)
+        #expect(f.pipeline.activity(for: "m1") == nil)
+        #expect(f.pipeline.enqueue("m1"))
+        #expect(f.pipeline.queue == ["m1"])
+        f.engine.block = false
+        try await f.drain()
+
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        let minutes = try #require(try f.store.loadMinutes("m1"))
+        #expect(minutes.source.textHash == (try f.store.loadTranscript("m1"))?.textHash)
+    }
+
+    @Test func 用电池时自动纠错不开始_手动的开始() async throws {
+        let f = fixture()
+        f.pipeline.isOnPower = false
+        f.addMeeting()
+
+        f.pipeline.transcriptionFinished("m1")
+        #expect(f.pipeline.correctionWaitReason(for: "m1") == .power)
+        #expect(f.engine.generations == 0)
+
+        #expect(f.pipeline.enqueueCorrection("m1", now: true))
+        try await f.until { f.host.meetings["m1"]?.correction?.status == .done }
+        // 自动的纪要照规则等接通电源
+        #expect(f.pipeline.waitReason(for: "m1") == .power)
+    }
+
+    @Test func 手动生成纪要时同一场排队的纠错跟着提前() async throws {
+        let f = fixture()
+        f.pipeline.isOnPower = false
+        f.addMeeting()
+        f.pipeline.transcriptionFinished("m1")
+
+        f.pipeline.enqueue("m1", now: true)
+        try await f.drain()
+
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+    }
+
+    @Test func 在线引擎时转写完也先纠错再生成纪要_用电池也不等() async throws {
+        let f = fixture(requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isOnPower = false
+        f.addMeeting()
+
+        #expect(f.pipeline.transcriptionFinished("m1"))
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript("m1"))
+        #expect(t.sentences[0].text == "我们今天讨轮 v2.3 的发布时间，支付接口还没准备好")
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        #expect(f.host.correctionHistory["m1"] == [.queued, .running, .done])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 在线配置没补齐时纠错排队_补齐后开始() async throws {
+        let f = fixture(requiresPower: false, isOnlineEngine: true)
+        f.engine.isDownloaded = false
+        f.pipeline.modelAvailabilityChanged()
+        f.addMeeting()
+
+        f.pipeline.transcriptionFinished("m1")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(f.pipeline.correctionWaitReason(for: "m1") == .onlineConfig)
+        #expect(f.engine.generations == 0)
+
+        f.engine.isDownloaded = true
+        f.pipeline.modelAvailabilityChanged()
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+    }
+
+    @Test func 排队中的纠错在切到在线后用在线跑() async throws {
+        let f = fixture()
+        f.addMeeting()
+        f.pipeline.isSuspended = true
+        f.pipeline.transcriptionFinished("m1")
+
+        f.engine.respond = { isCorrection($0) ? oneEdit : oneOverview }
+        f.pipeline.setEngine(generator: f.engine, model: "online/model", requiresPower: false, isOnlineEngine: true)
+        f.pipeline.isSuspended = false
+        try await f.drain()
+
+        #expect(f.host.correctionHistory["m1"] == [.queued, .running, .done])
+        #expect(try f.store.loadTranscript("m1")?.correction?.engine == "online/model")
+        #expect(f.engine.prompts.map(isCorrection) == [true, false])
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 重新转写后新稿没有纠错_开关关着时清掉上次的纠错状态() async throws {
+        let f = fixture()
+        f.pipeline.correctsTranscripts = false
+        f.addMeeting()
+        f.host.meetings["m1"]?.correction = CorrectionState(status: .failed, error: "内存不足")
+
+        f.pipeline.transcriptionFinished("m1")
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction == nil)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 重新转写时排着的纠错不清掉() async throws {
+        let f = fixture()
+        f.pipeline.correctsTranscripts = false
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+
+        f.pipeline.transcriptionFinished("m1")
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .queued)
+        f.pipeline.isSuspended = false
+        try await f.drain()
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+    }
+
+    @Test func 重启后恢复排队的纠错_进行中的从头再跑_之后照自动规则生成纪要() async throws {
+        let f = fixture()
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        f.host.meetings["m1"]?.correction = CorrectionState(status: .running)
+        f.host.meetings["m2"]?.correction = CorrectionState(status: .queued)
+
+        f.pipeline.restore(Array(f.host.meetings.values))
+        try await f.drain()
+
+        for id in ["m1", "m2"] {
+            #expect(f.host.meetings[id]?.correction?.status == .done)
+            #expect(f.host.meetings[id]?.minutes?.status == .done)
+        }
+    }
+
+    /// 同一个存储上重新开一条管线，按磁盘上的 meeting.json 恢复：模拟重启，也是删除会议失败时重排队列的做法
+    private func restart(_ f: Fixture) -> MinutesPipeline {
+        let pipeline = MinutesPipeline(store: f.store, generator: f.engine, model: "fake/generator", host: f.host)
+        pipeline.correctsTranscripts = true
+        pipeline.restore(f.store.loadAll())
+        return pipeline
+    }
+
+    @Test func 手动纠错重启后恢复仍是手动_不自动生成纪要() async throws {
+        let f = fixture()
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+        f.pipeline.remove("m1")
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes == nil)
+    }
+
+    @Test func 没记是不是自动的旧文件_按自动的恢复() async throws {
+        let f = fixture()
+        var m = f.addMeeting()
+        m.correction = CorrectionState(status: .queued)
+        try f.store.save(m)
+        f.host.meetings["m1"] = m
+        let json = try String(contentsOf: f.store.directory("m1").appendingPathComponent("meeting.json"), encoding: .utf8)
+        #expect(!json.contains("automatic"))
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 手动排着的纠错被自动路径接上后_重启恢复照自动规则生成纪要() async throws {
+        let f = fixture()
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+        f.pipeline.transcriptionFinished("m1")
+        f.pipeline.remove("m1")
+
+        let restarted = restart(f)
+        try await f.until { restarted.isIdle }
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 重启时在线引擎下排队的纠错照常恢复() async throws {
+        let f = fixture(requiresPower: false, isOnlineEngine: true)
+        f.addMeeting()
+        f.host.meetings["m1"]?.correction = CorrectionState(status: .queued)
+
+        f.pipeline.restore(Array(f.host.meetings.values))
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+        #expect(try f.store.loadTranscript("m1")?.correctedCount == 1)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 纠错期间手动改了一句_只跳过那一句() async throws {
+        let f = fixture()
+        f.engine.respond = { prompt in
+            isCorrection(prompt)
+                ? #"{"fixes": [{"id": "s1", "from": "讨论", "to": "讨轮"}, {"id": "s2", "from": "推迟", "to": "推持"}]}"#
+                : oneOverview
+        }
+        f.engine.block = true
+        f.addMeeting()
+        f.pipeline.transcriptionFinished("m1")
+        var started = f.engine.started.makeAsyncIterator()
+        await started.next()
+
+        var edited = try #require(try f.store.loadTranscript("m1"))
+        edited.edit(sentence: "s1", to: "手动改过的第一句")
+        try f.store.saveTranscript(edited, for: "m1")
+        f.engine.block = false
+        try await f.drain()
+
+        let t = try #require(try f.store.loadTranscript("m1"))
+        #expect(t.sentences[0].text == "手动改过的第一句")
+        #expect(t.sentences[0].correction == nil)
+        #expect(t.sentences[1].text.hasPrefix("那就推持一周发布"))
+    }
+
+    @Test func 转写通知_自动纠错排着且会自动生成纪要时算纪要已排队() async throws {
+        let f = fixture()
+        f.engine.block = true
+        f.addMeeting()
+        f.pipeline.transcriptionFinished("m1")
+        #expect(f.pipeline.followUp(for: "m1") == .queued(waitingFor: nil))
+
+        f.pipeline.autoGenerate = false
+        #expect(f.pipeline.followUp(for: "m1") == .notQueued)
+        f.pipeline.remove("m1")
+        f.engine.block = false
+    }
+
+    @Test func 删除会议时排队和进行中的纠错一起移除() async throws {
+        let f = fixture()
+        f.engine.block = true
+        f.addMeeting("m1")
+        f.addMeeting("m2")
+        f.pipeline.enqueueCorrection("m1")
+        f.pipeline.enqueueCorrection("m2")
+        var started = f.engine.started.makeAsyncIterator()
+        await started.next()
+
+        f.pipeline.remove("m1")
+        f.pipeline.remove("m2")
+        f.engine.block = false
+        try await f.drain()
+        #expect(try f.store.loadTranscript("m1")?.correctedCount == 0)
+        #expect(f.pipeline.correctionWaitReason(for: "m2") == nil)
     }
 }

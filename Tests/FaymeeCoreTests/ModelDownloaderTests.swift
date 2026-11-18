@@ -90,6 +90,7 @@ private final class FakeHost: MinutesHost {
     var meetings: [String: Meeting] = [:]
     func meeting(_ id: String) -> Meeting? { meetings[id] }
     func setMinutes(_ state: MinutesState, for id: String) { meetings[id]?.minutes = state }
+    func setCorrection(_ state: CorrectionState?, for id: String) { meetings[id]?.correction = state }
 }
 
 @MainActor

@@ -16,15 +16,20 @@ public struct Transcript: Codable, Hashable, Sendable {
     public var items: [TranscriptItem]
     /// 说话人信息，nil 表示从未区分说话人。v0.4 新增的可选字段，`version` 不变
     public var diarization: Diarization?
+    /// 转写纠错的信息（引擎、时间、热词快照、数字建议、挡掉的条数），nil 表示没纠错过。
+    /// 新增的可选字段，`version` 不变，同 `diarization`
+    public var correction: TranscriptCorrection?
 
     public init(version: Int = Transcript.currentVersion, engine: String, createdAt: Date,
-                hotwords: [String], items: [TranscriptItem], diarization: Diarization? = nil) {
+                hotwords: [String], items: [TranscriptItem], diarization: Diarization? = nil,
+                correction: TranscriptCorrection? = nil) {
         self.version = version
         self.engine = engine
         self.createdAt = createdAt
         self.hotwords = hotwords
         self.items = items
         self.diarization = diarization
+        self.correction = correction
     }
 
     public var sentences: [TranscriptSentence] {
@@ -63,9 +68,12 @@ public struct TranscriptSentence: Hashable, Sendable {
     public var speaker: String?
     /// 单句改过说话人时的区分结果原值，未改过时为 nil
     public var originalSpeaker: OriginalSpeaker?
+    /// 被转写纠错改过时保存纠错前的文字，`text` 是改后的文字；没纠错过时为 nil。
+    /// 与 `original`（人工修改）分开：`editCount`、「已修改」标记都不算纠错
+    public var correction: String?
 
     public init(id: String, start: TimeInterval, end: TimeInterval, text: String, original: String? = nil,
-                speaker: String? = nil, originalSpeaker: OriginalSpeaker? = nil) {
+                speaker: String? = nil, originalSpeaker: OriginalSpeaker? = nil, correction: String? = nil) {
         self.id = id
         self.start = start
         self.end = end
@@ -73,6 +81,7 @@ public struct TranscriptSentence: Hashable, Sendable {
         self.original = original
         self.speaker = speaker
         self.originalSpeaker = originalSpeaker
+        self.correction = correction
     }
 }
 
@@ -175,7 +184,7 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
 
     private enum Kind: String, Codable { case sentence, gap }
     private enum CodingKeys: String, CodingKey {
-        case kind, id, start, end, text, original, speaker, originalSpeaker, reason
+        case kind, id, start, end, text, original, speaker, originalSpeaker, correction, reason
     }
 
     public init(from decoder: Decoder) throws {
@@ -189,7 +198,8 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
                 text: try c.decode(String.self, forKey: .text),
                 original: try c.decodeIfPresent(String.self, forKey: .original),
                 speaker: try c.decodeIfPresent(String.self, forKey: .speaker),
-                originalSpeaker: try c.decodeIfPresent(OriginalSpeaker.self, forKey: .originalSpeaker)))
+                originalSpeaker: try c.decodeIfPresent(OriginalSpeaker.self, forKey: .originalSpeaker),
+                correction: try c.decodeIfPresent(String.self, forKey: .correction)))
         case .gap:
             self = .gap(TranscriptGap(start: start, end: end, reason: try c.decode(GapReason.self, forKey: .reason)))
         }
@@ -208,6 +218,8 @@ public enum TranscriptItem: Codable, Hashable, Sendable {
             // v0.4 新增，没有时不写：没区分过的转写稿与 v0.3 写出的一样
             try c.encodeIfPresent(s.speaker, forKey: .speaker)
             try c.encodeIfPresent(s.originalSpeaker, forKey: .originalSpeaker)
+            // 转写纠错新增，没纠错过时不写
+            try c.encodeIfPresent(s.correction, forKey: .correction)
         case let .gap(g):
             try c.encode(Kind.gap, forKey: .kind)
             try c.encode(g.start, forKey: .start)
