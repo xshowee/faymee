@@ -287,7 +287,7 @@ extension ModelCatalog {
             // Unsloth 转换的 GGUF（Qwen 没发官方 GGUF）。ticket 11 实测：resident 峰值 3.4 GB（权重 2.7 GB，
             // footprint 约 0.65 GB：混合注意力，KV 小）；20 分钟会议 105–110 秒，56 分钟会议 323 秒
             memory: "约 3.4 GB", speed: "20 分钟会议约 2 分钟",
-            verdicts: [.minutes: "比 Qwen3 4B 准、快、省内存，基本不编造截止时间"],
+            verdicts: [.minutes: "基本不编造截止时间；比 Qwen3 4B 出纪要快、省内存"],
             parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
                                         minutesChunking: .standard, thinking: false),
             license: "Apache-2.0"),
