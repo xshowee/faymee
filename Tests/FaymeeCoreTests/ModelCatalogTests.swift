@@ -54,12 +54,14 @@ import Testing
         }
     }
 
-    @Test func 默认值_新安装转写用FunASRNano_已有安装保持SpeechAnalyzer_其他用途用现在的模型() {
+    @Test func 默认值_新安装转写用FunASRNano纪要用Qwen3_5_4B_已有安装保持SpeechAnalyzer和Qwen3_4B() {
         #expect(catalog.defaultID(for: .transcription, isExistingInstall: false) == "sherpa-onnx/funasr-nano-int8-2025-12-30")
         #expect(catalog.defaultID(for: .transcription, isExistingInstall: true) == "apple/speechanalyzer")
         #expect(catalog.defaultID(for: .liveCaptions, isExistingInstall: false) == "apple/speechanalyzer")
         #expect(catalog.defaultID(for: .liveFinalize, isExistingInstall: false) == nil)
-        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == LocalModel.qwen3_4B.id)
+        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == LocalModel.qwen3_5_4B.id)
+        // 老用户已下好 Qwen3 4B：升级后不用为纪要再下 2.7 GB
+        #expect(catalog.defaultID(for: .minutes, isExistingInstall: true) == LocalModel.qwen3_4B.id)
         #expect(catalog.defaultID(for: .voiceprint, isExistingInstall: false) == "3dspeaker-eres2net-base-zh-cn-3dspeaker-16k")
     }
 
@@ -116,7 +118,7 @@ import Testing
     }
 
     /// ticket 11 评估后进目录的纪要模型：按评估时的参数跑（8192 上下文、标准分段、不开思考），
-    /// 每个都带内存、速度和一句结论，Qwen3 4B 仍是默认。Qwen3.5 9B 用户嫌太重，不进目录
+    /// 每个都带内存、速度和一句结论，新安装默认 Qwen3.5 4B。Qwen3.5 9B 用户嫌太重，不进目录
     @Test func 纪要模型有Qwen3_4B和Qwen3_5_4B_都按评估参数_带内存速度结论() {
         let ids = catalog.models(for: .minutes).map(\.id)
         #expect(ids == ["llama/qwen3-4b-q4km", "llama/qwen3.5-4b-q4km"])
@@ -127,7 +129,7 @@ import Testing
             #expect(m.memory != nil && m.speed != nil && m.verdict(for: .minutes) != nil, "\(m.id)")
             #expect(m.license == "Apache-2.0", "\(m.id)")
         }
-        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == "llama/qwen3-4b-q4km")
+        #expect(catalog.defaultID(for: .minutes, isExistingInstall: false) == "llama/qwen3.5-4b-q4km")
     }
 
     @Test func Qwen3_5_4B的文件放在自己的目录_两个下载源() {

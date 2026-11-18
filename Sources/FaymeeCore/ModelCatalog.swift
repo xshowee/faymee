@@ -179,13 +179,14 @@ public struct ModelCatalog: Sendable {
     }
 
     /// 某个用途的默认模型 id；nil 表示“不用”。
-    /// 会后转写：已有安装（会议目录里已有会议）保持 SpeechAnalyzer，新安装用 Fun-ASR-Nano；其他用途都用现在的模型
+    /// 已有安装（会议目录里已有会议）保持原来的模型，新安装用评估后更好的：会后转写 SpeechAnalyzer → Fun-ASR-Nano，
+    /// 纪要 Qwen3 4B → Qwen3.5 4B（老用户已下好 Qwen3 4B，升级后不用为纪要再下 2.7 GB）；其他用途都用现在的模型
     public func defaultID(for role: ModelRole, isExistingInstall: Bool) -> String? {
         switch role {
         case .transcription: isExistingInstall ? ModelCatalog.speechAnalyzerID : LocalModel.funASRNano.id
         case .liveCaptions: ModelCatalog.speechAnalyzerID
         case .liveFinalize: nil
-        case .minutes: LocalModel.qwen3_4B.id
+        case .minutes: isExistingInstall ? LocalModel.qwen3_4B.id : LocalModel.qwen3_5_4B.id
         case .voiceprint: ModelCatalog.eres2netBaseID
         }
     }

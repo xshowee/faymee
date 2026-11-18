@@ -17,7 +17,7 @@ public final class ModelSelections {
 
     static let noneValue = "none"
 
-    /// - Parameter isExistingInstall: 是否已有安装（会议目录里已有会议），决定会后转写的默认值。
+    /// - Parameter isExistingInstall: 是否已有安装（会议目录里已有会议），决定会后转写和纪要的默认值。
     ///   只在某个用途第一次需要默认值时调用
     public init(defaults: UserDefaults = .standard, catalog: ModelCatalog = .builtIn,
                 isExistingInstall: @escaping () -> Bool) {
