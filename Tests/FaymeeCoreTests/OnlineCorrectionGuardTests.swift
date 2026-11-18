@@ -23,6 +23,16 @@ import Testing
             scope: .full, editable: editable ?? Set(all.map(\.id)), sentences: all, references: references))
     }
 
+    // MARK: 空白
+
+    @Test func 只加减空白的地方不应用_同一句的其他修改照常() {
+        // deepseek-flash 常在中英文之间加空格（「AI干」→「AI 干」），这是润色，不显示成纠错
+        let r = review(["s1": "用 AI 干这个活，我们要避免被动", "s2": "用 AI 干这个活"],
+                       in: ["用AI干这个活，我们要避免对动", "用AI干这个活"])
+        #expect(r.texts == ["s1": "用AI干这个活，我们要避免被动"])
+        #expect(r.rejections.isEmpty)
+    }
+
     // MARK: 补字（规则 4）
 
     @Test func 补单字不限来源() {

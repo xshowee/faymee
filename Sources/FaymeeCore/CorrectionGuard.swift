@@ -224,6 +224,8 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
             suggestions.append(NumberSuggestion(sentence: sentence.id, from: unit.before, to: unit.after))
         case .discardSuggestion:
             discardedNumbers += 1
+        case .skip:
+            break
         case .reject(let rule):
             failure = failure ?? rule
         }
@@ -254,10 +256,14 @@ private enum Verdict {
     case discardSuggestion
     /// 整句丢弃
     case reject(CorrectionRule)
+    /// 不应用、不记挡掉（只加减空白：润色，不是纠错）
+    case skip
 }
 
 private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range<Int>, residue: RecognitionResidue,
                    sentence: TranscriptSentence, context: CorrectionContext) -> Verdict {
+    // 只加减空白（中英文之间加空格之类）是润色，不应用；同一句的其他修改照常
+    if isWhitespaceOnly(segment) { return .skip }
     switch (segment.kind, context.scope) {
     case (_, .wordsOnly) where segment.kind != .replace:
         return .reject(.scope)
@@ -312,6 +318,11 @@ private func pinyinCheck(_ segment: TextDiff.Segment, in diff: TextDiff, bounds:
     }
     let widened = diff.widened(segment, minimum: CorrectionThreshold.pinyinUnit, within: bounds)
     return Pinyin.distanceRatio(widened.before, widened.after) <= CorrectionThreshold.pinyin
+}
+
+/// 改动的两边去掉空白后相同
+private func isWhitespaceOnly(_ segment: TextDiff.Segment) -> Bool {
+    segment.before.filter { !$0.isWhitespace } == segment.after.filter { !$0.isWhitespace }
 }
 
 /// 规则 6：`changed` 个字是否超过这句允许的改动量。原句字数不算标点、空白
