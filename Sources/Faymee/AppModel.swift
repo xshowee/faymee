@@ -44,7 +44,10 @@ final class AppModel {
     }
     /// 整理后的热词，每次编辑只算一次
     private(set) var hotwords: [String] = [] {
-        didSet { transcription.hotwords = hotwords }
+        didSet {
+            transcription.hotwords = hotwords
+            minutes.hotwords = hotwords
+        }
     }
     /// 热词表读不出来或没能保存，显示在热词表窗口里
     private(set) var hotwordsError: String?
@@ -226,6 +229,15 @@ final class AppModel {
         }
     }
 
+    /// “纠错转写稿”开关，记在 UserDefaults，默认关。开着时每场转写完成先用纪要的模型纠错，再走自动纪要；
+    /// 只影响之后完成的转写，旧会议不自动重做。设置窗口里绑定它
+    var correctTranscripts: Bool {
+        didSet {
+            UserDefaults.standard.set(correctTranscripts, forKey: "correctTranscripts")
+            minutes.correctsTranscripts = correctTranscripts
+        }
+    }
+
     /// “全局快捷键”开关，记在 UserDefaults，默认打开。录音中修改立即注册或注销。设置窗口里绑定它
     var globalShortcutsEnabled: Bool {
         didSet {
@@ -317,6 +329,8 @@ final class AppModel {
         pipeline.isSuspended = true
         pipeline.isOnPower = SystemState.isOnPower
         pipeline.autoGenerate = autoGenerateMinutes
+        pipeline.correctsTranscripts = correctTranscripts
+        pipeline.hotwords = hotwords
         pipeline.onFinish = { [weak self] in self?.minutesFinished($0, $1) }
         pipeline.coordinate(with: transcription)
         return pipeline
@@ -331,6 +345,7 @@ final class AppModel {
         inputSelection = InputSelection(storage: UserDefaults.standard.string(forKey: "inputSelection"))
         selectedDeviceName = UserDefaults.standard.string(forKey: "inputDeviceName")
         autoGenerateMinutes = UserDefaults.standard.object(forKey: "autoGenerateMinutes") as? Bool ?? true
+        correctTranscripts = UserDefaults.standard.bool(forKey: "correctTranscripts")
         diarizeSpeakers = UserDefaults.standard.object(forKey: "diarizeSpeakers") as? Bool ?? true
         globalShortcutsEnabled = UserDefaults.standard.object(forKey: "globalShortcuts") as? Bool ?? true
         liveCaptionsEnabled = UserDefaults.standard.object(forKey: "liveCaptions") as? Bool ?? true
@@ -1028,10 +1043,10 @@ final class AppModel {
             meetings.removeAll { $0.id == id }
         } catch {
             lastError = "删除失败：\(error.localizedDescription)"
-            // 会议还在，把被取消的转写（或只区分说话人）放回队列，规则同启动时恢复
-            if let m = meeting(id) { transcription.restore([m]) }
-            if let status = meeting(id)?.minutes?.status, status == .queued || status == .running {
-                minutes.enqueue(id)
+            // 会议还在，把被取消的转写（或只区分说话人）、纠错、纪要放回队列，规则同启动时恢复
+            if let m = meeting(id) {
+                transcription.restore([m])
+                minutes.restore([m])
             }
         }
     }

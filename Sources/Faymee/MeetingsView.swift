@@ -69,6 +69,9 @@ private struct MeetingRow: View {
                 Text("区分说话人中…")
             } else if model.transcription.activity(for: meeting.id) != nil {
                 Text("转写中…")
+            } else if model.minutes.correctionActivity(for: meeting.id) != nil {
+                // 纠错算作纪要前面的一步
+                Text("纠错中…")
             } else if model.minutes.activity(for: meeting.id) != nil {
                 Text("生成纪要中…")
             } else {
@@ -153,8 +156,9 @@ private struct MeetingDetail: View {
         }
         .padding(20)
         // 转写状态变化时重读：完成后换上新稿；重新转写进行中或失败时文件没动，仍显示旧稿。
-        // 只区分说话人完成时只有说话人状态变，也要重读，否则再改一句会用没有说话人的旧稿覆盖
-        .task(id: [meeting.transcription, meeting.diarization]) { reloadTranscript() }
+        // 只区分说话人完成时只有说话人状态变，也要重读，否则再改一句会用没有说话人的旧稿覆盖；
+        // 纠错完成同理（纠错写了转写稿）
+        .task(id: [meeting.transcription, meeting.diarization, meeting.correction]) { reloadTranscript() }
         // 纪要同理：重新生成成功后换上新纪要，排队、生成中、失败时仍显示旧纪要
         .task(id: meeting.minutes) { reloadMinutes() }
         // 正在看的会议整理完成时，录音文件才出现

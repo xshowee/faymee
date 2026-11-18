@@ -54,6 +54,7 @@ struct TranscriptSection: View {
                 }
                 status
                 speakerStatusView
+                correctionStatusView
                 Spacer()
                 actions
             }
@@ -244,6 +245,44 @@ struct TranscriptSection: View {
             saveError = nil
         } catch {
             saveError = "没能忽略建议：\(error.localizedDescription)"
+        }
+    }
+
+    /// 纠错状态行：「已纠错 N 句 · 撤销全部」「纠错失败 · 重试」。排队、进行中显示在会议列表的进度里
+    @ViewBuilder private var correctionStatusView: some View {
+        let status = CorrectionStatus(state: meeting.correction, transcript: transcript)
+        if let text = status.text {
+            if case let .failed(reason) = status {
+                Label(text, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .help(reason ?? "")
+            } else {
+                Text(text).foregroundStyle(.secondary)
+            }
+            if let action = status.actionTitle {
+                Button(action) {
+                    if case .failed = status {
+                        model.minutes.enqueueCorrection(meeting.id, now: true)
+                    } else {
+                        undoAllCorrections()
+                    }
+                }
+                .disabled(status.isFailed && model.minutes.correctionMethod == nil)
+            }
+        }
+    }
+
+    /// 撤销整份转写稿的纠错：从磁盘重读再改，免得用界面上的旧稿覆盖刚写好的转写稿（同 `ignore`）
+    private func undoAllCorrections() {
+        do {
+            guard var current = try model.store.loadTranscript(meeting.id) else { return }
+            if current.undoAllCorrections() {
+                try model.store.saveTranscript(current, for: meeting.id)
+            }
+            transcript = current
+            saveError = nil
+        } catch {
+            saveError = "没能撤销纠错：\(error.localizedDescription)"
         }
     }
 
