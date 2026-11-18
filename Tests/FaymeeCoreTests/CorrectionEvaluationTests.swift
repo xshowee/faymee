@@ -16,8 +16,10 @@ import Testing
 /// 二、纠错：`FAYMEE_CORRECTION_EVAL_CASES` 里每个用例（`EvalCase` 的 JSON）跑一遍，写
 /// `<out>/<label>/<用例>-r<n>.json`（改前改后、建议、挡掉、原始输出、耗时、内存，有标准稿时带计分）。
 /// 引擎 `local`（Qwen3.5 4B，换字词）、`local-full`（同一个模型走在线的整句改写，试本机补字删字）、
-/// `online`（DeepSeek，模型默认 deepseek-flash，同 App 纪要的在线配置）。热词默认不给（新安装热词表是空的），
-/// `FAYMEE_CORRECTION_EVAL_HOTWORDS=1` 时用用例自带的：
+/// `online`（DeepSeek 经 `OnlineMinutesEngine.makeGenerator`，同 App 在线纪要的路径；模型默认 deepseek-flash，即评估时
+/// 这台机器在线纪要选的模型，`FAYMEE_DEEPSEEK_MODEL` 可改）。热词默认不给（新安装热词表是空的），
+/// `FAYMEE_CORRECTION_EVAL_HOTWORDS=1` 时用用例自带的。`online-whatif` 是假设输出上限放大（`FAYMEE_CORRECTION_EVAL_MAX_OUTPUT`，
+/// 默认 32768）的在线，不是 App 的配置；`FAYMEE_CORRECTION_EVAL_FIRST_RUN` 只补跑某一次：
 ///
 ///     FAYMEE_CORRECTION_EVAL_OUT=… FAYMEE_CORRECTION_EVAL_CASES=<dir> FAYMEE_CORRECTION_EVAL_ENGINE=local \
 ///     [FAYMEE_CORRECTION_EVAL_RUNS=3] [FAYMEE_CORRECTION_EVAL_LABEL=…] [FAYMEE_CORRECTION_EVAL_ONLY=名1,名2] \
