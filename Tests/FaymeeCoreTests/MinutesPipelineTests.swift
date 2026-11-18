@@ -1427,6 +1427,34 @@ private let oneEdit = #"{"edits": [{"id": "s1", "text": "我们今天讨轮 v2.3
         #expect(f.host.meetings["m1"]?.minutes?.status == .done)
     }
 
+    @Test func 重新转写后新稿没有纠错_开关关着时清掉上次的纠错状态() async throws {
+        let f = fixture()
+        f.pipeline.correctsTranscripts = false
+        f.addMeeting()
+        f.host.meetings["m1"]?.correction = CorrectionState(status: .failed, error: "内存不足")
+
+        f.pipeline.transcriptionFinished("m1")
+        try await f.drain()
+
+        #expect(f.host.meetings["m1"]?.correction == nil)
+        #expect(f.host.meetings["m1"]?.minutes?.status == .done)
+    }
+
+    @Test func 重新转写时排着的纠错不清掉() async throws {
+        let f = fixture()
+        f.pipeline.correctsTranscripts = false
+        f.pipeline.isSuspended = true
+        f.addMeeting()
+        f.pipeline.enqueueCorrection("m1", now: true)
+
+        f.pipeline.transcriptionFinished("m1")
+
+        #expect(f.host.meetings["m1"]?.correction?.status == .queued)
+        f.pipeline.isSuspended = false
+        try await f.drain()
+        #expect(f.host.meetings["m1"]?.correction?.status == .done)
+    }
+
     @Test func 重启后恢复排队的纠错_进行中的从头再跑_之后照自动规则生成纪要() async throws {
         let f = fixture()
         f.addMeeting("m1")

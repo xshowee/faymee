@@ -8,7 +8,7 @@ public protocol MinutesHost: AnyObject {
     func meeting(_ id: String) -> Meeting?
     /// 更新会议的纪要状态并保存
     func setMinutes(_ state: MinutesState, for id: String)
-    /// 更新会议的转写纠错状态并保存；nil 表示清掉（排队的纠错因引擎不支持而丢掉时）
+    /// 更新会议的转写纠错状态并保存；nil 表示清掉（重新转写出的新稿没有纠错、排队的纠错恢复不了时）
     func setCorrection(_ state: CorrectionState?, for id: String)
 }
 
@@ -303,11 +303,17 @@ public final class MinutesPipeline {
     /// 1. “纠错转写稿”开着就先排纠错（不看自动纪要开关、文字多少、纪要改没改过），纠错结束（成功或失败）后再走第 2 步
     /// 2. 按自动纪要的规则（`wouldAutoGenerate`）决定要不要排纪要
     ///
+    /// 新稿没有纠错（spec「重新转写：新稿没有纠错」）：没排上纠错时清掉上次的纠错状态，
+    /// 免得「纠错失败 · 重试」留在新稿上面。这场已经排着的纠错（手动排的，在等转写完）不动，照常在新稿上跑
+    ///
     /// 返回纪要是否排了队，或者纠错结束后会按规则排队
     @discardableResult
     public func transcriptionFinished(_ id: String) -> Bool {
         if correctsTranscripts, enqueueCorrection(id, autoMinutes: true) {
             return wouldAutoGenerate(id)
+        }
+        if pendingCorrection(id) == nil, host?.meeting(id)?.correction != nil {
+            host?.setCorrection(nil, for: id)
         }
         return autoGenerateMinutes(id)
     }
