@@ -25,11 +25,15 @@ public protocol TextGenerator {
     func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String
     /// 释放模型占用的内存
     func unload()
+    /// 关掉思考的同一个引擎，给纠错这类机械活用：思考算在输出上限里，会把正文挤成空的。
+    /// 本机模型由目录项定（`ModelParameters.thinking`），默认原样返回
+    func withThinkingDisabled() -> any TextGenerator
 }
 
 extension TextGenerator {
     public var maxOutputTokens: Int { contextTokens / 2 }
     public var minutesChunking: MinutesChunking { .standard }
+    public func withThinkingDisabled() -> any TextGenerator { self }
 
     public func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
         try await generate(system: system, prompt: prompt, maxTokens: maxTokens)

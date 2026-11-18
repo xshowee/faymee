@@ -58,6 +58,13 @@ private enum OnlineTextSupport {
     static let connectionTestTimeout: TimeInterval = 30
     static let connectionTestPrompt = "OK"
     static let connectionTestMaxTokens = 16
+    /// 关不掉思考时（服务端拒收关思考的参数，或只能调低）在输出上限上多留的 token，免得思考吃光上限、正文为空
+    static let reasoningHeadroomTokens = 16_384
+
+    /// 关思考的请求被拒（HTTP 400，且不是模型不存在）时才去掉开关重发
+    static func isRejectedParameter(_ response: HTTPResponse) -> Bool {
+        response.status == 400 && !OnlineAPIError.isModelNotFoundError(data: response.data)
+    }
 
     static func endpointURL(baseURL: String, appendingPath path: String) throws -> URL {
         var trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -136,6 +143,8 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
     public let maxOutputTokens: Int
     private let transport: any HTTPTransport
     private let requestTimeout: TimeInterval
+    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let thinkingDisabled: Bool
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -157,13 +166,20 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval
+        requestTimeout: TimeInterval,
+        thinkingDisabled: Bool = false
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
+        self.thinkingDisabled = thinkingDisabled
+    }
+
+    public func withThinkingDisabled() -> any TextGenerator {
+        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
+             requestTimeout: requestTimeout, thinkingDisabled: true)
     }
 
     public var isDownloaded: Bool { config.isReady }
@@ -185,24 +201,26 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
 
         let url = try endpointURL()
         let headers = authHeaders()
+        let thinkingOff = thinkingDisabled ? thinkingOffFields() : [:]
+        let send = { (payload: [String: Any]) in
+            try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
+                                                 timeout: self.requestTimeout, transport: self.transport)
+        }
 
-        var response = try await OnlineTextSupport.postJSON(
-            url: url,
-            headers: headers,
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens, includeResponseFormat: true),
-            timeout: requestTimeout,
-            transport: transport
-        )
-
-        if response.status == 400, !OnlineAPIError.isModelNotFoundError(data: response.data) {
+        // 400 时先去掉 response_format 重试；关思考的开关还被拒，再去掉开关、留出思考的余量
+        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                                   includeResponseFormat: true, extra: thinkingOff))
+        if OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
-            response = try await OnlineTextSupport.postJSON(
-                url: url,
-                headers: headers,
-                payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens, includeResponseFormat: false),
-                timeout: requestTimeout,
-                transport: transport
-            )
+            response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                                   includeResponseFormat: false, extra: thinkingOff))
+        }
+        if !thinkingOff.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(buildPayload(
+                system: system, prompt: prompt, maxTokens: maxTokens + OnlineTextSupport.reasoningHeadroomTokens,
+                includeResponseFormat: false
+            ))
         }
 
         try response.checkSuccess()
@@ -266,7 +284,21 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         return message
     }
 
-    private func buildPayload(system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool) -> [String: Any] {
+    /// 各服务商关思考的参数（OpenAI Chat Completions 之外的扩展字段）：
+    /// - DeepSeek：`thinking: {type: "disabled"}`（deepseek-flash 等默认思考）
+    /// - 阿里云百炼：`enable_thinking: false`（Qwen3.5 及以后的混合思考模型默认思考）
+    /// OpenAI 和自定义网关不发：OpenAI 能关思考的推理模型不收 `max_tokens`，本来就用不了；网关后面是什么模型不知道
+    private func thinkingOffFields() -> [String: Any] {
+        switch config.providerID {
+        case OnlineMinutesProvider.deepSeek.providerID: ["thinking": ["type": "disabled"]]
+        case OnlineMinutesProvider.dashScope.providerID: ["enable_thinking": false]
+        default: [:]
+        }
+    }
+
+    private func buildPayload(
+        system: String, prompt: String, maxTokens: Int, includeResponseFormat: Bool, extra: [String: Any] = [:]
+    ) -> [String: Any] {
         var messages: [[String: String]] = []
         if !system.isEmpty {
             messages.append(["role": "system", "content": system])
@@ -281,6 +313,7 @@ public final class OpenAICompatibleTextGenerator: TextGenerator, ConnectionProba
         if includeResponseFormat {
             payload["response_format"] = ["type": "json_object"]
         }
+        payload.merge(extra) { _, new in new }
         return payload
     }
 }
@@ -292,6 +325,8 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
     public let maxOutputTokens: Int
     private let transport: any HTTPTransport
     private let requestTimeout: TimeInterval
+    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let thinkingDisabled: Bool
     private static let apiVersion = "2023-06-01"
 
     public convenience init(
@@ -314,13 +349,20 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval
+        requestTimeout: TimeInterval,
+        thinkingDisabled: Bool = false
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
+        self.thinkingDisabled = thinkingDisabled
+    }
+
+    public func withThinkingDisabled() -> any TextGenerator {
+        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
+             requestTimeout: requestTimeout, thinkingDisabled: true)
     }
 
     public var isDownloaded: Bool { config.isReady }
@@ -419,6 +461,8 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
     public let maxOutputTokens: Int
     private let transport: any HTTPTransport
     private let requestTimeout: TimeInterval
+    /// 为 true 时按服务商关思考（纠错用，见 `withThinkingDisabled`）；纪要不关
+    let thinkingDisabled: Bool
 
     public convenience init(
         config: OnlineEndpointConfig,
@@ -440,13 +484,20 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         transport: any HTTPTransport,
         contextTokens: Int,
         maxOutputTokens: Int,
-        requestTimeout: TimeInterval
+        requestTimeout: TimeInterval,
+        thinkingDisabled: Bool = false
     ) {
         self.config = config
         self.transport = transport
         self.contextTokens = contextTokens
         self.maxOutputTokens = maxOutputTokens
         self.requestTimeout = requestTimeout
+        self.thinkingDisabled = thinkingDisabled
+    }
+
+    public func withThinkingDisabled() -> any TextGenerator {
+        Self(config: config, transport: transport, contextTokens: contextTokens, maxOutputTokens: maxOutputTokens,
+             requestTimeout: requestTimeout, thinkingDisabled: true)
     }
 
     public var isDownloaded: Bool { config.isReady }

@@ -95,10 +95,12 @@ public func correctTranscript(
             review.merge(reviewWordFixes(fixes, context: correction))
         case .sentenceRewrite:
             var edits: [SentenceEdit]?
+            // 纠错是机械活，关思考（同本机）：思考算在输出上限里，会把正文挤成空的
+            let rewriter = generator.withThinkingDisabled()
             for _ in 0..<2 where edits == nil {
                 try Task.checkCancellation()
-                edits = parseSentenceEdits(try await generator.generate(system: system, prompt: prompt,
-                                                                        maxTokens: budget.outputTokens, grammar: nil))
+                edits = parseSentenceEdits(try await rewriter.generate(system: system, prompt: prompt,
+                                                                       maxTokens: budget.outputTokens, grammar: nil))
             }
             guard let edits else {
                 review.reject(.unparseable)
