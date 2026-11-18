@@ -71,15 +71,20 @@ public struct TextDiff: Sendable {
     }
 
     /// 把一处向两边相邻的相同文字扩展，直到两边都至少 `minimum` 个单位（或碰到标点、别的改动、句首句尾），
-    /// 先左后右交替。拼音校验用它：「对动→被动」最小改动只是「对→被」，单看一个字读音差很远
-    func widened(_ segment: Segment, minimum: Int) -> (before: String, after: String) {
+    /// 先左后右交替，只扩到原文 `bounds`（字符位置）以内。拼音校验用它：「对动→被动」最小改动只是「对→被」，
+    /// 单看一个字读音差很远
+    func widened(_ segment: Segment, minimum: Int, within bounds: Range<Int>? = nil) -> (before: String, after: String) {
         guard var lo = segment.ops.min(), var hi = segment.ops.max() else { return (segment.before, segment.after) }
         func units() -> (Int, Int) {
             ops[lo...hi].reduce((0, 0)) { n, op in
                 (n.0 + (op.kind == .insert ? 0 : 1), n.1 + (op.kind == .delete ? 0 : 1))
             }
         }
-        func extendable(_ i: Int) -> Bool { ops.indices.contains(i) && ops[i].kind == .equal && !ops[i].isPunctuation }
+        func extendable(_ i: Int) -> Bool {
+            guard ops.indices.contains(i), ops[i].kind == .equal, !ops[i].isPunctuation else { return false }
+            guard let bounds else { return true }
+            return bounds.lowerBound <= ops[i].beforeRange.lowerBound && ops[i].beforeRange.upperBound <= bounds.upperBound
+        }
         var leftTurn = true
         while min(units().0, units().1) < minimum {
             let canLeft = extendable(lo - 1), canRight = extendable(hi + 1)
@@ -93,9 +98,11 @@ public struct TextDiff: Sendable {
     /// 改后文字里 `range` 所覆盖的比对步骤连同中间的改动，两边各是什么文字。
     /// 参考词校验用：改后命中参考词时，按整个参考词与对应的原文比拼音
     func span(coveringAfter range: Range<Int>) -> (before: String, after: String) {
+        // 删掉的字在改后文字里是个插入点：落在范围里（含起点）就算，「自然→智能」里的「自然」也要带上
         let hit = ops.indices.filter { i in
             let r = ops[i].afterRange
-            return ops[i].kind != .delete && r.overlaps(range)
+            return ops[i].kind == .delete ? range.lowerBound <= r.lowerBound && r.lowerBound < range.upperBound
+                : r.overlaps(range)
         }
         guard let lo = hit.min(), let hi = hit.max() else { return ("", "") }
         return text(lo...hi)
