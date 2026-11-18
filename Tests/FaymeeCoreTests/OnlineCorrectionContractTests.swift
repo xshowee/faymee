@@ -5,8 +5,30 @@ import Testing
 private let env = ProcessInfo.processInfo.environment
 private let deepSeekKey = env["FAYMEE_DEEPSEEK_API_KEY"] ?? ""
 
+/// 记下真实响应，用来看服务端报的思考 token 数
+private final class RecordingTransport: HTTPTransport, @unchecked Sendable {
+    private let base = URLSessionHTTPTransport()
+    private let lock = NSLock()
+    private var responses: [HTTPResponse] = []
+
+    var reasoningTokens: [Int] {
+        lock.withLock { responses }.map { response in
+            let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+            let details = (json?["usage"] as? [String: Any])?["completion_tokens_details"] as? [String: Any]
+            return details?["reasoning_tokens"] as? Int ?? 0
+        }
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let response = try await base.send(request)
+        lock.withLock { responses.append(response) }
+        return response
+    }
+}
+
 /// 在线整句改写纠错的真实请求契约测试（可选）：设 `FAYMEE_ONLINE_CONTRACT=1` 和 `FAYMEE_DEEPSEEK_API_KEY` 才跑。
-/// 只发这里写的合成文字。检查的是请求被接受（JSON 模式）、输出能解析、过护栏后口吃和口语词原样保留，
+/// 只发这里写的合成文字。检查的是请求被接受（JSON 模式、关思考）、服务端没有思考、输出能解析、
+/// 过护栏后口吃和口语词原样保留，
 /// 不比较纠错准确率（spec「测试决定」最后一条）
 @Suite(.enabled(if: env["FAYMEE_ONLINE_CONTRACT"] == "1" && !deepSeekKey.isEmpty,
                 "设 FAYMEE_ONLINE_CONTRACT=1 和 FAYMEE_DEEPSEEK_API_KEY 才跑"))
@@ -47,7 +69,8 @@ struct OnlineCorrectionContractTests {
             requiresAPIKey: true,
             providerID: OnlineMinutesProvider.deepSeek.providerID
         )
-        let generator = OpenAICompatibleTextGenerator(config: config, transport: URLSessionHTTPTransport())
+        let transport = RecordingTransport()
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .deepSeek, config: config, transport: transport)
         let review = try await correctTranscript(transcript, title: "智能体项目周会", hotwords: ["龚老师"],
                                                  method: .sentenceRewrite, generator: generator)
         for (id, text) in review.texts.sorted(by: { $0.key < $1.key }) {
@@ -55,6 +78,10 @@ struct OnlineCorrectionContractTests {
         }
         print("纠错 建议: \(review.suggestions)")
         print("纠错 挡掉: \(review.rejections)")
+        print("纠错 思考 token: \(transport.reasoningTokens)")
+
+        // 纠错关思考：deepseek-flash 默认思考，思考吃光输出上限时正文为空（FAYMEE_DEEPSEEK_MODEL=deepseek-flash）
+        #expect(!transport.reasoningTokens.isEmpty && transport.reasoningTokens.allSatisfy { $0 == 0 })
 
         #expect(review.rejections[CorrectionRule.unparseable.rawValue] == nil)
         // 口吃、口语词所在的句子：改了也只能是换字词或补字，不会删掉「我我我」「嗯」「那个」
