@@ -35,7 +35,7 @@ private let repository = URL(fileURLWithPath: #filePath).deletingLastPathCompone
 
 @Suite(.serialized, .enabled(if: evalOut != nil, "设 FAYMEE_CORRECTION_EVAL_OUT 才跑"))
 struct CorrectionEvaluationTests {
-    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_AUDIO"] != nil))
+    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_AUDIO"] != nil, "转写合成会议：设 FAYMEE_CORRECTION_EVAL_AUDIO 才跑"))
     func transcribe() async throws {
         let audio = URL(fileURLWithPath: env["FAYMEE_CORRECTION_EVAL_AUDIO"]!)
         let store = MeetingStore(root: evalOut!.appendingPathComponent("asr-store"))
@@ -85,7 +85,8 @@ struct CorrectionEvaluationTests {
         }
     }
 
-    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_CASES"] != nil && env["FAYMEE_CORRECTION_EVAL_ENGINE"] != nil))
+    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_CASES"] != nil && env["FAYMEE_CORRECTION_EVAL_ENGINE"] != nil,
+                   "纠错：设 FAYMEE_CORRECTION_EVAL_CASES 和 FAYMEE_CORRECTION_EVAL_ENGINE 才跑"))
     func correct() async throws {
         let engineName = env["FAYMEE_CORRECTION_EVAL_ENGINE"]!
         let label = env["FAYMEE_CORRECTION_EVAL_LABEL"] ?? engineName
@@ -176,7 +177,8 @@ struct CorrectionEvaluationTests {
         }
     }
 
-    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_JUDGE"] != nil && env["FAYMEE_CORRECTION_EVAL_CASES"] != nil))
+    @Test(.enabled(if: env["FAYMEE_CORRECTION_EVAL_JUDGE"] != nil && env["FAYMEE_CORRECTION_EVAL_CASES"] != nil,
+                   "裁判：设 FAYMEE_CORRECTION_EVAL_JUDGE 和 FAYMEE_CORRECTION_EVAL_CASES 才跑"))
     func judge() async throws {
         let results = URL(fileURLWithPath: env["FAYMEE_CORRECTION_EVAL_JUDGE"]!)
         let cases = Dictionary(try loadCases(URL(fileURLWithPath: env["FAYMEE_CORRECTION_EVAL_CASES"]!))
