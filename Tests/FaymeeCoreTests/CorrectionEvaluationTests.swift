@@ -18,7 +18,7 @@ import Testing
 /// 引擎 `local`（Qwen3.5 4B，换字词）、`local-full`（同一个模型走在线的整句改写，试本机补字删字）、
 /// `online`（DeepSeek 经 `OnlineMinutesEngine.makeGenerator`，同 App 在线纪要的路径；模型默认 deepseek-flash，即评估时
 /// 这台机器在线纪要选的模型，`FAYMEE_DEEPSEEK_MODEL` 可改）。热词默认不给（新安装热词表是空的），
-/// `FAYMEE_CORRECTION_EVAL_HOTWORDS=1` 时用用例自带的。`online-whatif` 是假设输出上限放大（`FAYMEE_CORRECTION_EVAL_MAX_OUTPUT`，
+/// `FAYMEE_CORRECTION_EVAL_HOTWORDS=1` 时用用例自带的。`online-whatif` 是假设正文预算和上下文放大（`FAYMEE_CORRECTION_EVAL_MAX_OUTPUT`，
 /// 默认 32768）的在线，不是 App 的配置；`FAYMEE_CORRECTION_EVAL_FIRST_RUN` 只补跑某一次；`FAYMEE_CORRECTION_EVAL_REPLAY=<结果目录>`
 /// 用那次记下的原始输出代替模型生成，只重跑分段和护栏（护栏改了以后重算）：
 ///
@@ -247,7 +247,8 @@ struct CorrectionEvaluationTests {
                                                               transport: transport)
             return (generator, .sentenceRewrite, "deepseek/\(model)", nil)
         case "online-whatif":
-            // 假设：输出上限放大（推理模型的思考也算在 max_tokens 里）。不是 App 的配置，只作参考
+            // 假设：正文预算放大到 output、上下文 4 倍（分段跟着变）。不是 App 的配置，只作参考。
+            // 请求的上限同 App，另按模型放大（OnlineOutputLimit）
             let key = try #require(env["FAYMEE_DEEPSEEK_API_KEY"], "要 FAYMEE_DEEPSEEK_API_KEY")
             let model = env["FAYMEE_DEEPSEEK_MODEL"] ?? "deepseek-flash"
             let output = Int(env["FAYMEE_CORRECTION_EVAL_MAX_OUTPUT"] ?? "") ?? 32_768

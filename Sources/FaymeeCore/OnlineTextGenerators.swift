@@ -9,7 +9,9 @@ public enum OnlineMinutesDefaults {
 /// 在线请求的输出上限（`max_tokens` / `maxOutputTokens`）。各家的思考都算在这个上限里，所以不按正文预算发，
 /// 按模型接受的值发，给思考留出余量。超过模型的上限会被拒（DeepSeek 实测 400），所以按服务商和模型分别取
 /// （各家文档，2026-11）：
-/// - DeepSeek：接受 1–393216；取 65536，即思考模式不传时的默认值。旧名 deepseek-chat / reasoner 已转到 deepseek-flash
+/// - DeepSeek：接受 1–393216；取 131072，即最高思考档不传时的默认值。实测 deepseek-flash 纠错约 70 分钟的合成转写
+///   （提示词 2.2 万 token）思考 4.2 万、输出共 5.2 万 token，一段的提示词最多约它的两倍，64K 不够。
+///   旧名 deepseek-chat / reasoner 已转到 deepseek-flash
 /// - 阿里云百炼：qwen-plus 32768；qwen-max 8192；qwen-turbo 查不到，按 8192；其他（qwen3.5-plus 起 64K 以上）按 32768
 /// - OpenAI：gpt-4.1 系 32768；gpt-4o 系和其他 16384
 /// - Anthropic：Sonnet 4.5、Haiku 4.5 64000；其他按 32000（Opus 4 / 4.1 的上限，更新的模型都不低于它）
@@ -36,7 +38,7 @@ enum OnlineOutputLimit {
         let model = model.lowercased()
         switch providerID {
         case OnlineMinutesProvider.deepSeek.providerID:
-            return 65_536
+            return 131_072
         case OnlineMinutesProvider.dashScope.providerID:
             if model.hasPrefix("qwen-max") || model.hasPrefix("qwen-turbo") { return 8_192 }
             return 32_768

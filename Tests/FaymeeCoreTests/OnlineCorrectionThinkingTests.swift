@@ -158,10 +158,10 @@ import Testing
         let used = bodies.map { body in
             (body["messages"] as? [[String: String]] ?? []).reduce(0) { $0 + generator.countTokens($1["content"] ?? "") }
         }
-        // 正文预算 8192：一段的提示词能用到 64000 − 8192 附近，不会因为请求的上限 65536 而缩小
+        // 正文预算 8192：一段的提示词能用到 64000 − 8192 附近，不会因为请求的上限 131072 而缩小
         #expect(used.allSatisfy { $0 + 8_192 <= 64_000 })
         #expect(used.first.map { $0 > 64_000 - 16_000 } == true)
-        #expect(bodies.allSatisfy { $0["max_tokens"] as? Int == 65_536 })
+        #expect(bodies.allSatisfy { $0["max_tokens"] as? Int == 131_072 })
     }
 
     private func sentLimit(_ body: [String: Any]) -> Int? {
@@ -170,10 +170,10 @@ import Testing
 
     /// 输出上限含思考，按各家文档（2026-11）里模型接受的最大输出取，超了会 400；纪要和纠错一样
     @Test(arguments: [
-        // DeepSeek：接受 1–393216，思考模式不传时默认 64K（api-docs.deepseek.com create-chat-completion）
-        (OnlineMinutesProvider.deepSeek, "deepseek-flash", 65_536),
-        (.deepSeek, "deepseek-chat", 65_536),
-        (.deepSeek, "deepseek-v4-pro", 65_536),
+        // DeepSeek：接受 1–393216（超了 400），最高思考档不传时默认 128K（api-docs.deepseek.com create-chat-completion）
+        (OnlineMinutesProvider.deepSeek, "deepseek-flash", 131_072),
+        (.deepSeek, "deepseek-chat", 131_072),
+        (.deepSeek, "deepseek-v4-pro", 131_072),
         // 百炼：qwen-plus 32768，qwen-max 8192（上下文 32K），qwen-turbo 查不到按 8192；其他按 32768
         (.dashScope, "qwen-plus", 32_768),
         (.dashScope, "qwen-max", 8_192),

@@ -78,7 +78,7 @@ private func makeOpenAIConfig(
         let body = try #require(recorded.bodyJSONObject())
         #expect(body["model"] as? String == "deepseek-chat")
         // 输出上限含思考，按模型取（见 OnlineOutputLimit），不按调用方的正文预算 512
-        #expect(body["max_tokens"] as? Int == 65_536)
+        #expect(body["max_tokens"] as? Int == 131_072)
         let responseFormat = try #require(body["response_format"] as? [String: String])
         #expect(responseFormat == ["type": "json_object"])
         let messages = try #require(body["messages"] as? [[String: String]])
@@ -706,7 +706,7 @@ private func makeGeminiConfig(
         // 1 次整场提取（跳过合并）+ 1 次笔记展开 = 2 次 HTTP 调用
         #expect(transport.recordedRequests.count == 2)
         let extractBody = try #require(transport.recordedRequests[0].bodyJSONObject())
-        #expect(extractBody["max_tokens"] as? Int == 65_536)
+        #expect(extractBody["max_tokens"] as? Int == 131_072)
         let extractMessages = try #require(extractBody["messages"] as? [[String: String]])
         let userPrompt = try #require(extractMessages.last?["content"])
         #expect(userPrompt.contains("版本发布评审会"))
@@ -715,7 +715,7 @@ private func makeGeminiConfig(
         #expect(userPrompt.contains("[s600 "))
 
         let expandBody = try #require(transport.recordedRequests[1].bodyJSONObject())
-        #expect(expandBody["max_tokens"] as? Int == 65_536)
+        #expect(expandBody["max_tokens"] as? Int == 131_072)
         let expandPrompt = try #require((expandBody["messages"] as? [[String: String]])?.last?["content"])
         #expect(expandPrompt.contains("预算→王总确认"))
 
