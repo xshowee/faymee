@@ -95,7 +95,7 @@ struct TranscriptSection: View {
                                    onEdit: { id, text in update { $0.edit(sentence: id, to: text) } },
                                    onRestore: { id in update { $0.restore(sentence: id) } },
                                    speakerActions: speakerActions, suggestions: suggestions,
-                                   annotationActions: annotationActions)
+                                   annotationActions: annotationActions, correctionActions: correctionActions)
                 }
             } else if let loadError {
                 placeholder(loadError)
@@ -272,18 +272,46 @@ struct TranscriptSection: View {
         }
     }
 
-    /// 撤销整份转写稿的纠错：从磁盘重读再改，免得用界面上的旧稿覆盖刚写好的转写稿（同 `ignore`）
+    /// 撤销整份转写稿的纠错
     private func undoAllCorrections() {
+        modifyOnDisk("没能撤销纠错") { $0.undoAllCorrections() }
+    }
+
+    /// 纠错相关的修改（撤销、采纳、忽略、重新纠错前的复位）：从磁盘重读再改，免得用界面上的旧稿覆盖
+    /// 管线刚写好的转写稿（同 `ignore`）。返回是否成功（没有变化也算成功）
+    @discardableResult
+    private func modifyOnDisk(_ failure: String, _ change: (inout Transcript) -> Bool) -> Bool {
         do {
-            guard var current = try model.store.loadTranscript(meeting.id) else { return }
-            if current.undoAllCorrections() {
+            guard var current = try model.store.loadTranscript(meeting.id) else { return false }
+            if change(&current) {
                 try model.store.saveTranscript(current, for: meeting.id)
             }
             transcript = current
             saveError = nil
+            return true
         } catch {
-            saveError = "没能撤销纠错：\(error.localizedDescription)"
+            saveError = "\(failure)：\(error.localizedDescription)"
+            return false
         }
+    }
+
+    private var correctionMenuItem: CorrectionMenuItem {
+        CorrectionMenuItem(transcript: transcript, state: meeting.correction,
+                           isAvailable: model.minutes.correctionMethod != nil, isEditable: isEditable)
+    }
+
+    /// 手动「纠错 / 重新纠错」：重新纠错先撤销全部、清掉未忽略的建议并写盘，再入队（纠错开始时读的就是复位后的稿）
+    private func correct(_ item: CorrectionMenuItem) {
+        if item.resets, !modifyOnDisk("没能重新纠错", { $0.resetForRecorrection() }) { return }
+        model.minutes.enqueueCorrection(meeting.id, now: true)
+    }
+
+    /// 句子上的纠错操作：撤销一句、采纳或忽略数字建议
+    private var correctionActions: CorrectionActions {
+        CorrectionActions(
+            onUndo: { id in modifyOnDisk("没能撤销纠错") { $0.undoCorrection(sentence: id) } },
+            onAdopt: { s in modifyOnDisk("没能采纳建议") { $0.adopt(s) } },
+            onIgnore: { s in modifyOnDisk("没能忽略建议") { $0.ignore(s) } })
     }
 
     /// 采纳建议改名成功后：这个人能登记声纹时，给一个“记住这个声音”按钮。不自动登记
@@ -499,6 +527,24 @@ struct TranscriptSection: View {
                 // 只区分说话人正在进行时管线不接受重新转写
                 .disabled(isDiarizing)
         }
+        if meeting.transcription?.status == .done, transcript != nil {
+            moreMenu
+        }
+    }
+
+    /// 转写稿菜单：「纠错 / 重新纠错」。开关关着也能手动点；纪要模型没就绪时排队
+    private var moreMenu: some View {
+        let item = correctionMenuItem
+        return Menu {
+            Button(item.title) { correct(item) }
+                .disabled(!item.isEnabled)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("转写稿菜单")
     }
 
     private var isDiarizing: Bool {
@@ -565,6 +611,13 @@ struct AnnotationActions {
     var onDeleteMark: (TranscriptMark) -> Void
 }
 
+/// 句子上的纠错操作：撤销这句的纠错，采纳、忽略数字建议。都从磁盘重读再改
+struct CorrectionActions {
+    var onUndo: (_ sentenceID: String) -> Void = { _ in }
+    var onAdopt: (NumberSuggestion) -> Void = { _ in }
+    var onIgnore: (NumberSuggestion) -> Void = { _ in }
+}
+
 private extension TranscriptRow {
     /// 列表里一行的身份，也是 `ScrollViewProxy.scrollTo` 的锚点：条目是 `items` 下标（播放跟随、出处定位按它滚），
     /// 笔记是标注 id（改文字不换身份）
@@ -600,6 +653,8 @@ private struct TranscriptList: View {
     var suggestions = NameSuggestionActions()
     /// 旗子、笔记行的修改和删除
     var annotationActions: AnnotationActions
+    /// 撤销纠错、数字建议的采纳和忽略
+    var correctionActions = CorrectionActions()
     @State private var following = true
     /// 纪要点出处后短暂高亮的条目，和哪次请求高亮的（连点两次时，第一次的计时不清掉第二次的高亮）
     @State private var revealed: Int?
@@ -621,6 +676,7 @@ private struct TranscriptList: View {
         let notes = annotationLayout.notes
         let rows = annotationLayout.rows
         let marks = annotationLayout.marks
+        let numberSuggestions = transcript.numberSuggestions
         let timeWidth = timeWidth(lastNote: notes.last)
         ScrollViewReader { proxy in
             ScrollView {
@@ -632,7 +688,7 @@ private struct TranscriptList: View {
                             // 滚动锚点仍是条目下标：播放跟随、出处定位都按下标滚
                             row(i, turn: turns[i], isFirst: i == 0, choices: choices,
                                 isCurrent: i == current, isRevealed: i == revealed, marks: marks[i] ?? [],
-                                timeWidth: timeWidth)
+                                numberSuggestions: numberSuggestions, timeWidth: timeWidth)
                                 .id(i)
                         case let .note(note):
                             TranscriptNoteRow(note: note, timeWidth: timeWidth,
@@ -723,6 +779,7 @@ private struct TranscriptList: View {
 
     @ViewBuilder private func row(_ i: Int, turn: SpeakerTurn?, isFirst: Bool, choices: [SpeakerChoice],
                                   isCurrent: Bool, isRevealed: Bool, marks: [TranscriptMark],
+                                  numberSuggestions: [String: [NumberSuggestion]],
                                   timeWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if let turn {
@@ -760,6 +817,19 @@ private struct TranscriptList: View {
                     onRestore: {
                         commitEdit()
                         onRestore(s.id)
+                    },
+                    numberSuggestions: numberSuggestions[s.id] ?? [],
+                    onUndoCorrection: {
+                        commitEdit()
+                        correctionActions.onUndo(s.id)
+                    },
+                    onAdopt: { suggestion in
+                        commitEdit()
+                        correctionActions.onAdopt(suggestion)
+                    },
+                    onIgnore: { suggestion in
+                        commitEdit()
+                        correctionActions.onIgnore(suggestion)
                     })
             case let .gap(g):
                 TranscriptGapRow(gap: g, isCurrent: isCurrent, timeWidth: timeWidth)
@@ -904,6 +974,13 @@ private struct TranscriptSentenceRow: View {
     var onCommit: () -> Void
     var onCancel: () -> Void
     var onRestore: () -> Void
+    /// 这句旁显示的数字建议（`Transcript.numberSuggestions`）
+    var numberSuggestions: [NumberSuggestion] = []
+    var onUndoCorrection: () -> Void = {}
+    var onAdopt: (NumberSuggestion) -> Void = { _ in }
+    var onIgnore: (NumberSuggestion) -> Void = { _ in }
+    /// 鼠标在这句上：纠错过的句子显示「撤销」
+    @State private var hovering = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -929,45 +1006,85 @@ private struct TranscriptSentenceRow: View {
                 .onExitCommand(perform: onCancel)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(sentence.text)
-                if let original = sentence.original {
-                    EditedMarker(original: original, canRestore: isEditable, onRestore: onRestore)
-                }
-                ForEach(marks, id: \.id) { mark in
-                    MarkFlag(mark: mark, onPlay: { onPlayMark(mark) }, onDelete: { onDeleteMark(mark) })
+            VStack(alignment: .leading, spacing: 2) {
+                sentenceText
+                ForEach(numberSuggestions, id: \.self) { suggestion in
+                    NumberSuggestionView(suggestion: suggestion, canAct: isEditable,
+                                         onAdopt: { onAdopt(suggestion) }, onIgnore: { onIgnore(suggestion) })
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { if isEditable { onBeginEdit() } }
-            .onTapGesture(perform: onTap)
-            .contextMenu {
-                if isEditable {
-                    Button("编辑", action: onBeginEdit)
-                    if sentence.original != nil {
-                        Button("恢复原文", action: onRestore)
-                    }
+        }
+    }
+
+    /// 纠错改过的字加细下划线（删掉的字不在正文显示），悬停显示原文；`TextDiff` 的位置是 `Character` 下标
+    private var highlightedText: Text {
+        guard sentence.correction != nil else { return Text(sentence.text) }
+        var text = AttributedString(sentence.text)
+        let chars = text.characters
+        for range in sentence.correctionHighlights where range.upperBound <= chars.count {
+            let lower = chars.index(chars.startIndex, offsetBy: range.lowerBound)
+            let upper = chars.index(chars.startIndex, offsetBy: range.upperBound)
+            text[lower..<upper].underlineStyle = Text.LineStyle(pattern: .solid, color: .accentColor.opacity(0.7))
+        }
+        return Text(text)
+    }
+
+    @ViewBuilder private var sentenceText: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            if let before = sentence.correction {
+                highlightedText
+                    .help("原文：\(before)")
+                // 悬停时才显示「撤销」；不在时也占着位置，免得鼠标移上来时这行重新折行
+                Button("撤销", action: onUndoCorrection)
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .fixedSize()
+                    .help("撤销这句的纠错，换回原文：\(before)")
+                    .opacity(hovering && isEditable ? 1 : 0)
+                    .allowsHitTesting(hovering && isEditable)
+            } else {
+                Text(sentence.text)
+            }
+            if let original = sentence.original {
+                EditedMarker(original: original, canRestore: isEditable, onRestore: onRestore)
+            }
+            ForEach(marks, id: \.id) { mark in
+                MarkFlag(mark: mark, onPlay: { onPlayMark(mark) }, onDelete: { onDeleteMark(mark) })
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(count: 2) { if isEditable { onBeginEdit() } }
+        .onTapGesture(perform: onTap)
+        .contextMenu {
+            if isEditable {
+                Button("编辑", action: onBeginEdit)
+                if sentence.original != nil {
+                    Button("恢复原文", action: onRestore)
                 }
-                if let speakerMenu {
-                    Divider()
-                    Menu("改说话人") {
-                        ForEach(speakerMenu.choices) { choice in
-                            Button(choice.name) { speakerMenu.onSet(choice.id) }
-                        }
-                        if !speakerMenu.choices.isEmpty { Divider() }
-                        Button("新说话人", action: speakerMenu.onNew)
-                    }
-                    if let name = speakerMenu.restoreTo {
-                        Button("恢复说话人（\(name)）", action: speakerMenu.onRestore)
-                    }
+                if sentence.correction != nil {
+                    Button("撤销纠错", action: onUndoCorrection)
                 }
-                // 旗子很小，右键这句也能删它旁边的标记
-                if !marks.isEmpty {
-                    Divider()
-                    ForEach(marks, id: \.id) { mark in
-                        Button("删除标记（\(formatDuration(mark.offset))）") { onDeleteMark(mark) }
+            }
+            if let speakerMenu {
+                Divider()
+                Menu("改说话人") {
+                    ForEach(speakerMenu.choices) { choice in
+                        Button(choice.name) { speakerMenu.onSet(choice.id) }
                     }
+                    if !speakerMenu.choices.isEmpty { Divider() }
+                    Button("新说话人", action: speakerMenu.onNew)
+                }
+                if let name = speakerMenu.restoreTo {
+                    Button("恢复说话人（\(name)）", action: speakerMenu.onRestore)
+                }
+            }
+            // 旗子很小，右键这句也能删它旁边的标记
+            if !marks.isEmpty {
+                Divider()
+                ForEach(marks, id: \.id) { mark in
+                    Button("删除标记（\(formatDuration(mark.offset))）") { onDeleteMark(mark) }
                 }
             }
         }
@@ -987,6 +1104,34 @@ private struct SentenceSpeakerMenu {
     var onSet: (_ speakerID: String) -> Void
     var onNew: () -> Void
     var onRestore: () -> Void
+}
+
+/// 数字建议：“可能是『四月』？采纳 / 忽略”，在那句下面，样式同姓名建议（`NameSuggestionView`）。
+/// 涉及数字的纠错不写进正文，由用户决定
+private struct NumberSuggestionView: View {
+    var suggestion: NumberSuggestion
+    /// 重新转写中不能点
+    var canAct: Bool
+    var onAdopt: () -> Void
+    var onIgnore: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(.tertiary)
+            Text("可能是『\(suggestion.to)』？")
+                .foregroundStyle(.secondary)
+                .help("纠错时从上下文推断，这句里的“\(suggestion.from)”可能是“\(suggestion.to)”。涉及数字，不自动修改")
+            Button("采纳", action: onAdopt)
+                .help("把这句里的“\(suggestion.from)”改成“\(suggestion.to)”，可以撤销")
+            Button("忽略", action: onIgnore)
+                .help("不再提示，重新纠错也不会再出现")
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .fixedSize()
+        .disabled(!canAct)
+    }
 }
 
 /// 人工修改过的标记：不显眼的铅笔图标，点开显示引擎原文和“恢复原文”
