@@ -39,13 +39,16 @@ public enum MinutesWaitReason: Hashable, Sendable {
 /// 纪要队列：一次生成一场，其余按入队先后排队。
 /// 纪要只在成功时整体写入，失败或取消都保留原来的纪要。
 ///
+/// 队列里的任务分种类（`Job.Kind`），共用一条队列、一个引擎，一次只跑一个，同转写管线的
+/// “完整转写 / 只区分说话人”。
+///
 /// 模型按需加载、用完释放：有任务能开始时才加载，连续排队时保持加载，
 /// 一个任务结束后下一个开始不了（队列空、都在等电源或转写等）就释放
 @MainActor @Observable
 public final class MinutesPipeline {
-    /// 排队中的会议，不含正在生成的
-    public var queue: [String] { jobs.map(\.id) }
-    /// 正在生成的会议
+    /// 排队生成纪要的会议，不含正在生成的
+    public var queue: [String] { jobs.filter(\.isMinutes).map(\.id) }
+    /// 正在跑任务的会议（任何种类）
     public var activeID: String? { activeJob?.id }
     public private(set) var activity: MinutesActivity?
     /// 引擎是否在用：正在生成，或被取消的任务还没退出（加载模型时可能约 6 秒不理会取消）。
@@ -60,7 +63,7 @@ public final class MinutesPipeline {
             if isSuspended, let job = activeJob {
                 jobs.insert(job, at: 0)
                 cancelActive()
-                host?.setMinutes(MinutesState(status: .queued), for: job.id)
+                setState(.queued, for: job)
             } else if !isSuspended {
                 startNext()
             }
@@ -90,10 +93,19 @@ public final class MinutesPipeline {
     @ObservationIgnored public var onFinish: ((String, MinutesOutcome) -> Void)?
 
     private struct Job {
+        enum Kind {
+            /// 生成纪要
+            case minutes(template: MinutesTemplate)
+        }
+
         var id: String
-        var template: MinutesTemplate
+        var kind: Kind
         /// 用户点的“现在生成”：不等接通电源
         var now: Bool
+
+        var isMinutes: Bool {
+            if case .minutes = kind { true } else { false }
+        }
     }
 
     private var jobs: [Job] = []
@@ -136,15 +148,15 @@ public final class MinutesPipeline {
 
     public var isIdle: Bool { activeID == nil && jobs.isEmpty }
 
-    /// 某场会议正在进行的步骤；不在生成中时为 nil
+    /// 某场会议生成纪要正在进行的步骤；不在生成中时为 nil
     public func activity(for id: String) -> MinutesActivity? {
-        activeID == id ? activity : nil
+        activeJob?.id == id && activeJob?.isMinutes == true ? activity : nil
     }
 
     /// 某场排队中的会议在等什么；不在排队、或只是排在别的会议后面（含录音中暂停）时为 nil。
     /// 几项同时成立时按需要用户处理的先后：模型/在线配置、电源、转写
     public func waitReason(for id: String) -> MinutesWaitReason? {
-        guard let job = jobs.first(where: { $0.id == id }) else { return nil }
+        guard let job = jobs.first(where: { $0.id == id && $0.isMinutes }) else { return nil }
         if !isModelDownloaded { return isOnlineEngine ? .onlineConfig : .model }
         if requiresPower && !isOnPower && !job.now { return .power }
         if isTranscriptionBusy { return .transcription }
@@ -156,8 +168,8 @@ public final class MinutesPipeline {
     /// 能马上开始的任务也还在排队，等的是 `.transcription`。
     /// 看的是是否在队列里，不只是这次有没有自动排队：用户之前手动排过的也会生成并通知
     public func followUp(for id: String) -> MinutesFollowUp {
-        if activeID == id { return .queued(waitingFor: nil) }
-        guard jobs.contains(where: { $0.id == id }) else { return .notQueued }
+        if activeJob?.id == id && activeJob?.isMinutes == true { return .queued(waitingFor: nil) }
+        guard jobs.contains(where: { $0.id == id && $0.isMinutes }) else { return .notQueued }
         return .queued(waitingFor: waitReason(for: id))
     }
 
@@ -205,13 +217,15 @@ public final class MinutesPipeline {
     /// - Returns: 是否在队列中
     @discardableResult
     public func enqueue(_ id: String, template: MinutesTemplate? = nil, now: Bool = false) -> Bool {
-        guard let m = host?.meeting(id), m.transcription != nil, id != activeID else { return false }
-        if let i = jobs.firstIndex(where: { $0.id == id }) {
-            if let template { jobs[i].template = template }
+        guard let m = host?.meeting(id), m.transcription != nil,
+              !(activeJob?.id == id && activeJob?.isMinutes == true) else { return false }
+        if let i = jobs.firstIndex(where: { $0.id == id && $0.isMinutes }) {
+            if let template { jobs[i].kind = .minutes(template: template) }
             jobs[i].now = jobs[i].now || now
         } else {
-            jobs.append(Job(id: id, template: template ?? existingTemplate(id), now: now))
-            host?.setMinutes(MinutesState(status: .queued), for: id)
+            let job = Job(id: id, kind: .minutes(template: template ?? existingTemplate(id)), now: now)
+            jobs.append(job)
+            setState(.queued, for: job)
         }
         startNext()
         return true
@@ -251,6 +265,13 @@ public final class MinutesPipeline {
         }
     }
 
+    /// 任务的状态写进对应的字段
+    private func setState(_ status: JobState.Status, for job: Job) {
+        switch job.kind {
+        case .minutes: host?.setMinutes(MinutesState(status: status), for: job.id)
+        }
+    }
+
     private func existingTemplate(_ id: String) -> MinutesTemplate {
         (try? store.loadMinutes(id))?.flatMap { MinutesTemplate(key: $0.template) } ?? .general
     }
@@ -270,13 +291,15 @@ public final class MinutesPipeline {
         }
         let job = jobs.remove(at: i)
         guard let m = host?.meeting(job.id) else { return startNext() }
+        switch job.kind {
+        case let .minutes(template): startMinutes(job, template: template, meeting: m)
+        }
+    }
 
+    /// 引擎交给新任务：作废之前的结果，换引擎时先释放旧的。返回这次的 token
+    private func begin(_ job: Job) -> Int {
         generation += 1
-        let token = generation
-        let generator = generator
-        let model = model
-        let previous = cancelled
-        if previous == nil {
+        if cancelled == nil {
             if let loaded = loadedGenerator, !isSameGenerator(loaded, generator) {
                 releaseModel()
             }
@@ -285,7 +308,15 @@ public final class MinutesPipeline {
         activeJob = job
         activeGenerator = generator
         activity = .loading(0)
-        host?.setMinutes(MinutesState(status: .running), for: job.id)
+        setState(.running, for: job)
+        return generation
+    }
+
+    private func startMinutes(_ job: Job, template: MinutesTemplate, meeting m: Meeting) {
+        let previous = cancelled
+        let token = begin(job)
+        let generator = generator
+        let model = model
         // 以开始时的转写稿为准。从磁盘读：与之后读回比较的值一致，不受小数秒影响。
         // 会中标注以开始时宿主里的会议为准（`m`），和转写稿快照一起算出区间
         let snapshot = Result { try store.loadTranscript(job.id) }
@@ -309,7 +340,7 @@ public final class MinutesPipeline {
                 // createdAt 取整秒：写盘会丢掉小数秒，免得回调里的纪要和读回的不相等
                 let createdAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
                 result = .success(try await generateMinutes(
-                    transcript: transcript, title: m.title, startedAt: m.startedAt, template: job.template,
+                    transcript: transcript, title: m.title, startedAt: m.startedAt, template: template,
                     annotations: m.minutesAnnotations(in: transcript), generator: generator, model: model, createdAt: createdAt,
                     progress: { report(.generating($0)) }))
             } catch {
