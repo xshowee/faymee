@@ -93,4 +93,87 @@ import Testing
                                                           transport: transport)
         await #expect(throws: OnlineAPIError.emptyResponse) { _ = try await correct(generator) }
     }
+
+    private func anthropicReply(_ text: String) -> [String: Any] {
+        ["content": [["type": "text", "text": text]]]
+    }
+
+    @Test func Anthropic纠错请求关思考_被拒时去掉开关并留出思考余量_纪要请求不变() async throws {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: anthropicReply(edits))
+        try transport.enqueue(json: ["error": ["message": #""thinking.type.disabled" is not supported for this model."#]],
+                              status: 400)
+        try transport.enqueue(json: anthropicReply(edits))
+        try transport.enqueue(json: anthropicReply(#"{"overview":[]}"#))
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .anthropic, config: config(.anthropic),
+                                                          transport: transport)
+
+        _ = try await correct(generator)
+        let review = try await correct(generator)
+        _ = try await generator.generate(system: "s", prompt: "p", maxTokens: 8192, grammar: nil)
+
+        #expect(review.texts == ["s1": "我们要避免被动的局面"])
+        let bodies = transport.recordedRequests.compactMap { $0.bodyJSONObject() }
+        #expect(bodies.count == 4)
+        #expect(bodies.map { $0["thinking"] as? [String: String] }
+            == [["type": "disabled"], ["type": "disabled"], nil, nil])
+        #expect(bodies.map { $0["max_tokens"] as? Int } == [8192, 8192, 8192 + 16_384, 8192])
+        #expect(Set(bodies[3].keys) == ["model", "max_tokens", "messages", "system"])
+    }
+
+    private func geminiReply(_ text: String) -> [String: Any] {
+        ["candidates": [["content": ["parts": [["text": text]]], "finishReason": "STOP"]]]
+    }
+
+    private func geminiRequest(model: String) async throws -> [String: Any] {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: geminiReply(edits))
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .gemini, config: config(.gemini, model: model),
+                                                          transport: transport)
+        _ = try await correct(generator)
+        let body = try #require(transport.recordedRequests.first?.bodyJSONObject())
+        return try #require(body["generationConfig"] as? [String: Any])
+    }
+
+    @Test func Gemini纠错请求按模型代际关思考或调到最低_关不掉的留出思考余量() async throws {
+        // 2.5 Flash 预算 0 即关；2.5 Pro 关不掉，最低 128
+        let flash25 = try await geminiRequest(model: "gemini-2.5-flash")
+        #expect(flash25["thinkingConfig"] as? [String: Int] == ["thinkingBudget": 0])
+        #expect(flash25["maxOutputTokens"] as? Int == 8192)
+        let pro25 = try await geminiRequest(model: "models/gemini-2.5-pro")
+        #expect(pro25["thinkingConfig"] as? [String: Int] == ["thinkingBudget": 128])
+        #expect(pro25["maxOutputTokens"] as? Int == 8192 + 16_384)
+        // 3 代起用思考等级，Flash 有 minimal，Pro 最低 low
+        let flash3 = try await geminiRequest(model: "gemini-3-flash-preview")
+        #expect(flash3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "minimal"])
+        #expect(flash3["maxOutputTokens"] as? Int == 8192 + 16_384)
+        let pro3 = try await geminiRequest(model: "gemini-3-pro-preview")
+        #expect(pro3["thinkingConfig"] as? [String: String] == ["thinkingLevel": "low"])
+        #expect(pro3["maxOutputTokens"] as? Int == 8192 + 16_384)
+        // 2.0 及更早不思考，带 thinkingConfig 反而报错
+        let flash20 = try await geminiRequest(model: "gemini-2.0-flash")
+        #expect(flash20["thinkingConfig"] == nil)
+        #expect(flash20["maxOutputTokens"] as? Int == 8192)
+    }
+
+    @Test func Gemini思考设置被拒时去掉并留出思考余量_纪要请求不变() async throws {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: ["error": ["message": "Thinking level MINIMAL is not supported for this model."]],
+                              status: 400)
+        try transport.enqueue(json: geminiReply(edits))
+        try transport.enqueue(json: geminiReply(#"{"overview":[]}"#))
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .gemini,
+                                                          config: config(.gemini, model: "gemini-4-flash"),
+                                                          transport: transport)
+
+        let review = try await correct(generator)
+        _ = try await generator.generate(system: "s", prompt: "p", maxTokens: 8192, grammar: nil)
+
+        #expect(review.texts == ["s1": "我们要避免被动的局面"])
+        let configs = transport.recordedRequests.compactMap { $0.bodyJSONObject()?["generationConfig"] as? [String: Any] }
+        #expect(configs.count == 3)
+        #expect(configs.map { $0["thinkingConfig"] != nil } == [true, false, false])
+        #expect(configs.map { $0["maxOutputTokens"] as? Int } == [8192 + 16_384, 8192 + 16_384, 8192])
+        #expect(configs.map { $0["responseMimeType"] as? String } == Array(repeating: "application/json", count: 3))
+    }
 }

@@ -382,13 +382,22 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         try Task.checkCancellation()
         try config.validateReady()
 
-        let response = try await OnlineTextSupport.postJSON(
-            url: try endpointURL(),
-            headers: authHeaders(),
-            payload: buildPayload(system: system, prompt: prompt, maxTokens: maxTokens),
-            timeout: requestTimeout,
-            transport: transport
-        )
+        let url = try endpointURL()
+        let headers = authHeaders()
+        let send = { (payload: [String: Any]) in
+            try await OnlineTextSupport.postJSON(url: url, headers: headers, payload: payload,
+                                                 timeout: self.requestTimeout, transport: self.transport)
+        }
+        // 关思考：`thinking: {type: "disabled"}`。总在思考的模型（如 Opus 5.5）拒收，就去掉开关、留出思考的余量
+        let thinkingOff: [String: Any] = thinkingDisabled ? ["thinking": ["type": "disabled"]] : [:]
+        var response = try await send(buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                                   extra: thinkingOff))
+        if !thinkingOff.isEmpty, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(buildPayload(
+                system: system, prompt: prompt, maxTokens: maxTokens + OnlineTextSupport.reasoningHeadroomTokens
+            ))
+        }
         try response.checkSuccess()
 
         let blocks = try OnlineTextSupport.decodeArrayField("content", from: response.data)
@@ -438,7 +447,7 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         return headers
     }
 
-    private func buildPayload(system: String, prompt: String, maxTokens: Int) -> [String: Any] {
+    private func buildPayload(system: String, prompt: String, maxTokens: Int, extra: [String: Any] = [:]) -> [String: Any] {
         var payload: [String: Any] = [
             "model": config.trimmedModel,
             "max_tokens": maxTokens,
@@ -447,6 +456,7 @@ public final class AnthropicTextGenerator: TextGenerator, ConnectionProbable, Se
         if !system.isEmpty {
             payload["system"] = system
         }
+        payload.merge(extra) { _, new in new }
         return payload
     }
 }
@@ -517,18 +527,25 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         try Task.checkCancellation()
         try config.validateReady()
 
-        let response = try await OnlineTextSupport.postJSON(
-            url: try generateContentURL(),
-            headers: authHeaders(),
-            payload: buildPayload(
-                system: system,
-                prompt: prompt,
-                maxTokens: maxTokens,
-                responseMimeType: "application/json"
-            ),
-            timeout: requestTimeout,
-            transport: transport
-        )
+        let url = try generateContentURL()
+        let headers = authHeaders()
+        let send = { (thinkingConfig: [String: Any]?, maxTokens: Int) in
+            try await OnlineTextSupport.postJSON(
+                url: url,
+                headers: headers,
+                payload: self.buildPayload(system: system, prompt: prompt, maxTokens: maxTokens,
+                                           responseMimeType: "application/json", thinkingConfig: thinkingConfig),
+                timeout: self.requestTimeout,
+                transport: self.transport
+            )
+        }
+        let thinking = thinkingDisabled ? thinkingOff() : nil
+        let headroom = OnlineTextSupport.reasoningHeadroomTokens
+        var response = try await send(thinking?.config, maxTokens + (thinking?.alwaysThinks == true ? headroom : 0))
+        if thinking != nil, OnlineTextSupport.isRejectedParameter(response) {
+            try Task.checkCancellation()
+            response = try await send(nil, maxTokens + headroom)
+        }
         try response.checkSuccess()
 
         let (parts, finishReason) = try firstCandidateParts(from: response.data)
@@ -580,15 +597,35 @@ public final class GeminiTextGenerator: TextGenerator, ConnectionProbable, Senda
         return apiKey.isEmpty ? [:] : ["x-goog-api-key": apiKey]
     }
 
+    /// 关思考的 `thinkingConfig`，按模型代际（思考算在 maxOutputTokens 里）：
+    /// - 2.0 及更早不思考，带 thinkingConfig 反而报错，不发；
+    /// - 2.5 用 thinkingBudget：Flash、Flash-Lite 设 0 即关；Pro 关不掉，取最低 128；
+    /// - 3 代起用 thinkingLevel（对 2.5 报错）：Flash 取 minimal（几乎不想），Pro 最低 low。
+    /// `alwaysThinks` 为 true 时关不彻底，输出上限要留出思考的余量
+    private func thinkingOff() -> (config: [String: Any], alwaysThinks: Bool)? {
+        let model = config.trimmedModel.hasPrefix("models/")
+            ? String(config.trimmedModel.dropFirst("models/".count)) : config.trimmedModel
+        let pro = model.contains("pro")
+        if model.hasPrefix("gemini-1") || model.hasPrefix("gemini-2.0") { return nil }
+        if model.hasPrefix("gemini-2.5") {
+            return pro ? (["thinkingBudget": 128], true) : (["thinkingBudget": 0], false)
+        }
+        return (["thinkingLevel": pro ? "low" : "minimal"], true)
+    }
+
     private func buildPayload(
         system: String,
         prompt: String,
         maxTokens: Int,
-        responseMimeType: String?
+        responseMimeType: String?,
+        thinkingConfig: [String: Any]? = nil
     ) -> [String: Any] {
         var generationConfig: [String: Any] = ["maxOutputTokens": maxTokens]
         if let responseMimeType {
             generationConfig["responseMimeType"] = responseMimeType
+        }
+        if let thinkingConfig {
+            generationConfig["thinkingConfig"] = thinkingConfig
         }
         var payload: [String: Any] = [
             "contents": [
