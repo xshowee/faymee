@@ -18,6 +18,19 @@ public enum OnlineMinutesDefaults {
 ///
 /// 调用方要的正文预算比这个还大时按调用方的发
 enum OnlineOutputLimit {
+    /// 思考吃光上限、正文为空时再试一次的上限。只有自定义网关有：别的已按模型接受的值发，放大会被拒。
+    /// 32768 是常见 OpenAI 兼容模型普遍接受的值（gpt-4.1、qwen-plus 等）；网关不接受时报它的 400
+    static func retryTokens(providerID: String) -> Int? {
+        switch providerID {
+        case OnlineMinutesProvider.deepSeek.providerID, OnlineMinutesProvider.dashScope.providerID,
+             OnlineMinutesProvider.openAI.providerID, OnlineMinutesProvider.anthropic.providerID,
+             OnlineMinutesProvider.gemini.providerID:
+            nil
+        default:
+            32_768
+        }
+    }
+
     static func tokens(providerID: String, model: String) -> Int {
         let model = model.lowercased()
         switch providerID {
@@ -237,25 +250,37 @@ public final class OpenAICompatibleTextGenerator: OnlineTextGenerator, Connectio
 
         let url = try endpointURL()
         let headers = authHeaders()
-        func send(format: Bool) async throws -> HTTPResponse {
+        let tokens = config.requestTokens(maxTokens)
+        func send(format: Bool, tokens: Int) async throws -> HTTPResponse {
             try await OnlineTextSupport.postJSON(
                 url: url,
                 headers: headers,
-                payload: buildPayload(system: system, prompt: prompt, maxTokens: config.requestTokens(maxTokens),
-                                      includeResponseFormat: format),
+                payload: buildPayload(system: system, prompt: prompt, maxTokens: tokens, includeResponseFormat: format),
                 timeout: requestTimeout,
                 transport: transport
             )
         }
 
         // 400 时去掉 response_format 重试
-        var response = try await send(format: true)
+        var format = true
+        var response = try await send(format: format, tokens: tokens)
         if OnlineTextSupport.isRejectedParameter(response) {
             try Task.checkCancellation()
-            response = try await send(format: false)
+            format = false
+            response = try await send(format: format, tokens: tokens)
         }
         try response.checkSuccess()
-        let choice = try firstChoice(from: response.data)
+        var choice = try firstChoice(from: response.data)
+
+        // 思考吃光了上限、正文为空：上限还没到模型接受的值（自定义网关）时放大再试一次，仍为空照常报错
+        if choice.finishReason == "length", (try? OnlineTextSupport.extractNormalizedText(choice.text ?? "")) == nil,
+           let retry = OnlineOutputLimit.retryTokens(providerID: config.providerID), retry > tokens
+        {
+            try Task.checkCancellation()
+            response = try await send(format: format, tokens: retry)
+            try response.checkSuccess()
+            choice = try firstChoice(from: response.data)
+        }
 
         guard let text = choice.text else { throw OnlineAPIError.emptyResponse }
         return try OnlineTextSupport.extractNormalizedText(text)

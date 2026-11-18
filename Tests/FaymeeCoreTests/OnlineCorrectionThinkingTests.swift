@@ -65,6 +65,44 @@ import Testing
         }
     }
 
+    private let starved: [String: Any] = ["choices": [["message": ["content": "", "reasoning_content": "想了很久"],
+                                                       "finish_reason": "length"]]]
+
+    @Test func 自定义网关思考吃光上限时放大上限再试一次_纪要也一样() async throws {
+        for call in ["纠错", "纪要"] {
+            let transport = FakeHTTPTransport()
+            try transport.enqueue(json: starved)
+            try transport.enqueue(json: reply(.custom, edits))
+            let generator = OnlineMinutesEngine.makeGenerator(provider: .custom, config: config(.custom),
+                                                              transport: transport)
+            if call == "纠错" {
+                #expect(try await correct(generator).texts == ["s1": "我们要避免被动的局面"])
+            } else {
+                _ = try await generator.generate(system: "s", prompt: "p", maxTokens: 8192, grammar: nil)
+            }
+            let bodies = transport.recordedRequests.compactMap { $0.bodyJSONObject() }
+            #expect(bodies.map { $0["max_tokens"] as? Int } == [8_192, 32_768], "\(call)")
+            #expect(bodies.map { $0["response_format"] != nil } == [true, true], "\(call)")
+        }
+    }
+
+    @Test func 已按模型上限发的请求思考吃光上限时不再试_正文为空算失败() async throws {
+        let transport = FakeHTTPTransport()
+        try transport.enqueue(json: starved)
+        try transport.enqueue(json: starved)
+        let generator = OnlineMinutesEngine.makeGenerator(provider: .deepSeek, config: config(.deepSeek, model: "deepseek-flash"),
+                                                          transport: transport)
+        await #expect(throws: OnlineAPIError.emptyResponse) { _ = try await correct(generator) }
+        #expect(transport.recordedRequests.count == 1)
+
+        let custom = FakeHTTPTransport()
+        try custom.enqueue(json: starved)
+        try custom.enqueue(json: starved)
+        let gateway = OnlineMinutesEngine.makeGenerator(provider: .custom, config: config(.custom), transport: custom)
+        await #expect(throws: OnlineAPIError.emptyResponse) { _ = try await correct(gateway) }
+        #expect(custom.recordedRequests.count == 2)
+    }
+
     @Test func 分段按正文预算留输出_思考的余量只加在请求的上限上() async throws {
         let items = (1...3_000).map { i in
             TranscriptItem.sentence(TranscriptSentence(id: "s\(i)", start: Double(i * 6), end: Double(i * 6 + 5),
