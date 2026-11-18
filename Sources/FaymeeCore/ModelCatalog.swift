@@ -291,16 +291,6 @@ extension ModelCatalog {
             parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
                                         minutesChunking: .standard, thinking: false),
             license: "Apache-2.0"),
-        CatalogModel(
-            id: LocalModel.qwen3_5_9B.id, roles: [.minutes], family: .llamaGGUF,
-            source: .download(.qwen3_5_9B), name: "Qwen3.5 9B（Q4_K_M）",
-            // 来源同上。ticket 11 实测：resident 峰值 6.2 GB（权重 5.7 GB）；20 分钟会议 246 秒（合并陷入重复、
-            // 重试时 694 秒），56 分钟会议 451 秒
-            memory: "约 6.2 GB", speed: "20 分钟会议约 4 分钟",
-            verdicts: [.minutes: "待办最全、最准；占内存多，建议 16 GB 以上内存的机器用"],
-            parameters: ModelParameters(contextTokens: LlamaTextGenerator.defaultContextLength,
-                                        minutesChunking: .standard, thinking: false),
-            license: "Apache-2.0"),
 
         // MARK: 声纹
         CatalogModel(
