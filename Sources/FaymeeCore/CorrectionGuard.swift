@@ -76,6 +76,14 @@ public struct CorrectionContext: Sendable {
         self.sentences = sentences
         self.references = references
     }
+
+    /// 规则 4：`text` 在句子 `sentence` 前后 `CorrectionThreshold.nearbySentences` 句（不含这一句）里原样出现过
+    func occursNearby(_ text: String, sentence: String) -> Bool {
+        guard !text.isEmpty, let i = sentences.firstIndex(where: { $0.id == sentence }) else { return false }
+        let n = CorrectionThreshold.nearbySentences
+        return sentences[max(0, i - n)...min(sentences.count - 1, i + n)]
+            .contains { $0.id != sentence && $0.text.contains(text) }
+    }
 }
 
 /// 护栏的结论
@@ -120,6 +128,10 @@ public enum CorrectionThreshold {
     /// 规则 6：原句不到 `shortSentence` 个字时最多改这么多个字
     public static let shortSentence = 10
     public static let shortSentenceChanges = 3
+    /// 规则 4：每句补的字合计不超过这么多个
+    public static let insertedCharacters = 6
+    /// 规则 4：连续补 2 个字以上的，须在前后这么多句里出现过（或是参考词）
+    public static let nearbySentences = 5
 }
 
 /// 本机：先把每条 `from` 定位到句子里（必须恰好出现一次、同一句的几条不重叠），再过 `reviewCorrections`
@@ -193,6 +205,8 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
     var discardedNumbers = 0
     // 规则 6 计入的字数：补字、删字和没过拼音校验的替换（过了拼音校验的替换、识别残留的删除不计入）
     var counted = 0
+    // 规则 4：这一句补的字合计
+    var inserted = 0
     var failure: CorrectionRule?
 
     for segment in diff.segments {
@@ -204,6 +218,7 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
         case .apply(let counts):
             applied.append(segment)
             counted += counts
+            if segment.kind == .insert { inserted += counts }
         case .suggest(let unit):
             suggestions.append(NumberSuggestion(sentence: sentence.id, from: unit.before, to: unit.after))
         case .discardSuggestion:
@@ -211,6 +226,9 @@ private func reviewSentence(_ sentence: TranscriptSentence, corrected: String, c
         case .reject(let rule):
             failure = failure ?? rule
         }
+    }
+    if failure == nil, inserted > CorrectionThreshold.insertedCharacters {
+        failure = .insertion
     }
     if failure == nil, exceedsChangeRatio(changed: counted, sentence: sentence.text) {
         failure = .changeRatio
@@ -245,8 +263,14 @@ private func check(_ segment: TextDiff.Segment, in diff: TextDiff, bounds: Range
     case (.punctuation, .full):
         return .apply(counts: 0)
     case (.insert, .full):
-        // ticket 03：规则 4（每句合计 ≤ 6 个字，连续 2 字以上须是参考词或在前后 5 句出现过），计入规则 6
-        return .reject(.insertion)
+        // 规则 4：连续补 2 个字以上的须是参考词，或在前后几句里出现过；补的字计入规则 6
+        let inserted = characterCount(segment.after)
+        if inserted >= 2,
+           context.references.match(in: diff.after, covering: segment.afterRange, sentence: sentence.id) == nil,
+           !context.occursNearby(segment.after, sentence: sentence.id) {
+            return .reject(.insertion)
+        }
+        return .apply(counts: inserted)
     case (.delete, .full):
         // ticket 03：规则 5（只删识别残留，残留的删除不计入规则 6）
         return .reject(.deletion)
@@ -282,11 +306,16 @@ private func pinyinCheck(_ segment: TextDiff.Segment, in diff: TextDiff, bounds:
 
 /// 规则 6：`changed` 个字是否超过这句允许的改动量。原句字数不算标点、空白
 func exceedsChangeRatio(changed: Int, sentence: String) -> Bool {
-    let length = sentence.count { !TextDiff.isPunctuation(String($0)) }
+    let length = characterCount(sentence)
     let limit = length < CorrectionThreshold.shortSentence
         ? CorrectionThreshold.shortSentenceChanges
         : Int((Double(length) * CorrectionThreshold.changeRatio).rounded(.down))
     return changed > limit
+}
+
+/// 字数：不算标点、空白
+func characterCount(_ text: String) -> Int {
+    text.count { !TextDiff.isPunctuation(String($0)) }
 }
 
 /// 规则 7：含阿拉伯数字或汉字数字字符
