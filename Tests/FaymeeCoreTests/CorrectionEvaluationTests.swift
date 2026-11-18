@@ -360,12 +360,23 @@ private final class RecordingTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
-/// 包一层 `TextGenerator`，记下每次调用的原始输出
+/// 包一层 `TextGenerator`，记下每次调用的原始输出。`withThinkingDisabled`（在线纠错关思考）转给里面的引擎，
+/// 记录照样记在同一处
 final class RecordingGenerator: TextGenerator, @unchecked Sendable {
-    let engine: any TextGenerator
-    private(set) var outputs: [String] = []
+    private final class Log: @unchecked Sendable {
+        var outputs: [String] = []
+    }
 
-    init(_ engine: any TextGenerator) { self.engine = engine }
+    let engine: any TextGenerator
+    private let log: Log
+    var outputs: [String] { log.outputs }
+
+    convenience init(_ engine: any TextGenerator) { self.init(engine, log: Log()) }
+    private init(_ engine: any TextGenerator, log: Log) {
+        self.engine = engine
+        self.log = log
+    }
+
     var contextTokens: Int { engine.contextTokens }
     var maxOutputTokens: Int { engine.maxOutputTokens }
     var minutesChunking: MinutesChunking { engine.minutesChunking }
@@ -373,13 +384,14 @@ final class RecordingGenerator: TextGenerator, @unchecked Sendable {
     var isDownloaded: Bool { engine.isDownloaded }
     func load(progress: @escaping (Double) -> Void) async throws { try await engine.load(progress: progress) }
     func unload() { engine.unload() }
+    func withThinkingDisabled() -> any TextGenerator { RecordingGenerator(engine.withThinkingDisabled(), log: log) }
     func generate(system: String, prompt: String, maxTokens: Int) async throws -> String {
         try await generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: nil)
     }
 
     func generate(system: String, prompt: String, maxTokens: Int, grammar: String?) async throws -> String {
         let output = try await engine.generate(system: system, prompt: prompt, maxTokens: maxTokens, grammar: grammar)
-        outputs.append(output)
+        log.outputs.append(output)
         return output
     }
 }
