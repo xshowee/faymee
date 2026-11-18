@@ -87,6 +87,11 @@ public struct CorrectionContext: Sendable {
         return sentences[max(0, i - n)...min(sentences.count - 1, i + n)]
             .contains { $0.id != sentence && $0.text.contains(text) }
     }
+
+    /// 规则 7：`text` 在转写稿别处（不含句子 `sentence`）原样出现过，数字建议「改后的数字在转写稿别处出现过」
+    func occursElsewhere(_ text: String, sentence: String) -> Bool {
+        !text.isEmpty && sentences.contains { $0.id != sentence && $0.text.contains(text) }
+    }
 }
 
 /// 护栏的结论
@@ -298,7 +303,7 @@ private func checkContent(_ segment: TextDiff.Segment, in diff: TextDiff, bounds
     if containsNumber(segment.before) || containsNumber(segment.after) {
         let near = pinyinCheck(segment, in: diff, bounds: bounds, sentence: sentence, context: context)
         guard let unit = diff.suggestionUnit(segment, within: bounds, attach: isNumberPart),
-              near || context.references.occursElsewhere(unit.after, sentence: sentence.id) else {
+              near || context.occursElsewhere(unit.after, sentence: sentence.id) else {
             return .discardSuggestion
         }
         return .suggest(unit)

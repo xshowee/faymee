@@ -19,8 +19,6 @@ public struct ReferenceWords: Sendable {
     /// 转写稿各句里的整词出现几次：全部句子合计，和每句自己的。相减就是「别处」
     let wordCounts: [String: Int]
     let wordCountsBySentence: [String: [String: Int]]
-    /// 转写稿快照的各句，算数字建议的「别处出现过」
-    let sentences: [TranscriptSentence]
 
     public static let minimumLength = 2
     /// 在转写稿别处至少出现这么多次才算参考词
@@ -47,7 +45,6 @@ public struct ReferenceWords: Sendable {
         }
         wordCounts = total
         wordCountsBySentence = bySentence
-        self.sentences = sentences
     }
 
     /// 参考词提示词里列出的词：热词、说话人名字、标题各段
@@ -70,11 +67,6 @@ public struct ReferenceWords: Sendable {
             }
         }
         return nil
-    }
-
-    /// 转写稿别处（不含这一句）是否原样出现过 `text`，用于数字建议「改后的数字在转写稿别处出现过」
-    public func occursElsewhere(_ text: String, sentence: String) -> Bool {
-        !text.isEmpty && sentences.contains { $0.id != sentence && $0.text.contains(text) }
     }
 
     private func isReference(_ candidate: String, sentence: String) -> Bool {
