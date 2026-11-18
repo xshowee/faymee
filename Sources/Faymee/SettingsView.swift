@@ -185,9 +185,7 @@ extension SettingsView {
         if online.minutesMode == .online {
             return .online(provider: online.minutesProvider.displayName, model: online.minutesModel)
         }
-        // 目录项名字带量化标注，如「Qwen3.5 4B（Q4_K_M）」，说明里只要模型名
-        let name = MinutesEngine.selectedModel(model.modelSelections).name
-        return .local(modelName: name.components(separatedBy: "（").first ?? name)
+        return .local(modelName: MinutesEngine.selectedModel(model.modelSelections).shortName)
     }
 
     /// 实时字幕定稿的说明：做什么；所选模型没下载完时说明暂时不用；录音中改了选择时说明从下一场起生效
