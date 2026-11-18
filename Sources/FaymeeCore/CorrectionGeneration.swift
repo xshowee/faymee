@@ -186,18 +186,40 @@ func wordFixGrammar(ids: [String]) -> String {
     """#
 }
 
-/// 取输出里第一个 `{` 到最后一个 `}` 当 JSON（同 `parseDraft`）。没有 `fixes` 列表时为 nil（解析失败）；
-/// 单条形状不对只丢掉那一条
+/// 取输出里第一个 `{` 到最后一个 `}` 当 JSON（同 `parseDraft`），截断时救回写完的条目（见 `jsonEntries`）。
+/// 没有 `fixes` 列表时为 nil（解析失败）；单条形状不对只丢掉那一条。`from` 与 `to` 相同的条目（模型把没改的字
+/// 也列出来）和重复列出的同一条不算修改，直接去掉，免得护栏按 `from` 对不上把同一句的其他修改也丢掉
 func parseWordFixes(_ output: String) -> [WordFix]? {
-    guard let open = output.firstIndex(of: "{"), let close = output.lastIndex(of: "}"), open < close,
-          let object = try? JSONSerialization.jsonObject(with: Data(output[open...close].utf8)) as? [String: Any],
-          let entries = object["fixes"] as? [Any]
-    else { return nil }
+    guard let entries = jsonEntries(output, key: "fixes") else { return nil }
+    var seen = Set<WordFix>()
     return entries.compactMap { entry in
         guard let entry = entry as? [String: Any], let id = entry["id"] as? String,
-              let from = entry["from"] as? String, let to = entry["to"] as? String else { return nil }
+              let from = entry["from"] as? String, let to = entry["to"] as? String, from != to,
+              seen.insert(WordFix(id: id, from: from, to: to)).inserted else { return nil }
         return WordFix(id: id, from: from, to: to)
     }
+}
+
+/// 输出 `{"<key>": [...]}` 里的列表：取第一个 `{` 到最后一个 `}` 当 JSON（同 `parseDraft`）。
+/// 输出被截断（改得多时会碰到输出上限）时，退到最后一个写完的条目，补上 `]}` 收尾，救回前面的
+func jsonEntries(_ output: String, key: String) -> [Any]? {
+    guard let open = output.firstIndex(of: "{") else { return nil }
+    func entries(_ json: String) -> [Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])?[key] as? [Any]
+    }
+    var found: [Any]?
+    if let close = output.lastIndex(of: "}"), open < close {
+        found = entries(String(output[open...close]))
+    }
+    if found == nil, output.contains("\"\(key)\"") {
+        // 截断：从后往前试每个 `}`，补上 `]}` 收尾
+        var end = output.endIndex
+        while found == nil, let close = output[open..<end].lastIndex(of: "}") {
+            found = entries(output[open...close] + "]}")
+            end = close
+        }
+    }
+    return found
 }
 
 /// 在线输出的一条整句改写：`{"id": "s12", "text": "…"}`。`text` 为空表示整句删掉（与上一句重复）
@@ -215,23 +237,7 @@ public struct SentenceEdit: Hashable, Sendable {
 /// 单条形状不对只丢掉那一条，同一句只认第一条，`text` 开头抄了行首的「[s12 说话人 2] 」时去掉。
 /// 输出被截断（常规会议一次整场，改得多时会碰到输出上限）时，退到最后一个写完的条目，救回前面的
 func parseSentenceEdits(_ output: String) -> [SentenceEdit]? {
-    guard let open = output.firstIndex(of: "{") else { return nil }
-    func entries(_ json: String) -> [Any]? {
-        (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])?["edits"] as? [Any]
-    }
-    var found: [Any]?
-    if let close = output.lastIndex(of: "}"), open < close {
-        found = entries(String(output[open...close]))
-    }
-    if found == nil, output.contains(#""edits""#) {
-        // 截断：从后往前试每个 `}`，补上 `]}` 收尾
-        var end = output.endIndex
-        while found == nil, let close = output[open..<end].lastIndex(of: "}") {
-            found = entries(output[open...close] + "]}")
-            end = close
-        }
-    }
-    guard let found else { return nil }
+    guard let found = jsonEntries(output, key: "edits") else { return nil }
     var seen = Set<String>()
     return found.compactMap { entry in
         guard let entry = entry as? [String: Any], let id = entry["id"] as? String, var text = entry["text"] as? String,

@@ -32,6 +32,43 @@ import Testing
         #expect(review.texts == ["s1": "我们要避免被动的局面", "s2": "他在工位上说了这件事"])
     }
 
+    @Test func 本机输出里from与to相同的条目不算修改_不连累同一句的其他修改() async throws {
+        // 真实会议上 Qwen3.5 4B 常把没改的字也列出来（「掉」→「掉」），之前按 `from` 对不上整句丢弃
+        let t = transcript(["钓了好几次都掉了", "他在工会上说了这件事"])
+        let generator = ScriptedGenerator(outputs: [
+            #"{"fixes": [{"id": "s1", "from": "钓", "to": "调"}, {"id": "s1", "from": "掉", "to": "掉"}, "#
+                + #"{"id": "s2", "from": "说了", "to": "说了"}]}"#,
+        ])
+        let review = try await correctTranscript(t, title: "周会", hotwords: [], method: .wordFixes,
+                                                 generator: generator)
+        #expect(review.texts == ["s1": "调了好几次都掉了"])
+        #expect(review.rejections.isEmpty)
+    }
+
+    @Test func 本机输出里重复列出的同一条只算一条() async throws {
+        let t = transcript(["我们要避免对动的局面"])
+        let generator = ScriptedGenerator(outputs: [
+            #"{"fixes": [{"id": "s1", "from": "对动", "to": "被动"}, {"id": "s1", "from": "对动", "to": "被动"}]}"#,
+        ])
+        let review = try await correctTranscript(t, title: "周会", hotwords: [], method: .wordFixes,
+                                                 generator: generator)
+        #expect(review.texts == ["s1": "我们要避免被动的局面"])
+        #expect(review.rejections.isEmpty)
+    }
+
+    @Test func 本机输出被截断时救回已写完的条目_不重试() async throws {
+        // 长会议一段列很多条时碰到输出上限，停在半条上
+        let t = transcript(["我们要避免对动的局面", "他在工会上说了这件事"])
+        let generator = ScriptedGenerator(outputs: [
+            #"{"fixes": [{"id": "s1", "from": "对动", "to": "被动"}, {"id": "s2", "from": "工会"#,
+        ])
+        let review = try await correctTranscript(t, title: "周会", hotwords: [], method: .wordFixes,
+                                                 generator: generator)
+        #expect(generator.calls.count == 1)
+        #expect(review.texts == ["s1": "我们要避免被动的局面"])
+        #expect(review.rejections.isEmpty)
+    }
+
     @Test func 文法把id限定在这一段可改的句子里_条数不超过句数() async throws {
         let t = transcript(["第一句话", "第二句话", "第三句话"], edited: ["s2"])
         let generator = ScriptedGenerator(outputs: [#"{"fixes": []}"#])
