@@ -1193,4 +1193,10 @@ extension AppModel: TranscriptionHost, MinutesHost {
         m.minutes = state
         update(m)
     }
+
+    func setCorrection(_ state: CorrectionState?, for id: String) {
+        guard var m = meeting(id) else { return }
+        m.correction = state
+        update(m)
+    }
 }

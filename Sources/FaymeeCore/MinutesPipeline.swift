@@ -8,6 +8,8 @@ public protocol MinutesHost: AnyObject {
     func meeting(_ id: String) -> Meeting?
     /// 更新会议的纪要状态并保存
     func setMinutes(_ state: MinutesState, for id: String)
+    /// 更新会议的转写纠错状态并保存；nil 表示清掉（排队的纠错因引擎不支持而丢掉时）
+    func setCorrection(_ state: CorrectionState?, for id: String)
 }
 
 /// 一次生成的结果。被取消（开始录音、删除会议）的生成没有结果
@@ -16,11 +18,11 @@ public enum MinutesOutcome: Hashable, Sendable {
     case failed(String)
 }
 
-/// 正在生成的会议进行到哪一步，只在内存里，不写盘
+/// 正在生成纪要（或纠错）的会议进行到哪一步，只在内存里，不写盘
 public enum MinutesActivity: Hashable, Sendable {
     /// 把模型加载进内存，0...1
     case loading(Double)
-    /// 0...1，见 `generateMinutes` 的进度
+    /// 0...1，见 `generateMinutes`（纠错时是 `correctTranscript`）的进度
     case generating(Double)
 }
 
@@ -40,7 +42,10 @@ public enum MinutesWaitReason: Hashable, Sendable {
 /// 纪要只在成功时整体写入，失败或取消都保留原来的纪要。
 ///
 /// 队列里的任务分种类（`Job.Kind`），共用一条队列、一个引擎，一次只跑一个，同转写管线的
-/// “完整转写 / 只区分说话人”。
+/// “完整转写 / 只区分说话人”：
+/// - 生成纪要
+/// - 转写纠错（spec「转写纠错」）：用纪要的引擎改正转写稿里听错的字词。同一场会议的纪要排在它的纠错后面，
+///   否则纪要刚生成，纠错一写转写稿，纪要就显示“转写稿有修改”。纠错完不释放模型，直接接着生成纪要
 ///
 /// 模型按需加载、用完释放：有任务能开始时才加载，连续排队时保持加载，
 /// 一个任务结束后下一个开始不了（队列空、都在等电源或转写等）就释放
@@ -85,6 +90,14 @@ public final class MinutesPipeline {
     public private(set) var isOnlineEngine: Bool
     /// “转写完成后自动生成纪要”开关，见 `transcriptionFinished(_:)`
     public var autoGenerate = true
+    /// “纠错转写稿”开关：开着时转写完成先自动纠错，见 `transcriptionFinished(_:)`。手动纠错不看它
+    public var correctsTranscripts = false
+    /// 当前的热词表，纠错的参考词之一。由 App 在热词变化时设置
+    @ObservationIgnored public var hotwords: [String] = []
+
+    /// 当前纪要引擎对应的纠错方式；nil 表示这个引擎还不支持纠错（在线，ticket 03 接上），
+    /// 这时纠错不排队、排着的在开始时丢掉，都不报错，直接走纪要
+    public var correctionMethod: CorrectionMethod? { CorrectionMethod.forMinutesEngine(isOnline: isOnlineEngine) }
 
     /// 转写稿有效文字（见 `Transcript.effectiveTextCount`）少于这么多字时不自动生成
     public static let minimumTextCount = 50
@@ -96,6 +109,9 @@ public final class MinutesPipeline {
         enum Kind {
             /// 生成纪要
             case minutes(template: MinutesTemplate)
+            /// 转写纠错。`autoMinutes`：结束后（成功或失败）按自动纪要的规则决定要不要排纪要。
+            /// 转写完成自动排的、启动时恢复的为 true，手动的为 false
+            case correction(autoMinutes: Bool)
         }
 
         var id: String
@@ -106,6 +122,8 @@ public final class MinutesPipeline {
         var isMinutes: Bool {
             if case .minutes = kind { true } else { false }
         }
+
+        var isCorrection: Bool { !isMinutes }
     }
 
     private var jobs: [Job] = []
@@ -153,10 +171,23 @@ public final class MinutesPipeline {
         activeJob?.id == id && activeJob?.isMinutes == true ? activity : nil
     }
 
-    /// 某场排队中的会议在等什么；不在排队、或只是排在别的会议后面（含录音中暂停）时为 nil。
+    /// 某场会议纠错正在进行的步骤；不在纠错中时为 nil。会议列表把它显示成纪要前面的一步
+    public func correctionActivity(for id: String) -> MinutesActivity? {
+        activeJob?.id == id && activeJob?.isCorrection == true ? activity : nil
+    }
+
+    /// 某场排队中的会议在等什么；不在排队、或只是排在别的会议后面（含录音中暂停、排在同一场的纠错后面）时为 nil。
     /// 几项同时成立时按需要用户处理的先后：模型/在线配置、电源、转写
     public func waitReason(for id: String) -> MinutesWaitReason? {
-        guard let job = jobs.first(where: { $0.id == id && $0.isMinutes }) else { return nil }
+        jobs.first { $0.id == id && $0.isMinutes }.flatMap(waitReason)
+    }
+
+    /// 某场排队纠错的会议在等什么，规则同 `waitReason(for:)`
+    public func correctionWaitReason(for id: String) -> MinutesWaitReason? {
+        jobs.first { $0.id == id && $0.isCorrection }.flatMap(waitReason)
+    }
+
+    private func waitReason(_ job: Job) -> MinutesWaitReason? {
         if !isModelDownloaded { return isOnlineEngine ? .onlineConfig : .model }
         if requiresPower && !isOnPower && !job.now { return .power }
         if isTranscriptionBusy { return .transcription }
@@ -167,10 +198,21 @@ public final class MinutesPipeline {
     /// 在转写的 `onFinish` 里、`transcriptionFinished(_:)` 之后调用：此刻转写管线还没空闲，
     /// 能马上开始的任务也还在排队，等的是 `.transcription`。
     /// 看的是是否在队列里，不只是这次有没有自动排队：用户之前手动排过的也会生成并通知
+    /// 自动排的纠错还没结束、结束后会自动排纪要（`wouldAutoGenerate`）时，也算已排队，等的是纠错在等的
     public func followUp(for id: String) -> MinutesFollowUp {
         if activeJob?.id == id && activeJob?.isMinutes == true { return .queued(waitingFor: nil) }
-        guard jobs.contains(where: { $0.id == id && $0.isMinutes }) else { return .notQueued }
-        return .queued(waitingFor: waitReason(for: id))
+        if jobs.contains(where: { $0.id == id && $0.isMinutes }) { return .queued(waitingFor: waitReason(for: id)) }
+        if let correction = pendingCorrection(id), case .correction(autoMinutes: true) = correction.kind,
+           wouldAutoGenerate(id) {
+            return .queued(waitingFor: activeJob?.id == id ? nil : correctionWaitReason(for: id))
+        }
+        return .notQueued
+    }
+
+    /// 这场会议排着或正在跑的纠错
+    private func pendingCorrection(_ id: String) -> Job? {
+        if let active = activeJob, active.id == id, active.isCorrection { return active }
+        return jobs.first { $0.id == id && $0.isCorrection }
     }
 
     /// 和转写管线互相让行，两者一次只跑一个：转写不空闲时不开始新的纪要；
@@ -214,11 +256,13 @@ public final class MinutesPipeline {
     ///   - template: nil 时沿用排队时选的模板；不在排队时沿用已有纪要的模板，没有纪要用“通用”。
     ///     如“按周会重新生成”后排队等转写，转写完成自动排队（不带模板）时仍按周会生成
     ///   - now: “现在生成”，不等接通电源
+    /// 同一场会议的纠错还在排队时，纪要排在它后面；`now` 时那个纠错也跟着不等接通电源，免得纪要一直等它
     /// - Returns: 是否在队列中
     @discardableResult
     public func enqueue(_ id: String, template: MinutesTemplate? = nil, now: Bool = false) -> Bool {
         guard let m = host?.meeting(id), m.transcription != nil,
               !(activeJob?.id == id && activeJob?.isMinutes == true) else { return false }
+        if now, let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) { jobs[i].now = true }
         if let i = jobs.firstIndex(where: { $0.id == id && $0.isMinutes }) {
             if let template { jobs[i].kind = .minutes(template: template) }
             jobs[i].now = jobs[i].now || now
@@ -231,29 +275,80 @@ public final class MinutesPipeline {
         return true
     }
 
-    /// 转写成功后调用，按规则决定要不要自动排队，返回是否排了队：
+    /// 排队纠错（转写完成自动纠错、“纠错”、“重试”都走这里）。只接受转写过、有转写稿的会议；
+    /// 纪要引擎还不支持纠错（`correctionMethod` 为 nil）、或这场正在纠错时不排。已在排队时不重复排，
+    /// `now`、`autoMinutes` 只升不降。同一场会议的纪要不越过它（见 `nextJob`）
+    /// - Parameters:
+    ///   - now: 手动纠错，不等接通电源
+    ///   - autoMinutes: 结束后按自动纪要的规则决定要不要排纪要（转写完成的自动路径）
+    /// - Returns: 是否在队列中
+    @discardableResult
+    public func enqueueCorrection(_ id: String, now: Bool = false, autoMinutes: Bool = false) -> Bool {
+        guard correctionMethod != nil, let m = host?.meeting(id), m.transcription != nil,
+              (try? store.loadTranscript(id)) != nil,
+              !(activeJob?.id == id && activeJob?.isCorrection == true) else { return false }
+        if let i = jobs.firstIndex(where: { $0.id == id && $0.isCorrection }) {
+            jobs[i].now = jobs[i].now || now
+            if autoMinutes { jobs[i].kind = .correction(autoMinutes: true) }
+        } else {
+            let job = Job(id: id, kind: .correction(autoMinutes: autoMinutes), now: now)
+            jobs.append(job)
+            setState(.queued, for: job)
+        }
+        startNext()
+        return true
+    }
+
+    /// 转写成功后调用：
+    /// 1. “纠错转写稿”开着就先排纠错（不看自动纪要开关、文字多少、纪要改没改过），纠错结束（成功或失败）后再走第 2 步
+    /// 2. 按自动纪要的规则（`wouldAutoGenerate`）决定要不要排纪要
+    ///
+    /// 返回纪要是否排了队，或者纠错结束后会按规则排队
+    @discardableResult
+    public func transcriptionFinished(_ id: String) -> Bool {
+        if correctsTranscripts, enqueueCorrection(id, autoMinutes: true) {
+            return wouldAutoGenerate(id)
+        }
+        return autoGenerateMinutes(id)
+    }
+
+    /// 自动纪要的规则：
     /// - 自动生成开着，转写稿有效文字不少于 `minimumTextCount`
     /// - 还没有纪要（含从未生成、上次失败），或者有纪要但修改数为 0（重新转写后出处已不准，重新生成，
     ///   沿用原来的模板）。有人工改动的不动，由界面提示“转写稿已重新生成”
     /// - 纪要文件读不了时不动，免得覆盖
-    @discardableResult
-    public func transcriptionFinished(_ id: String) -> Bool {
+    private func wouldAutoGenerate(_ id: String) -> Bool {
         guard autoGenerate, let transcript = try? store.loadTranscript(id),
               transcript.effectiveTextCount >= Self.minimumTextCount else { return false }
         guard case let .success(existing) = Result(catching: { try store.loadMinutes(id) }),
               (existing?.editCount ?? 0) == 0 else { return false }
-        return enqueue(id)
+        return true
+    }
+
+    /// 按自动纪要的规则排纪要，返回是否排了队
+    @discardableResult
+    private func autoGenerateMinutes(_ id: String) -> Bool {
+        wouldAutoGenerate(id) && enqueue(id)
     }
 
     /// App 启动时调用：上次退出时排队中或生成中的会议重新排队，生成中的从头生成。
     /// 队列顺序、“现在生成”、所选模板都不落盘：上次正在生成的排最前，其余按结束时间；
-    /// 模板沿用已有纪要的，没有就用“通用”
+    /// 模板沿用已有纪要的，没有就用“通用”。
+    ///
+    /// 纠错同理，先于纪要排。是不是自动路径不落盘，一律按自动路径恢复：结束后按自动纪要的规则决定要不要排纪要
+    /// （自动路径中途退出时纪要还没排，不这样就再也不会自动生成）。引擎不支持纠错时清掉纠错状态，直接按规则排纪要
     public func restore(_ meetings: [Meeting]) {
-        func rank(_ m: Meeting) -> Int { m.minutes?.status == .running ? 0 : 1 }
-        meetings
-            .filter { $0.minutes?.status == .queued || $0.minutes?.status == .running }
-            .sorted { (rank($0), $0.endedAt ?? $0.startedAt) < (rank($1), $1.endedAt ?? $1.startedAt) }
-            .forEach { enqueue($0.id) }
+        func pending(_ state: JobState?) -> Bool { state?.status == .queued || state?.status == .running }
+        func order(_ state: (Meeting) -> JobState?) -> [Meeting] {
+            func rank(_ m: Meeting) -> Int { state(m)?.status == .running ? 0 : 1 }
+            return meetings.filter { pending(state($0)) }
+                .sorted { (rank($0), $0.endedAt ?? $0.startedAt) < (rank($1), $1.endedAt ?? $1.startedAt) }
+        }
+        for m in order(\.correction) where !enqueueCorrection(m.id, autoMinutes: true) {
+            host?.setCorrection(nil, for: m.id)
+            autoGenerateMinutes(m.id)
+        }
+        order(\.minutes).forEach { enqueue($0.id) }
     }
 
     /// 会议即将被删除：移出队列，正在生成的立即取消。不写任何文件，也不再更新这场会议的状态
@@ -266,9 +361,10 @@ public final class MinutesPipeline {
     }
 
     /// 任务的状态写进对应的字段
-    private func setState(_ status: JobState.Status, for job: Job) {
+    private func setState(_ status: JobState.Status, error: String? = nil, for job: Job) {
         switch job.kind {
-        case .minutes: host?.setMinutes(MinutesState(status: status), for: job.id)
+        case .minutes: host?.setMinutes(MinutesState(status: status, error: error), for: job.id)
+        case .correction: host?.setCorrection(CorrectionState(status: status, error: error), for: job.id)
         }
     }
 
@@ -276,10 +372,13 @@ public final class MinutesPipeline {
         (try? store.loadMinutes(id))?.flatMap { MinutesTemplate(key: $0.template) } ?? .general
     }
 
-    /// 下一个能开始的任务在 jobs 里的位置
+    /// 下一个能开始的任务在 jobs 里的位置。纪要不越过同一场会议还在排队的纠错
     private var nextJob: Int? {
         guard !isSuspended, !isTranscriptionBusy, isModelDownloaded else { return nil }
-        return jobs.firstIndex { !requiresPower || isOnPower || $0.now }
+        return jobs.firstIndex { job in
+            (!requiresPower || isOnPower || job.now)
+                && !(job.isMinutes && jobs.contains { $0.id == job.id && $0.isCorrection })
+        }
     }
 
     /// 开始下一个能开始的任务。一个都开始不了、也没有被取消的任务还在用模型时，释放模型
@@ -293,6 +392,14 @@ public final class MinutesPipeline {
         guard let m = host?.meeting(job.id) else { return startNext() }
         switch job.kind {
         case let .minutes(template): startMinutes(job, template: template, meeting: m)
+        case let .correction(autoMinutes):
+            guard let method = correctionMethod else {
+                // 排队后引擎换成了还不支持纠错的：不跑、不报错，直接走纪要
+                host?.setCorrection(nil, for: job.id)
+                if autoMinutes { autoGenerateMinutes(job.id) }
+                return startNext()
+            }
+            startCorrection(job, method: method, autoMinutes: autoMinutes, meeting: m)
         }
     }
 
@@ -378,6 +485,70 @@ public final class MinutesPipeline {
         activeJob = nil
         startNext()
         if let outcome { onFinish?(id, outcome) }
+    }
+
+    private func startCorrection(_ job: Job, method: CorrectionMethod, autoMinutes: Bool, meeting m: Meeting) {
+        let previous = cancelled
+        let token = begin(job)
+        let generator = generator
+        let model = model
+        let hotwords = hotwords
+        // 以开始时的转写稿为准，写盘前再与最新的比对（`Transcript.applyCorrection`）
+        let snapshot = Result { try store.loadTranscript(job.id) }
+        let report: @Sendable (MinutesActivity) -> Void = { [weak self] a in
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                self.activity = a
+            }
+        }
+        task = Task(priority: .utility) { [weak self] in
+            await previous?.value
+            let result: Result<CorrectionResult, Error>
+            do {
+                try Task.checkCancellation()
+                self?.markLoaded(generator, token: token)
+                guard let transcript = try snapshot.get() else { throw CorrectionError.noTranscript }
+                try await generator.load { report(.loading($0)) }
+                report(.generating(0))
+                let review = try await correctTranscript(transcript, title: m.title, hotwords: hotwords, method: method,
+                                                         generator: generator, progress: { report(.generating($0)) })
+                let createdAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+                result = .success(CorrectionResult(snapshot: transcript, review: review, engine: model,
+                                                   createdAt: createdAt, hotwords: hotwords))
+            } catch {
+                result = .failure(error)
+            }
+            self?.finishCorrection(job, token: token, autoMinutes: autoMinutes, result: result)
+        }
+    }
+
+    /// 纠错结束：写盘前重读最新的转写稿再应用；失败只记失败状态。之后按需走自动纪要的规则，
+    /// 在决定释不释放模型之前排上纪要：纠错和纪要之间模型只加载一次
+    private func finishCorrection(_ job: Job, token: Int, autoMinutes: Bool, result: Result<CorrectionResult, Error>) {
+        guard token == generation, activeJob?.id == job.id, activeJob?.isCorrection == true else { return }
+        task = nil
+        let id = job.id
+        // 纠错期间会议被删除时什么都不写
+        if let host, host.meeting(id) != nil {
+            do {
+                let correction = try result.get()
+                guard var latest = try store.loadTranscript(id) else { throw CorrectionError.noTranscript }
+                try latest.applyCorrection(correction)
+                try store.saveTranscript(latest, for: id)
+                setState(.done, for: job)
+            } catch {
+                setState(.failed, error: error.localizedDescription, for: job)
+            }
+            // 此刻 activeJob 还是这个纠错：纪要照常入队，startNext 等下面清掉 activeJob 后才开始
+            if autoMinutes { autoGenerateMinutes(id) }
+        }
+        let switchedEngine = activeGenerator.map { !isSameGenerator($0, generator) } ?? false
+        // 下一个开始不了（或已切换引擎）就先释放旧模型，再让给转写
+        if nextJob == nil || switchedEngine { releaseModel() }
+        activity = nil
+        activeGenerator = nil
+        activeJob = nil
+        startNext()
     }
 
     private func cancelActive() {
