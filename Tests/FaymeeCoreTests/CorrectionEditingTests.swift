@@ -28,4 +28,83 @@ import Testing
     @Test func 没纠错过的句子没有下划线() {
         #expect(sentence("我们要避免对动", correction: nil).correctionHighlights.isEmpty)
     }
+
+    // MARK: - 数字建议
+
+    private let created = Date(timeIntervalSince1970: 1_794_279_660)
+    private let october = NumberSuggestion(sentence: "s2", from: "十月", to: "四月")
+
+    /// s1 纠错改过，s2 有一条数字建议「十月→四月」
+    private func corrected(_ suggestions: [NumberSuggestion]? = nil) -> Transcript {
+        let items: [TranscriptItem] = [
+            .sentence(TranscriptSentence(id: "s1", start: 0, end: 1, text: "我们要避免被动", correction: "我们要避免对动")),
+            .sentence(TranscriptSentence(id: "s2", start: 1, end: 2, text: "十月底上线")),
+        ]
+        var t = Transcript(engine: "apple/speechanalyzer", createdAt: created, hotwords: [], items: items)
+        t.correction = TranscriptCorrection(engine: "llama/qwen3.5-4b-q4km", createdAt: created, hotwords: [],
+                                            suggestions: suggestions ?? [october])
+        return t
+    }
+
+    @Test func 数字建议显示在那句旁() {
+        #expect(corrected().numberSuggestions == ["s2": [october]])
+        #expect(corrected([]).numberSuggestions.isEmpty)
+    }
+
+    @Test func 采纳建议按一处纠错处理_不算人工修改() {
+        var t = corrected()
+        let adopted = t.adopt(october)
+        #expect(adopted)
+        let s = t.sentences[1]
+        #expect(s.text == "四月底上线")
+        #expect(s.correction == "十月底上线")
+        #expect(s.original == nil)
+        #expect(t.editCount == 0)
+        #expect(t.correctedCount == 2)
+        #expect(s.correctionHighlights == [0..<1])  // 只有「十→四」变了
+        // 采纳后句子里不再有「十月」，建议不再显示
+        #expect(t.numberSuggestions.isEmpty)
+    }
+
+    @Test func 撤销采纳的建议_回到纠错前_建议重新显示() {
+        var t = corrected()
+        t.adopt(october)
+        let undone = t.undoCorrection(sentence: "s2")
+        #expect(undone)
+        #expect(t.sentences[1].text == "十月底上线")
+        #expect(t.sentences[1].correction == nil)
+        #expect(t.numberSuggestions == ["s2": [october]])
+    }
+
+    @Test func 纠错改过的句子再采纳_撤销回到最早的原文() {
+        let suggestion = NumberSuggestion(sentence: "s1", from: "要", to: "一")
+        var t = corrected([suggestion])
+        t.adopt(suggestion)
+        #expect(t.sentences[0].text == "我们一避免被动")
+        #expect(t.sentences[0].correction == "我们要避免对动")
+        t.undoCorrection(sentence: "s1")
+        #expect(t.sentences[0].text == "我们要避免对动")
+    }
+
+    @Test func 手动改过的句子_建议不显示也不能采纳() {
+        // 纠错不碰手动改过的句子，建议也一样
+        var t = corrected()
+        t.edit(sentence: "s2", to: "十月底上线吧")
+        #expect(t.numberSuggestions.isEmpty)
+        let adopted = t.adopt(october)
+        #expect(!adopted)
+        #expect(t.sentences[1].text == "十月底上线吧")
+    }
+
+    @Test func 原文在句子里不是恰好一次_建议不显示也不能采纳() {
+        // 「十月」出现两次：不知道该换哪一处
+        let items: [TranscriptItem] = [
+            .sentence(TranscriptSentence(id: "s2", start: 1, end: 2, text: "十月底上线，十月中提测")),
+        ]
+        var repeated = Transcript(engine: "apple/speechanalyzer", createdAt: created, hotwords: [], items: items)
+        repeated.correction = corrected().correction
+        #expect(repeated.numberSuggestions.isEmpty)
+        let adoptedRepeated = repeated.adopt(october)
+        #expect(!adoptedRepeated)
+    }
 }
